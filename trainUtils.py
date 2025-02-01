@@ -3,8 +3,8 @@ import math
 from tqdm import tqdm
 import torch
 import torch.nn as nn
-import torch.amp
-import contextlib
+import torch.nn.functional as F
+
 from torch.utils.tensorboard import SummaryWriter
 
 from params import *
@@ -12,28 +12,6 @@ from params import *
 USE_TENSORBOARD = True
 if(USE_TENSORBOARD):
     tensorboard_summary = SummaryWriter()
-
-class LrStepTracker:
-
-    def __init__(self, model_dim=512, warmup_steps=4000, init_steps=0):
-        # Store Values
-        self.warmup_steps = warmup_steps
-        self.model_dim = model_dim
-        self.init_steps = init_steps
-
-        # Begin Calculations
-        self.invsqrt_dim = (1 / math.sqrt(model_dim))
-        self.invsqrt_warmup = (1 / (warmup_steps * math.sqrt(warmup_steps)))
-
-    # step
-    def step(self, step):
-
-        step += self.init_steps
-        if(step <= self.warmup_steps):
-            return self.invsqrt_dim * self.invsqrt_warmup * step
-        else:
-            invsqrt_step = (1 / math.sqrt(step))
-            return self.invsqrt_dim * invsqrt_step
 
 def train(cur_epoch, model, dataloader, loss, opt, lr_scheduler=None, save_checkpoint_steps=1000, tensorboard_steps=200, device=None):
     loss_hist = []
@@ -43,19 +21,78 @@ def train(cur_epoch, model, dataloader, loss, opt, lr_scheduler=None, save_check
     model.train()
     with tqdm(total=len(dataloader)) as bar_train:
         for batch_num, batch in enumerate(dataloader):
-            #time_before = time.time()
+            x, tgt = batch  # Now x and tgt are dictionaries
 
-            x   = batch[0].to(device) # (2,2048)
-            tgt = batch[1].to(device) # (2, 2048)
+            # Move all tensors to device
+            x = {k: v.to(device) for k, v in x.items()}
+            tgt = tgt.to(device)  # Move target pitches to device
+            
+            y,e = model(x) # (2, 2048, 512)  # Model outputs pitch logits and encoder outputs
 
-            y= model(x) # (2, 2048, 512)
+            y   = y.reshape(y.shape[0] * y.shape[1], -1) #  # [B * T, pitch_vocab_size] shape(4096,512) , dictionary=512
+            tgt = tgt.flatten() # shape(4096) # [B * T]
 
-            y   = y.reshape(y.shape[0] * y.shape[1], -1) # shape(4096,512) , dictionary=512
-            tgt = tgt.flatten() # shape(4096) seq_len x batch_size
+            # Compute reconstruction loss (cross entropy between predicted and true pitches)
+            #loss_recons = loss.forward(y, tgt)
+            # Compute losses and update params
+            # loss_recons = cross entropy loss between predicted pitch sample list and true pitch sample list
+            loss_recons = loss.forward(y, tgt) 
+            #loss_recons = F.cross_entropy(y.view(-1, PIANO_NUM_KEYS), tgt.view(-1)) 
 
-            out = loss.forward(y, tgt)
+            # Regularize to encourage encoder to output in range [-1, 1]
+            # This implements Lmargin = Σ max(|encs(x)| − 1, 0)²:
+            # Penalizes encoder outputs that fall outside [-1, 1] range
+            # torch.abs(pre_iq_encoding) - 1: How far values are from the [-1,1] boundary
+            # torch.maximum(..., 0): Only penalize values outside the range
+            # torch.square: Square the penalty (makes loss smoother)
+            loss_margin = torch.square(
+                torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
+            ).mean()
+            
+            # Calculate contour penalty
+            #"We also contribute a musically motivated regularization strategy which gives the model an 
+            # awareness of melodic contour. By comparing the finite differences (musical intervals in semitones) 
+            # of the input ∆x to the finite differences of the real-valued encoder output ∆encs(x), 
+            # the Lcontour term encourages the encoder to produce "button contours" that match the shape 
+            # of the input melodic contours."
+            
+            # This implements Lcontour = Σ max(1 − ∆x∆encs(x), 0)²:
+            # Encourages button intervals to match piano note intervals in direction
 
-            out.backward()
+            # Calculate differences between consecutive notes/latents
+            # torch.diff(e, dim=1) = ∆encs(x) = e[:, 1:] - e[:, :-1]  # Button intervals
+            # torch.diff(k, dim=1) = ∆x = (k[:, 1:] - k[:, :-1]).float()  # Piano note intervals
+        
+            # Penalizes when the product/quotient is less than the margin
+            loss_contour = torch.square(
+                torch.maximum(
+                    1 - torch.diff(x['pitch'], dim=1).float() * torch.diff(e, dim=1),
+                    torch.zeros_like(e[:, 1:])
+                )
+            ).mean()
+
+            # Deviate Penalty
+            # Identifies when the same note is held (no pitch change)
+            # Penalizes any change in button values during held notes
+            # Helps maintain consistency in the mapping
+            # Identify held notes (where consecutive pitches are the same)
+            notes_held = (x['pitch'][:, 1:] == x['pitch'][:, :-1]).float()
+            # Penalize button changes when notes are held
+            loss_deviate = torch.square(
+                torch.diff(e, dim=1) * notes_held  # button contour * notes held
+            ).mean()
+
+            # Total loss
+            loss_total = torch.zeros_like(loss_recons)
+            loss_total += loss_recons
+            if LOSS_MARGIN_MULTIPLIER > 0:
+                loss_total += LOSS_MARGIN_MULTIPLIER * loss_margin
+            if LOSS_CONTOUR_MULTIPLIER > 0:
+                loss_total += LOSS_CONTOUR_MULTIPLIER * loss_contour
+            if LOSS_DEVIATE_MULTIPLIER > 0:
+                loss_total += LOSS_DEVIATE_MULTIPLIER * loss_deviate
+
+            loss_total.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             opt.step()
             opt.zero_grad()
@@ -64,9 +101,9 @@ def train(cur_epoch, model, dataloader, loss, opt, lr_scheduler=None, save_check
                 lr_scheduler.step()
 
             lr = opt.param_groups[0]['lr']
-            bar_train.set_description(f'Epoch: {cur_epoch} Loss: {float(out):.4} LR: {float(lr):.8}')
+            bar_train.set_description(f'Epoch: {cur_epoch} Loss: {float(loss_total):.4} LR: {float(lr):.8}')
             bar_train.update(1)
-            #loss_hist.append(out.item())
+            loss_hist.append(loss_total.item())
 
             
             if save_steps % save_checkpoint_steps == 0:
@@ -77,8 +114,13 @@ def train(cur_epoch, model, dataloader, loss, opt, lr_scheduler=None, save_check
             if save_steps % tensorboard_steps == 0:
                 total_steps =cur_epoch*len(dataloader)+save_steps
                 if(USE_TENSORBOARD):                
-                    tensorboard_summary.add_scalar("train_loss", out.item(), total_steps)
-                    tensorboard_summary.add_scalar("lr", lr, total_steps)
+                    tensorboard_summary.add_scalar("loss_recons", loss_recons.item(), save_steps)
+                    tensorboard_summary.add_scalar("loss_margin", loss_margin.item(),save_steps)
+                    tensorboard_summary.add_scalar("loss_contour", loss_contour.item(), save_steps)                   
+                    tensorboard_summary.add_scalar("loss_deviate", loss_deviate.item(), save_steps)                   
+                    tensorboard_summary.add_scalar("loss", loss_total.item(), save_steps) 
+                    perplexity = calculate_perplexity(e, NUM_BUTTONS)
+                    tensorboard_summary.add_scalar("perplexity", perplexity.item(), save_steps)
 
             save_steps +=1
             
@@ -108,110 +150,232 @@ def compute_accuracy(out, tgt):
     return acc
 
 
-def train_and_eval(cur_epoch, model, dataloader, dataloader_eval, loss, loss_eval, opt, lr_scheduler=None, save_checkpoint_steps=1000, tensorboard_steps=200, device=None, ctx=None):
+def train_and_eval(cur_epoch, model, dataloader, dataloader_eval, loss, loss_eval, opt, lr_scheduler=None, save_checkpoint_steps=1000, tensorboard_steps=200, device=None):
     loss_hist = []
     save_steps = 0
     out = -1
  
-     # Create AMP GradScaler
-    scaler = torch.amp.GradScaler() if torch.cuda.is_available() else None
-    # Get device type string and check if autocast is supported
-    if torch.cuda.is_available():
-        device_type = 'cuda'
-        use_autocast = True
-    elif torch.backends.mps.is_available():
-        device_type = 'mps'
-        use_autocast = False  # Disable autocast for MPS
-    else:
-        device_type = 'cpu'
-        use_autocast = False
-
-    # Use autocast only for CUDA, otherwise use a no-op context
-    autocast_context = torch.amp.autocast(device_type=device_type) if use_autocast else contextlib.nullcontext()
-
-
-    # Create iterator for evaluation
-    eval_iterator = iter(dataloader_eval)
-
     model.train()
     with tqdm(total=len(dataloader)) as bar_train:
         for batch_num, batch in enumerate(dataloader):
-            #time_before = time.time()
+            x, tgt = batch  # Now x and tgt are dictionaries
 
-            x   = batch[0].to(device) # (2,2048)
-            tgt = batch[1].to(device) # (2, 2048)
-
-            # Use autocast for mixed precision
-            with autocast_context:
-                y= model(x) # (2, 2048, 512)
-                y   = y.reshape(y.shape[0] * y.shape[1], -1) # shape(4096,512) , dictionary=512
-                tgt = tgt.flatten() # shape(4096) seq_len x batch_size
-                out = loss.forward(y, tgt)
-
-            # Scale the loss and backpropagate
-            # Replace standard backward/optimizer steps with AMP versions
-            # Use scaler only for CUDA
-            if scaler is not None:
-                scaler.scale(out).backward()
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-                scaler.step(opt)
-                scaler.update()
-            else:
-                out.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-                opt.step()
+            # Move all tensors to device
+            x = {k: v.to(device) for k, v in x.items()}
+            tgt = tgt.to(device)  # Move target pitches to device
             
+            y,e = model(x) # (2, 2048, 512)  # Model outputs pitch logits and encoder outputs
+
+            y   = y.reshape(y.shape[0] * y.shape[1], -1) #  # [B * T, pitch_vocab_size] shape(4096,512) , dictionary=512
+            tgt = tgt.flatten() # shape(4096) # [B * T]
+
+            # Compute reconstruction loss (cross entropy between predicted and true pitches)
+            #loss_recons = loss.forward(y, tgt)
+            # Compute losses and update params
+            # loss_recons = cross entropy loss between predicted pitch sample list and true pitch sample list
+            loss_recons = loss.forward(y, tgt) 
+            #loss_recons = F.cross_entropy(y.view(-1, PIANO_NUM_KEYS), tgt.view(-1)) 
+
+            # Regularize to encourage encoder to output in range [-1, 1]
+            # This implements Lmargin = Σ max(|encs(x)| − 1, 0)²:
+            # Penalizes encoder outputs that fall outside [-1, 1] range
+            # torch.abs(pre_iq_encoding) - 1: How far values are from the [-1,1] boundary
+            # torch.maximum(..., 0): Only penalize values outside the range
+            # torch.square: Square the penalty (makes loss smoother)
+            loss_margin = torch.square(
+                torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
+            ).mean()
+            
+            # Calculate contour penalty
+            #"We also contribute a musically motivated regularization strategy which gives the model an 
+            # awareness of melodic contour. By comparing the finite differences (musical intervals in semitones) 
+            # of the input ∆x to the finite differences of the real-valued encoder output ∆encs(x), 
+            # the Lcontour term encourages the encoder to produce "button contours" that match the shape 
+            # of the input melodic contours."
+            
+            # This implements Lcontour = Σ max(1 − ∆x∆encs(x), 0)²:
+            # Encourages button intervals to match piano note intervals in direction
+
+            # Calculate differences between consecutive notes/latents
+            # torch.diff(e, dim=1) = ∆encs(x) = e[:, 1:] - e[:, :-1]  # Button intervals
+            # torch.diff(k, dim=1) = ∆x = (k[:, 1:] - k[:, :-1]).float()  # Piano note intervals
+        
+            # Penalizes when the product/quotient is less than the margin
+            loss_contour = torch.square(
+                torch.maximum(
+                    1 - torch.diff(x['pitch'], dim=1).float() * torch.diff(e, dim=1),
+                    torch.zeros_like(e[:, 1:])
+                )
+            ).mean()
+
+            # Deviate Penalty
+            # Identifies when the same note is held (no pitch change)
+            # Penalizes any change in button values during held notes
+            # Helps maintain consistency in the mapping
+            # Identify held notes (where consecutive pitches are the same)
+            notes_held = (x['pitch'][:, 1:] == x['pitch'][:, :-1]).float()
+            # Penalize button changes when notes are held
+            loss_deviate = torch.square(
+                torch.diff(e, dim=1) * notes_held  # button contour * notes held
+            ).mean()
+
+            # Total loss
+            loss_total = torch.zeros_like(loss_recons)
+            loss_total += loss_recons
+            if LOSS_MARGIN_MULTIPLIER > 0:
+                loss_total += LOSS_MARGIN_MULTIPLIER * loss_margin
+            if LOSS_CONTOUR_MULTIPLIER > 0:
+                loss_total += LOSS_CONTOUR_MULTIPLIER * loss_contour
+            if LOSS_DEVIATE_MULTIPLIER > 0:
+                loss_total += LOSS_DEVIATE_MULTIPLIER * loss_deviate
+
+            loss_total.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            opt.step()
             opt.zero_grad()
 
             if(lr_scheduler is not None):
                 lr_scheduler.step()
 
             lr = opt.param_groups[0]['lr']
-            
-            #loss_value = out.item() if scaler is None else scaler.scale(out).item()
-
-            #if(save_steps % 10 ==0):
-            bar_train.set_description(f'Epoch: {cur_epoch} Loss: {float(out.item()):.4}')# LR: {float(lr):.8}')
+            bar_train.set_description(f'Epoch: {cur_epoch} Loss: {float(loss_total):.4} LR: {float(lr):.8}')
             bar_train.update(1)
-                #loss_hist.append(loss_value)
-
+            loss_hist.append(loss_total.item())
+            
             if save_steps % save_checkpoint_steps == 0:
+                total_steps =int(((cur_epoch-1)*len(dataloader)+save_steps )/tensorboard_steps)
                 print('Saving model progress. Please wait...')
-                print('checkpoint_' + str(cur_epoch) + '_epoch_' + str(save_steps) + '_steps_' + str(round(float(out.item()), 4)) + '_loss.pth')
-                torch.save(model.state_dict(), './SaveModel/gpt2_rpr_checkpoint_' + str(cur_epoch) + '_epoch_' + str(save_steps) + '_steps_' + str(round(float(out.item()), 4)) + '_loss.pth')
+                print('gpt2_rpr_checkpoint_' + str(cur_epoch) + '_epoch_' + str(total_steps) + '_steps_' + str(round(float(loss_total), 4)) + '_t_loss.pth')
+                torch.save(model.state_dict(), './SaveModel/gpt2_rpr_checkpoint_' + str(cur_epoch) + '_epoch_' + str(total_steps) + '_steps_' + str(round(float(loss_total), 4)) + '_t_loss.pth')
 
             if save_steps % tensorboard_steps == 0:
-                total_steps =((cur_epoch*len(dataloader))/tensorboard_steps)+save_steps
+                total_steps =int(((cur_epoch-1)*len(dataloader)+save_steps )/tensorboard_steps)
                 if(USE_TENSORBOARD):                
-                    tensorboard_summary.add_scalar("train_loss", out.item(), total_steps)
-                    tensorboard_summary.add_scalar("lr", lr, total_steps)
+                    tensorboard_summary.add_scalar("loss_recons", loss_recons.item(), total_steps)
+                    tensorboard_summary.add_scalar("loss_margin", loss_margin.item(),total_steps)
+                    tensorboard_summary.add_scalar("loss_contour", loss_contour.item(), total_steps)                   
+                    tensorboard_summary.add_scalar("loss_deviate", loss_deviate.item(), total_steps)                   
+                    tensorboard_summary.add_scalar("loss", loss_total.item(), total_steps) 
+                    perplexity = calculate_perplexity(e, NUM_BUTTONS)
+                    tensorboard_summary.add_scalar("perplexity", perplexity.item(), total_steps)
 
                 #### EVALUATION ####
-                # Get a single batch from the eval dataloader
+               # Get a single batch from evaluation dataloader
                 try:
-                    batch = next(iter(dataloader_eval)) # extract X,y from test dataloader
-                except StopIteration:
+                    batch = next(iter(dataloader_eval))
+                except StopIteration:  # In case the iterator is exhausted
                     dataloader_eval_iter = iter(dataloader_eval)
-                    batch = next(iter(dataloader_eval_iter)) # extract X,y from test dataloader
-           
-                x   = batch[0].to(device) # (2,2048)
-                tgt = batch[1].to(device) # (2, 2048)
+                    batch = next(dataloader_eval_iter)
+                #for batch_num, batch in enumerate(dataloader_eval):
+                x, tgt = batch  # Now x and tgt are dictionaries
+
+                # Move all tensors to device
+                x = {k: v.to(device) for k, v in x.items()}
+                tgt = tgt.to(device)  # Move target pitches to device
+
 
                 model.eval()
-                with torch.no_grad(), autocast_context:  # Use same context manager as training
-                    y= model(x) # (2, 2048, 512)
-                    y   = y.reshape(y.shape[0] * y.shape[1], -1) # shape(4096,512) , dictionary=512
-                    tgt = tgt.flatten() # shape(4096) seq_len x batch_size
-                    out = loss_eval.forward(y, tgt)
-                    
-                    if(USE_TENSORBOARD):                
-                        accuracy = float(compute_accuracy(y, tgt))
-                        tensorboard_summary.add_scalar("eval_loss", out.item(), total_steps)
-                        tensorboard_summary.add_scalar("accuracy", accuracy, total_steps)
-                model.train()
+                with torch.no_grad(): # deactivates autograd
+                    y,e = model(x) # (2, 2048, 512)  # Model outputs pitch logits and encoder outputs
+
+                    y   = y.reshape(y.shape[0] * y.shape[1], -1) #  # [B * T, pitch_vocab_size] shape(4096,512) , dictionary=512
+                    tgt = tgt.flatten() # shape(4096) # [B * T]
+    
+                    loss_recons_eval = loss_eval.forward(y, tgt) 
+                    loss_margin_eval = torch.square(
+                        torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
+                    ).mean()
+                    loss_contour_eval = torch.square(
+                        torch.maximum(
+                            1 - torch.diff(x['pitch'], dim=1).float() * torch.diff(e, dim=1),
+                            torch.zeros_like(e[:, 1:])
+                        )
+                    ).mean()
+
+                    notes_held_eval = (x['pitch'][:, 1:] == x['pitch'][:, :-1]).float()
+                    # Penalize button changes when notes are held
+                    loss_deviate_eval = torch.square(
+                        torch.diff(e, dim=1) * notes_held_eval  # button contour * notes held
+                    ).mean()
+
+                    # Total loss
+                    loss_total_eval = torch.zeros_like(loss_recons_eval)
+                    loss_total_eval += loss_recons_eval
+                    if LOSS_MARGIN_MULTIPLIER > 0:
+                        loss_total_eval += LOSS_MARGIN_MULTIPLIER * loss_margin_eval
+                    if LOSS_CONTOUR_MULTIPLIER > 0:
+                        loss_total_eval += LOSS_CONTOUR_MULTIPLIER * loss_contour_eval
+                    if LOSS_DEVIATE_MULTIPLIER > 0:
+                        loss_total_eval += LOSS_DEVIATE_MULTIPLIER * loss_deviate_eval
+
+                    #tensorboard_summary.add_scalar("eval_loss", loss_total_eval.item(), save_steps)
                 
-            save_steps +=1
+                    if(USE_TENSORBOARD):                
+                        tensorboard_summary.add_scalar("loss_recons_eval", loss_recons_eval.item(), total_steps)
+                        tensorboard_summary.add_scalar("loss_margin_eval", loss_margin_eval.item(),total_steps)
+                        tensorboard_summary.add_scalar("loss_contour_eval", loss_contour_eval.item(), total_steps)                   
+                        tensorboard_summary.add_scalar("loss_deviate_eval", loss_deviate_eval.item(), total_steps)                   
+                        tensorboard_summary.add_scalar("loss_total_eval", loss_total_eval.item(), total_steps) 
+
+                model.train()                
+                save_steps +=1
 
             
     return loss_hist
+
+def calculate_perplexity(e, num_buttons):
+    """Calculate perplexity of quantized encoder outputs
+    Perplexity measures how uniformly the encoder uses the available buttons.
+    
+    Args:
+        e (torch.Tensor): Encoder outputs [batch_size, seq_len]
+        num_buttons (int): Number of quantization bins (usually 8)
+    """
+    # Check which values are in valid range
+    inrange_mask = torch.logical_and(
+        e >= -1,
+        e <= 1
+    ).float()
+    
+    # Convert encoder outputs to discrete indices
+    e_discrete = (((e + 1) / 2) * (num_buttons - 1)).round().long()
+    
+    # Clamp the values to be within the valid range
+    e_discrete = torch.clamp(e_discrete, min=0, max=num_buttons-1)
+    # Convert to one-hot vectors
+    e_onehot = F.one_hot(e_discrete, num_buttons).float()
+    
+    # Calculate masked average probability of each quantization level
+    masked_sum = torch.sum(e_onehot * inrange_mask.unsqueeze(-1), dim=[0, 1])
+    mask_sum = torch.sum(inrange_mask)
+    avg_probs = masked_sum / (mask_sum + 1e-10)
+    
+    # Calculate perplexity as exp(entropy)
+    perplexity = torch.exp(-torch.sum(
+        avg_probs * torch.log(avg_probs + 1e-10)
+    ))
+    
+    return perplexity
+
+
+class LrStepTracker:
+
+    def __init__(self, model_dim=512, warmup_steps=4000, init_steps=0):
+        # Store Values
+        self.warmup_steps = warmup_steps
+        self.model_dim = model_dim
+        self.init_steps = init_steps
+
+        # Begin Calculations
+        self.invsqrt_dim = (1 / math.sqrt(model_dim))
+        self.invsqrt_warmup = (1 / (warmup_steps * math.sqrt(warmup_steps)))
+
+    # step
+    def step(self, step):
+
+        step += self.init_steps
+        if(step <= self.warmup_steps):
+            return self.invsqrt_dim * self.invsqrt_warmup * step
+        else:
+            invsqrt_step = (1 / math.sqrt(step))
+            return self.invsqrt_dim * invsqrt_step

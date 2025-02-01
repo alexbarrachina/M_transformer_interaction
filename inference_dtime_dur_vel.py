@@ -21,12 +21,11 @@ midi_file = './Samples/clairTester.midi'
 nameOut = './Out/inference_dtime'
 
 number_of_prime_notes = 128 # min:32, max:256
-number_of_tokens_to_play = 2048 
 target_seq_length = 2048
 temperature = 1.0 # min:0.1, max:1
 
 saved_perf_list = []
-SAVE_PERFORMANCE = True
+SAVE_PERFORMANCE = False
 
 '''THREADING'''
 # Add these at the global scope after your imports

@@ -1,8 +1,8 @@
 import random
 import os
 from tqdm import tqdm
-
-from midiUtils import midi2ms_score, Tegridy_Any_Pickle_File_Writer, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
+from params import *
+from midiUtils import midi2ms_score, Tegridy_Any_Pickle_File_Writer, time2quant, dur2quant, vel2quant
 
 # Process MIDIs
 
@@ -70,25 +70,26 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           for e in events_matrix:
               e[1] = time2quant(e[1])
               e[2] = dur2quant(e[2])
-          
-          # final processing...
+              # e[3] channel, e[4] pitch
+              e[5] = vel2quant(e[5]) # event velocity / 4 -> 128/4 = 32
 
-            # TODO comprovar l'ordre correcte
-          #train_data1.extend([0+PITCH_OFF, 126+0, 126+DUR_OFF, 0+VEL_OFF]) # Intro/Zero seq
-          train_data1.extend([126+0, 126+DUR_OFF, 0+PITCH_OFF, 0+VEL_OFF]) # Intro/Zero seq
+          # final processing...
+          # (dtime, vel, pitch, dur)
+          train_data1.extend([RANGE_DTIME_SHIFT, 0, 0, RANGE_DUR_SHIFT]) # Intro/Zero seq
 
           pe = events_matrix[0]
           for e in events_matrix:
 
-              time = max(0, min(126, e[1]-pe[1]))
-              dur = max(1, min(126, e[2]))
-              ptc = max(1, min(126, e[4]))
-              vel = max(1, min(126, e[5]))
+            assert e[4] < PIANO_NUM_KEYS + PIANO_LOWEST_KEY_MIDI_PITCH, "pitch must be less than 88+21"
+            time = max(0, min(RANGE_DTIME_SHIFT, e[1]-pe[1])) # time difference from previous events, but trunk to maximum 126
+            dur = max(1, min(RANGE_DUR_SHIFT, e[2])) # maximum duration 126
+            ptc = max(1, min(PIANO_NUM_KEYS, e[4] - PIANO_LOWEST_KEY_MIDI_PITCH)) # maximum pitch 88
+            vel = max(1, min(RANGE_VEL, e[5])) # maximum velocity 32
 
-              #train_data1.extend([ptc+PITCH_OFF, time+0, dur+DUR_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
-              train_data1.extend([time+0, dur+DUR_OFF, ptc+PITCH_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
+            #train_data1.extend([ptc+PITCH_OFF, time+0, dur+DUR_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
+            train_data1.extend([time, vel, ptc, dur]) # re-order with duration at the end
 
-              pe = e
+            pe = e
 
           files_count += 1
         

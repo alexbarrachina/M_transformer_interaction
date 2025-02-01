@@ -1,16 +1,12 @@
 import sys, struct, copy, os
 import pickle
 import inspect
-
-from params import DUR_OFF, PITCH_OFF, VEL_OFF, VOCAB_SIZE
-Version = '6.7'
-VersionDate = '20201120'
+from params import *
 
 _previous_warning = ''  # 5.4
 _previous_times = 0     # 5.4
 
 ''' definitions for quantizing and offsetting events '''
-
 
 # first quantize the time and duration, then calculate the time difference and maximum duration
 def time2quant(time):
@@ -25,30 +21,35 @@ def dur2quant(dur):
 def quant2dur(quant_dur):
     return quant_dur*20
 
-"""# TOKEN VALIDATION """
-def validate_token(token: int, position: int) -> bool:
-    # Token type sequence for validation
-    token_types = ['dt', 'dur', 'ptch', 'vel']
-    """Validates if token is in correct range for its position."""
-    token_type = token_types[position % 4]
-    print("tok",token, token_type)
-    valid = False
-    if token_type == 'dt':
-        valid = ( 0 <= token < DUR_OFF)
-    elif token_type == 'dur':
-        valid = (DUR_OFF <= token < PITCH_OFF)
-    elif token_type == 'ptch':
-        valid = (PITCH_OFF <= token < VEL_OFF)
-    elif token_type == 'vel':
-        valid = (VEL_OFF <= token < VOCAB_SIZE)
-        
-    if not valid:
-        print(f"Warning: Generated token {token} out of range at position {position}")   
-    return valid
+def vel2quant(vel):
+    return int(vel/4) # 128/4 = 32
 
-def what_token(position: int) -> int:
-    token_types = ['dt', 'dur', 'ptch', 'vel']
-    return token_types[position % 4]
+def quant2vel(quant_vel):
+    return quant_vel*4
+
+''' CONVERT MIDI LIST INTO DICTIONARY of ELEMENTS '''
+
+def list2dic(input):
+    output_dic = {
+        'dtime': input[0::4],  # Every 4th token starting at index 0
+        'vel': input[1::4],    # Every 4th token starting at index 1
+        'pitch': input[2::4],  # Every 4th token starting at index 2
+        'dur': input[3::4]     # Every 4th token starting at index 3
+    }
+    return output_dic
+
+def dic2list(input_dic):
+
+    seq_len = len(input_dic['dtime'])
+    output_list = [0] * (seq_len * 4)  # Preallocate list
+    
+    # Assign values using slices
+    output_list[0::4] = input_dic['dtime']  # Every 4th element starting at 0
+    output_list[1::4] = input_dic['vel']    # Every 4th element starting at 1
+    output_list[2::4] = input_dic['pitch']  # Every 4th element starting at 2
+    output_list[3::4] = input_dic['dur']    # Every 4th element starting at 3
+    
+    return output_list
 
 ''' LOGGING '''
 def log(message=None):
@@ -140,10 +141,10 @@ def Tegridy_Any_Pickle_File_Reader(input_file_name='TMIDI_Pickle_File', ext='.pi
 ###################################################################################
 
 def Tegridy_ms_SONG_to_MIDI_Converter(SONG,
-                                      output_signature = 'Xinxe-Model', 
-                                      track_name = 'Track1',
+                                      output_signature = 'Tegridy TMIDI Module', 
+                                      track_name = 'Composition Track',
                                       list_of_MIDI_patches = [0, 24, 32, 40, 42, 46, 56, 71, 73, 0, 0, 0, 0, 0, 0, 0],
-                                      output_file_name = 'xinxe-model',
+                                      output_file_name = 'TMIDI-Composition',
                                       text_encoding='ISO-8859-1',
                                       verbose=True):
 
@@ -165,8 +166,8 @@ def Tegridy_ms_SONG_to_MIDI_Converter(SONG,
     if verbose:
         print('Converting to MIDI. Please stand-by...')
 
-    output_header = [480, # default resolution 480 ticks = 1 quarter note
-                    [['set_tempo', 0, 500000], # microseconds per quarter note. default 60bpm
+    output_header = [1000,
+                    [['set_tempo', 0, 1000000],
                      ['time_signature', 0, 4, 2, 24, 8],
                      ['track_name', 0, bytes(output_signature, text_encoding)]]]
 
@@ -228,7 +229,8 @@ def get_midifile_data(midi_file):
     for e in events_matrix:
         e[1] = time2quant(e[1]) # event time / 10
         e[2] = dur2quant(e[2]) # event duration / 20
-
+        # e[3] channel, e[4] pitch
+        e[5] = vel2quant(e[4]) # event velocity / 4 -> 128/4 = 32
     # final processing...
     melody_chords = []
     pe = events_matrix[0] # the first event
@@ -236,14 +238,15 @@ def get_midifile_data(midi_file):
     for e in events_matrix:
 
         # calculate delta time and duration
-        time = max(0, min(126, e[1]-pe[1])) # time difference from previous events, but trunk to maximum 126
-        dur = max(1, min(126, e[2])) # maximum duration 126
+        time = max(0, min(RANGE_DTIME_SHIFT, e[1]-pe[1])) # time difference from previous events, but trunk to maximum 126
+        dur = max(1, min(RANGE_DUR_SHIFT, e[2])) # maximum duration 126
 
-        ptc = max(1, min(126, e[4])) # maximum pitch 126
-        vel = max(1, min(126, e[5])) # maximum velocity 126
+        assert ptc < PIANO_NUM_KEYS + PIANO_LOWEST_KEY_MIDI_PITCH, "pitch must be less than 88+21"
+        ptc = max(1, min(PIANO_NUM_KEYS, e[4] - PIANO_LOWEST_KEY_MIDI_PITCH)) # maximum pitch 88
+        vel = max(1, min(RANGE_VEL, e[5])) # maximum velocity 32
 
         # add offsets to the events to differenciate them in a vocab
-        melody_chords.append([time, dur+DUR_OFF, ptc+PITCH_OFF, vel+VEL_OFF]) # 384 = 128*3 all events, melodies + chords
+        melody_chords.append([time, vel, ptc, dur]) 
         pe = e
 
     inputs = []
@@ -282,21 +285,17 @@ def generate_midifile_from_list(out1, nameOut):
 
           time += quant2time(s[0]) # total time
 
-          dur = quant2dur(s[1]-DUR_OFF) # duration
-
+          vel = quant2vel(s[1])
           channel = 0
-
-          pitch = s[2]-PITCH_OFF
-
-          vel = s[3]-VEL_OFF
-
+          pitch = s[2] + PIANO_LOWEST_KEY_MIDI_PITCH
+          dur = quant2dur(s[3]) # duration
           song_f.append(['note', time, dur, channel, pitch, vel ])
 
 
       detailed_stats = Tegridy_ms_SONG_to_MIDI_Converter(song_f,
-                                                                output_signature = 'test',
+                                                                output_signature = 'GIGA-Piano XL',
                                                                 output_file_name = nameOut,
-                                                                track_name='test',
+                                                                track_name='Project Los Angeles',
                                                                 list_of_MIDI_patches=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
                                                                 )
 
@@ -1125,7 +1124,7 @@ def _some_text_event(which_kind=0x01, text=b'some_text', text_encoding='ISO-8859
 
 #------------------------ Other Transformations ---------------------
 
-def to_millisecs(old_opus=None, desired_time_in_ms=2):
+def to_millisecs(old_opus=None, desired_time_in_ms=1):
     r'''Recallibrates all the times in an "opus" to use one beat
 per second and one tick per millisecond.  This makes it
 hard to retrieve any information about beats or barlines,
@@ -1137,13 +1136,8 @@ but it does make it easy to mix different scores together.
         old_tpq  = int(old_opus[0])
     except IndexError:   # 5.0
         _warn('to_millisecs: the opus '+str(type(old_opus))+' has no elements')
-        return [1000 * desired_time_in_ms, [['set_tempo', 0, 500000]],]  # Default tempo (120 BPM)
-    
+        return [1000 * desired_time_in_ms,[],]
     new_opus = [1000 * desired_time_in_ms,]
-    
-    # First track should contain tempo information
-    new_opus.append([['set_tempo', 0, 500000]])  # Add default tempo track if none exists
-    
     # 6.7 first go through building a table of set_tempos by absolute-tick
     ticks2tempo = {}
     itrack = 1
@@ -1156,22 +1150,16 @@ but it does make it easy to mix different scores together.
             if old_event[0] == 'set_tempo':
                 ticks2tempo[ticks_so_far] = old_event[2]
         itrack += 1
-    
-    # If no tempo events found, use default tempo
-    if not ticks2tempo:
-        ticks2tempo[0] = 500000  # 120 BPM
-    
     # then get the sorted-array of their keys
     tempo_ticks = []  # list of keys
     for k in ticks2tempo.keys():
         tempo_ticks.append(k)
     tempo_ticks.sort()
-    
     # then go through converting to millisec, testing if the next
     # set_tempo lies before the next track-event, and using it if so.
     itrack = 1
     while itrack < len(old_opus):
-        ms_per_old_tick = 500000 / (1000.0 * old_tpq)  # Start with default tempo (120 BPM)
+        ms_per_old_tick = 400 / old_tpq  # float: will round later 6.3
         i_tempo_ticks = 0
         ticks_so_far = 0
         ms_so_far = 0.0
