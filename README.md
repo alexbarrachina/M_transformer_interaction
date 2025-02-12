@@ -1,22 +1,28 @@
-## inference_generate_single 
-non-interactive functions to test sequences with 
-- simple accumulative buffer
-- fixed-length circular buffer
-- circular buffer that accumulates til full, then removes the first 4 tokens every step
-- circular buffer that preserve the primer. Accumulates til full, then circulates, removing the 4 first tokens after the primer.
+# GIGA-Piano XL
+## SOTA Piano Transformer model trained on 4.2GB of Solo Piano MIDI music
+## Everything you wanted to hear from original GIGA-Piano but were afraid to ask for :)
 
-## inference_dtime 
-interactive, the performer fixes dtime (via midi in), while dur, vel and pitch are inferenced
+***
 
-## inference_dtime_dur_vel 
-interactive, the performer fixes dtime, dur, and vel (via midi in) and pitch is inferenced.
-the performer can fix everything (inject in the context)
+![DALL·E 2022-10-10 12 00 08 - beautiful grand piano, oil colors, extreme details, vivid, surreal](https://user-images.githubusercontent.com/56325539/194936328-4a3b6406-83c3-4f9b-9ffc-2d3a410363c3.png)
 
-
-
-# start tensorboard:
-   tensorboard --logdir=./rpr
+***
 
 ### Original Version
 
+[![Open In Colab][colab-badge]][colab-notebook3]
 
+[colab-notebook3]: <https://colab.research.google.com/github/asigalov61/GIGA-Piano-XL/blob/main/GIGA_Piano_XL.ipynb>
+[colab-badge]: <https://colab.research.google.com/assets/colab-badge.svg>
+
+### Features include:
+### 1) Single Continuation
+### 2) Auto-Continuations
+### 3) Inpainting
+### 4) Melody Harmonization
+### 5) Notes/Chords Progressions
+
+***
+
+### Project Los Angeles
+### Tegridy Code 2023

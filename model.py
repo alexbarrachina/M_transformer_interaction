@@ -14,7 +14,6 @@ from torch.nn.init import *
 from torch.nn.functional import linear, softmax, dropout
 
 from params import *
-from midiUtils import validate_token, what_token
 
 ########################################################
 
@@ -321,8 +320,8 @@ class GPT(nn.Module):
         # forward the GPT model
         token_embeddings = self.tok_emb(idx) # each index maps to a (learnable) vector (2,2048, 1024)
         position_embeddings = self.pos_emb[:, :t, :] # each position maps to a (learnable) vector (1,2048, 1024)
-        x = self.drop(token_embeddings + position_embeddings)        
-        #x = token_embeddings + position_embeddings # (2,2048,1024)
+        x = self.drop(token_embeddings + position_embeddings)
+        x = token_embeddings + position_embeddings # (2,2048,1024)
         #if self.enable_rpr:
         x = x.permute(1,0,2) # x shape (2048, 2, 1024)
         for module in self.blocks:
@@ -417,7 +416,6 @@ class GPT(nn.Module):
 
                 distrib = torch.distributions.categorical.Categorical(probs=token_probs)
                 next_token = distrib.sample() 
-                print("next_token",next_token)
                 gen_seq[:, cur_i] = next_token
 
                 cur_i += 1
@@ -427,7 +425,6 @@ class GPT(nn.Module):
         return gen_seq[:, :cur_i] #shape(2,513)
     
     @torch.jit.export
-
     def generate_single(self, 
                         seq: torch.Tensor, 
                         temperature: float=1.0) -> torch.Tensor:
@@ -439,9 +436,9 @@ class GPT(nn.Module):
             
             y = self.softmax(logits)[..., :]
             # Fix the temperature handling
-            temp = torch.tensor(temperature if temperature > 0 else 1.0, device=device)
+            temp = (temperature if temperature > 0 else 1.0)
 
-            token_probs = y[:, -1, :] / temp
+            token_probs = y[:, seq.shape[1]-1, :] / temp # seq[0] batches seq[1] seq len
             #token_probs = y[:, len(seq)-1, :] / temp
 
             #epsilon = 1e-8
@@ -449,57 +446,12 @@ class GPT(nn.Module):
             #token_probs = token_probs + epsilon # avoiding values too close to zero
             token_probs = token_probs / token_probs.sum(dim=-1, keepdim=True) # re-normalization
 
-            if token_probs.device.type == 'mps':
-                token_probs = token_probs.to('cpu')
             #next_token = torch.multinomial(token_probs, num_samples=1)
             distrib = torch.distributions.categorical.Categorical(probs=token_probs)
             next_token = distrib.sample()
-            if next_token.device.type == 'cpu':
-                next_token = next_token.to(device)
-            return next_token
-
-    @torch.jit.export
-    def generate_single_by_type(self, 
-                        seq: torch.Tensor, 
-                        position: int,
-                        temperature: float=1.0) -> torch.Tensor:
-
-        device = seq.device
-        # Forward pass with inference-specific behaviors (e.g., dropout disabled)
-        with torch.no_grad():  # Disable gradient calculations for efficiency
-            logits = self.forward(seq) # size (batches, seq_len)
-            # Fix the temperature handling
-            temp = torch.tensor(temperature if temperature > 0 else 1.0, device=device)
-            scaled_logits = logits[:, -1, :] / temp
-
-            token_probs = self.softmax(scaled_logits)[..., :]
-            token_probs = torch.clamp(token_probs, min=1e-8, max=1)
-            token_probs = token_probs / token_probs.sum(dim=-1, keepdim=True) # re-normalization
-
-            distrib = torch.distributions.categorical.Categorical(probs=token_probs)
-            next_token = distrib.sample()
-
-            # re-sample with explicit constraints if token is not valid
-            if not validate_token(next_token.item(), position):
-                token_type = what_token(position)
-                if token_type == 'dt':
-                    scaled_logits[:, DUR_OFF:] = -float('inf')
-                elif token_type == 'dur':
-                    scaled_logits[:, DUR_OFF:PITCH_OFF] = -float('inf')
-                elif token_type == 'ptch':
-                    scaled_logits[:, PITCH_OFF:VEL_OFF] = -float('inf')
-                elif token_type == 'vel':
-                    scaled_logits[:, VEL_OFF:] = -float('inf')  
-
-                token_probs = self.softmax(scaled_logits)[..., :]
-                token_probs = torch.clamp(token_probs, min=1e-8, max=1)
-                token_probs = token_probs / token_probs.sum(dim=-1, keepdim=True) # re-normalization
-
-                distrib = torch.distributions.categorical.Categorical(probs=token_probs)
-                next_token = distrib.sample()
 
             return next_token
-
+  
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
         r"""Generate a square mask for the sequence. The masked positions are filled with float('-inf').
@@ -520,9 +472,9 @@ class GPTWrapper(nn.Module):
           
 class GPTConfig:
     """ base GPT config, params common to all GPT versions """
-    embd_pdrop: Final[float] = DROPOUT
-    resid_pdrop: Final[float]  = DROPOUT
-    attn_pdrop: Final[float]  = DROPOUT
+    embd_pdrop: Final[float] = 0.1
+    resid_pdrop: Final[float]  = 0.1
+    attn_pdrop: Final[float]  = 0.1
     vocab_size:  Final[int]
     block_size:  Final[int]
     dim_feedforward:  Final[int]

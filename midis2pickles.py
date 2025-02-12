@@ -2,7 +2,7 @@ import random
 import os
 from tqdm import tqdm
 
-from midiUtils import midi2ms_score, Tegridy_Any_Pickle_File_Writer, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
+from midiUtils import midi2ms_score, Tegridy_Any_Pickle_File_Writer
 
 # Process MIDIs
 
@@ -20,7 +20,7 @@ train_data1 = []
 ###########
 
 # dataset_addr = "./Samples"  # when testing
-dataset_addr = "../../../DataSets/MIDI/giantMIDI/sel"
+dataset_addr = "../../../DataSets/MIDI/piano_jazz/sel"
 
 filez = list()
 for (dirpath, dirnames, filenames) in os.walk(dataset_addr):
@@ -68,14 +68,12 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
 
           # recalculating timings
           for e in events_matrix:
-              e[1] = time2quant(e[1])
-              e[2] = dur2quant(e[2])
+              e[1] = int(e[1] / 10)
+              e[2] = int(e[2] / 20)
           
           # final processing...
 
-            # TODO comprovar l'ordre correcte
-          #train_data1.extend([0+PITCH_OFF, 126+0, 126+DUR_OFF, 0+VEL_OFF]) # Intro/Zero seq
-          train_data1.extend([126+0, 126+DUR_OFF, 0+PITCH_OFF, 0+VEL_OFF]) # Intro/Zero seq
+          train_data1.extend([0+256, 126+0, 126+128, 0+384]) # Intro/Zero seq
 
           pe = events_matrix[0]
           for e in events_matrix:
@@ -85,8 +83,7 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
               ptc = max(1, min(126, e[4]))
               vel = max(1, min(126, e[5]))
 
-              #train_data1.extend([ptc+PITCH_OFF, time+0, dur+DUR_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
-              train_data1.extend([time+0, dur+DUR_OFF, ptc+PITCH_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
+              train_data1.extend([ptc+256, time+0, dur+128, vel+384]) # re-order to priorize pitch output first
 
               pe = e
 

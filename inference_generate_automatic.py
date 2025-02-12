@@ -3,23 +3,114 @@
 (but it's extracted from midi files)'''
 
 from model import *
-from midiUtils import get_midifile_data, generate_midifile_from_list, PITCH_OFF, VEL_OFF, DUR_OFF, VOCAB_SIZE
+from midiUtils import get_midifile_data, generate_midifile_from_list
 
 """# SETTINGS """
 # Play with the settings to get different results
 full_path_to_model_checkpoint = "./SaveModel/giantMIDI_Sel_latency_412000_steps_0.0564_loss.pth" 
 primer_file = './Samples/clairTester_to_end.midi'
-condition_file = './Samples/gymnopedies.mid'
-output_file = './Out/Clair_gymnopedies_dtime'
+condition_file = './Samples/clairTester_to_end.midi'
+output_file = './Out/Clair_automatic_primer_dtime_128tok_circular'
 
 number_of_prime_notes = 128 # min:32, max:256
 number_primer_tokens = number_of_prime_notes*4
 number_of_tokens_to_generate = 1024 # min:512, max:1920
 temperature = 1.0 # min:0.1, max:1
 
-
+PITCH_OFF = 256
+DUR_OFF = 128
+VEL_OFF = 384
 
 """# RECURSIVE FUNCTION """
+
+def generate_conditioned_w_original_dtime(
+        primer=None, 
+        temperature=1, 
+        num_batches=1, 
+        verbose=True):
+
+    num_generated = len(primer) # primer shape (512)
+    num_primer = number_of_prime_notes*4
+    saved_perf_list = []
+    
+    gen_seq = torch.full((num_batches,num_generated), TOKEN_PAD, dtype=torch.long, device=device) # shape(2,1024)
+    gen_seq[..., :num_generated] = torch.tensor(primer, dtype=torch.long, device=device) # shape(2, 512)
+    saved_perf_list[:num_primer] = primer[:num_primer]
+
+    cur_i = num_primer
+
+    while(cur_i < number_of_tokens_to_generate-4):
+        # Update dtime token
+        dtime = gen_seq[...,cur_i][0].item()
+        print("-",dtime)
+#        gen_seq[...,cur_i] = torch.tensor(dtime, dtype=torch.long, device=device)
+        saved_perf_list.append(dtime)
+#        next_token = model.generate_single(gen_seq[...,:cur_i])
+        #gen_seq[...,cur_i] = next_token
+        #saved_perf_list.append(next_token.item())
+        # Update duration token
+        next_token = model.generate_single(gen_seq[...,:cur_i+1])
+        gen_seq[:,cur_i+1] = next_token
+        saved_perf_list.append(next_token.item())
+        # inference pitch'''
+        next_token = model.generate_single(gen_seq[...,:cur_i+2])
+        gen_seq[:,cur_i+2] = next_token
+        saved_perf_list.append(next_token.item())
+        # inference velocity
+        next_token = model.generate_single(gen_seq[...,:cur_i+3])
+        gen_seq[:,cur_i+3] = next_token
+        saved_perf_list.append(next_token.item())
+        cur_i += 4        
+        
+    return saved_perf_list
+
+def generate_conditioned_w_original_dtime_circular(
+        primer=None, 
+        num_primer=512,
+        max_buf_len=512+128,
+        total_seq_len=1024,
+        temperature=1, 
+        num_batches=1, 
+        verbose=True):
+
+    num_generated = len(primer) # primer shape (512)
+    num_primer = number_of_prime_notes*4
+    saved_perf_list = []
+    
+    gen_seq = torch.full((num_batches,num_generated), TOKEN_PAD, dtype=torch.long, device=device) # shape(2,1024)
+    gen_seq[..., :num_generated] = torch.tensor(primer, dtype=torch.long, device=device) # shape(2, 512)
+    saved_perf_list[:num_primer] = primer[:num_primer]
+
+    cur_i = num_primer
+
+         
+    while(cur_i < total_seq_len-4):
+        # Update dtime token
+        dtime = gen_seq[...,cur_i][0].item()
+        print("-",dtime)
+#        gen_seq[...,cur_i] = torch.tensor(dtime, dtype=torch.long, device=device)
+        saved_perf_list.append(dtime)
+#        next_token = model.generate_single(gen_seq[...,:cur_i])
+        #gen_seq[...,cur_i] = next_token
+        #saved_perf_list.append(next_token.item())
+        # Update duration token
+        next_token = model.generate_single(gen_seq[...,:cur_i+1])
+        gen_seq[:,cur_i+1] = next_token
+        saved_perf_list.append(next_token.item())
+        # inference pitch'''
+        next_token = model.generate_single(gen_seq[...,:cur_i+2])
+        gen_seq[:,cur_i+2] = next_token
+        saved_perf_list.append(next_token.item())
+        # inference velocity
+        next_token = model.generate_single(gen_seq[...,:cur_i+3])
+        gen_seq[:,cur_i+3] = next_token
+        saved_perf_list.append(next_token.item())
+        cur_i += 4        
+        
+             # Keep primer untouched and shift left the rest 4 tokens
+        gen_seq[..., num_primer:] = torch.roll(gen_seq[..., num_primer:], shifts=-4, dims=-1)
+
+    return saved_perf_list
 
 def generate_conditioned_dtime(
         primer=None, 
@@ -52,15 +143,15 @@ def generate_conditioned_dtime(
         #saved_perf_list.append(next_token.item())
         # Update duration token
         next_token = model.generate_single(gen_seq[...,:cur_i+1])
-        gen_seq[...,cur_i+1] = next_token
+        gen_seq[:,cur_i+1] = next_token
         saved_perf_list.append(next_token.item())
         # inference pitch'''
         next_token = model.generate_single(gen_seq[...,:cur_i+2])
-        gen_seq[...,cur_i+2] = next_token
+        gen_seq[:,cur_i+2] = next_token
         saved_perf_list.append(next_token.item())
         # inference velocity
         next_token = model.generate_single(gen_seq[...,:cur_i+3])
-        gen_seq[...,cur_i+3] = next_token
+        gen_seq[:,cur_i+3] = next_token
         saved_perf_list.append(next_token.item())
         cur_i += 4        
         cond_i += 4
@@ -253,7 +344,7 @@ def generate_circular_mantain_primer(
 
 if torch.backends.mps.is_available(): 
   #model_precision = "float32" # @param ["bfloat16", "float16", "float32"]
-  device = torch.device("mps")
+  device = torch.device("cpu")
 else:
   model_precision = "bfloat16"
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -285,7 +376,13 @@ model = GPT(config)
 
 #model = torch.nn.DataParallel(model)
 
-model.load_state_dict(torch.load(full_path_to_model_checkpoint, map_location=device))
+state_dict = torch.load(full_path_to_model_checkpoint, map_location=device)
+new_state_dict = {}
+for k, v in state_dict.items():
+    name = k.replace('module.', '') # Remove 'module.' prefix
+    new_state_dict[name] = v
+
+model.load_state_dict(new_state_dict)
 model.to(device)
 model.eval()
 
@@ -302,6 +399,8 @@ inp = primer[:number_of_prime_notes*4] # 128*4 = 512
 
 for i in range(10):
     print("Generating file", i)
-    out = generate_conditioned_dtime(inp, condition)
+    out = generate_conditioned_w_original_dtime_circular(primer)
+    #out = generate_conditioned_w_original_dtime(condition)
+#    out = generate_batches(inp)
     generate_midifile_from_list(out, output_file+str(i)) 
 

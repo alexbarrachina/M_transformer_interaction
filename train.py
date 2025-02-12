@@ -15,6 +15,18 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from params import *
 
+""" SET HYPERPARAMETERS """
+
+
+SEQ_LEN = 2048 # block_size
+DIC_SIZE = 512 # vocab_size
+BATCH_SIZE = 2 # Change this to your specs (4 batches per 48GB)
+DIM_FEEDFORWARD = 2048 # Size of the feedforward linear layer after attention
+N_LAYERS = 24 # Number of layers
+N_HEADS = 8 # Number of attention heads
+N_EMBED = 1024 # Number of embeddings
+EPOCHS = 5 # Number of epochs
+NUM_WORKERS = 27 # Number of workers    
 
 config = GPTConfig(DIC_SIZE, # vocab_size
                    SEQ_LEN, # block_size
