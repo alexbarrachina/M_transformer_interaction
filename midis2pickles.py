@@ -2,9 +2,26 @@ import random
 import os
 from tqdm import tqdm
 
-from midiUtils import midi2ms_score, Tegridy_Any_Pickle_File_Writer, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
+from TMIDIX import midi2ms_score, Tegridy_Any_Pickle_File_Writer#, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
+
+# Offsets create non-overlapping ranges for each token type
+# DTIME 0-127
+DUR_OFF = 128
+# DUR 128-255
+PITCH_OFF = 256
+# PITCH 256-383
+VEL_OFF = 384
+# VEL 384-511
 
 # Process MIDIs
+
+# first quantize the time and duration, then calculate the time difference and maximum duration
+def time2quant(time):
+    return int(time/10)
+
+def dur2quant(dur):
+    return int(dur/20)
+
 
 sorted_or_random_file_loading_order = False # Sorted order is NOT usually recommended
 dataset_ratio = 1 # Change this if you need more data
@@ -20,7 +37,7 @@ train_data1 = []
 ###########
 
 # dataset_addr = "./Samples"  # when testing
-dataset_addr = "../../../DataSets/MIDI/giantMIDI/sel"
+dataset_addr = "../../../DataSets/MIDI/giantMIDI/test"
 
 filez = list()
 for (dirpath, dirnames, filenames) in os.walk(dataset_addr):
