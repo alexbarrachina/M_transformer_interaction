@@ -3,62 +3,97 @@ import torch
 
 ########################################################
 
+''' TESTING '''
+TESTING = False
+LIGHT_MODEL = True
+
+''' MODEL '''
+# constants
+if LIGHT_MODEL:
+    SEQ_LEN = 256 # orig 2048
+    NUM_LAYERS = 4
+    EMB_DIM = 512 # 2048
+    NUM_HEADS = 32
+else:
+    SEQ_LEN = 2048 # orig 2048
+    NUM_LAYERS = 4
+    EMB_DIM = 2048 # 2048
+    NUM_HEADS = 32
+
+''' TRAINING '''
+# Taken from the paper
+if torch.cuda.is_available(): # on pepinón
+    #BATCH_SIZE = 3 #2 # Change this to your specs (4 batches per 48GB)
+    #BATCH_SIZE = 116 # original
+    if TESTING:
+        BATCH_SIZE = 1
+    else:
+        BATCH_SIZE = 20 
+    WORKERS = 4
+    # Path to your locally saved dataset
+    local_dataset_path = "../Datasets/asigalov61___monster-piano"
+    print("using CUDA")
+else: # on macbook pro  
+    BATCH_SIZE = 1  
+    WORKERS = 1
+    local_dataset_path = "../../../Datasets/MIDI/asigalov61___monster-piano"
+    print("using CPU")
+    
+VALIDATE_EVERY  = 500
+SAVE_EVERY = 50000
+GENERATE_EVERY  = 1000
+GENERATE_LENGTH = 512
+PRINT_STATS_EVERY = 50
+
+NUM_EPOCHS = 10
+
+LEARNING_RATE = 1e-4
+GRAD_CLIP = 1.5
+
+LOSS_MARGIN_MULTIPLIER:Final[float] = 0.01 # TODO decide values
+LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.01
+LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.01
+
+USE_TENSORBOARD = True
+
+
 ''' VOCABULARY '''
 
-# Offsets create non-overlapping ranges for each token type
-# DTIME 0-127
-DUR_OFF = 128
-# DUR 128-255
-PITCH_OFF = 256
-# PITCH 256-383
-VEL_OFF = 384
-# VEL 384-511
+#PIANO_NUM_KEYS:Final[int] = 88 
+VOCAB_SIZE_PITCH:Final[int] = 128
+#PIANO_LOWEST_KEY_MIDI_PITCH:Final[int] = 21
+SOS:Final[int] = 127
+PAD_IDX = 128 # 384 # Model pad index
 
-TOKEN_END = 511 # not using explicit end tokens in the dataset. It works in fixed length sequences
-TOKEN_PAD = TOKEN_END # fill sequences to a fixed length. Ignored in loss computation. The model should not learn to predict it
-VOCAB_SIZE = TOKEN_END+1
+NUM_BUTTONS:Final[int] = 12
+SOS_BUTTONS:Final[int] = NUM_BUTTONS
+VOCAB_SIZE_BUTTONS:Final[int] = NUM_BUTTONS + 1
 
-''' HYPERPARAMETERS '''
+RANGE_DTIME_SHIFT:Final[int] = 127
+VOCAB_SIZE_DTIME:Final[int] = RANGE_DTIME_SHIFT + 1
 
-SEQ_LEN = 1024 # block_size 2048
-DIC_SIZE = VOCAB_SIZE # vocab_size 513
-BATCH_SIZE = 8 # Change this to your specs (4 batches per 48GB)
-DIM_FEEDFORWARD = 2048 # Size of the feedforward linear layer after attention
-N_LAYERS = 24 # 24 Number of layers
-N_HEADS = 8 # Number of attention heads
-N_EMBED = 1024 # Number of embeddings
-EPOCHS = 5 # Number of epochs
-if torch.cuda.is_available():
-    NUM_WORKERS = 27 # Number of workers    
-else:
-    NUM_WORKERS = 0 # Number of workers
+RANGE_DUR_SHIFT:Final[int] = 127
+VOCAB_SIZE_DUR:Final[int] = RANGE_DUR_SHIFT + 1
 
-# Taken from the paper
-ADAM_BETA_1:Final[float]             = 0.9
-ADAM_BETA_2:Final[float]             = 0.98
-ADAM_EPSILON :Final[float]           = 10e-9
-LR_DEFAULT_START :Final[float]       = 0.0001 # 1.0 
-SCHEDULER_WARMUP_STEPS:Final[int]  = 4000
-ADAM_WEIGHT_DECAY:Final[float] = 0.01
+RANGE_VEL:Final[int] = 127 
+VOCAB_SIZE_VEL:Final[int] = RANGE_VEL + 1
 
-DROPOUT:Final[float] = 0.1
+OFFSET_DTIME:Final[int] = 0
+OFFSET_DUR:Final[int] = 128
+OFFSET_PITCH:Final[int] = 256
+OFFSET_VEL:Final[int] = 384
 
-LOG_FREQ = 800 # originally 200
-SAVE_FREQ = 40000 # originally 4000
 
-''' CONSTANTS '''
+# TODO solve for separate vocab sizes. Provisionally the maxium vocab_size
+#TOKEN_END:Final[int]  = VOCAB_SIZE_DTIME
+#TOKEN_PAD:Final[int]  = SOS_DTIME
 
-SEQUENCE_START:Final[int] = 0
-RANGE_NOTE_ON:Final[int] = 128
-RANGE_NOTE_OFF:Final[int] = 128
-RANGE_VEL:Final[int] = 32
-RANGE_TIME_SHIFT:Final[int] = 100
+#SEQUENCE_START:Final[int] = 0
+#RANGE_NOTE_ON:Final[int] = 128
+#RANGE_NOTE_OFF:Final[int] = 128
+#RANGE_VEL:Final[int] = 32
+#RANGE_TIME_SHIFT:Final[int] = 100
 
-# TOKEN_END:Final[int]               = 256+512 # RANGE_NOTE_ON + RANGE_NOTE_OFF + RANGE_VEL + RANGE_TIME_SHIFT
 #TOKEN_PAD:Final[int]               = TOKEN_END + 1
 
-#VOCAB_SIZE :Final[int]             = TOKEN_PAD + 1
-
 #PREPEND_ZEROS_WIDTH:Final[int]     = 4
-
-
