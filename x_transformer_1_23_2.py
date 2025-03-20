@@ -1274,10 +1274,10 @@ class Decoder(nn.Module):
         """
        # Embed past notes, sum all embedding values, 
         x = ( # (1,4,768)
-            self.dtime_emb(past_tokens['dtime']) + # past_notes['dtime'] (1,1024)
-            self.pitch_emb(past_tokens['pitch']) +
-            self.dur_emb(past_tokens['dur']) +
-            self.button_emb(past_tokens['button'])
+            self.dtime_emb(past_tokens['dtime']) + # past_notes['dtime'] (1,1024) [1:]
+            self.pitch_emb(past_tokens['pitch']) + # [:-1]
+            self.dur_emb(past_tokens['dur']) + # [:-1]
+            self.button_emb(past_tokens['button']) # [:]
         )  # [B, T, emb_dim] (dtime_emb + pitch_emb + dur_emb + but_emb) -> note embeddings
     
         # embedding dropout
@@ -1331,7 +1331,7 @@ class Encoder(nn.Module):
         # vel and dur are not influencial to the contour, so we don't need to embed them
         self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
         self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
-
+        #self.input = nn.Linear(VOCAB_SIZE_PITCH + 1, dim) # (89, 128) # orignal implementation, one_hot encoding
         # Dropout
         self.emb_dropout = nn.Dropout(emb_dropout) # Dropout function
 
@@ -1387,7 +1387,15 @@ class Encoder(nn.Module):
             self.dtime_emb(note_tokens['dtime']) +
             self.pitch_emb(note_tokens['pitch'])
         ) # [B, T, n_embd]
-
+        '''inputs = [ 
+        # Convert one-hot encoding to the same dtype as the model's parameters
+            F.one_hot(note_tokens['pitch'], VOCAB_SIZE_PITCH).to(dtype=self.input.weight.dtype), 
+        # Convert dtime to the same dtype as the model's parameters
+            note_tokens['dtime'].unsqueeze(dim=2).to(dtype=self.input.weight.dtype),
+        ]
+        # concatenated along dimension 2 (the feature dimension), resulting in a combined tensor of shape (32,128,89) - 88 dimensions for the one-hot keys and 1 dimension for the delta time.
+        # projection layer that map the combined representation to a shared embeeding space of dimension rnn_dim
+        x = self.input(torch.cat(inputs, dim=2))'''
         # absolute positional embedding
         #x = self.token_emb(x) # (B, T(seq_len), D(emb_dim)) (20, 1024, 2048)
 
@@ -1414,15 +1422,15 @@ class IntegerQuantizer(nn.Module):
         self.num_bins = NUM_BUTTONS # 12
 
     def real_to_discrete(self, x, eps=1e-6):
-        x = (x + 1) / 2 # normalize to [0,1]
+        x = (x + 1) / 2 # x, numbers between -1 and 1, normalize to [0,1]
         x = torch.clamp(x, 0, 1) # clip to [0,1]
-        x *= self.num_bins - 1 # scale to [0,7]
+        x *= (self.num_bins - 1) # scale to [0,NUM_BUTTONS-1]
         x = (torch.round(x) + eps).long() # round to nearest integer and convert to long
         return x
 
     def discrete_to_real(self, x):
         x = x.float() 
-        x /= self.num_bins - 1 # scale back to [0,1]
+        x /= (self.num_bins - 1) # scale back to [0,1]
         x = (x * 2) - 1 # scale to [-1,1]
         return x
 
@@ -1471,8 +1479,8 @@ class AutoregressiveAutoencoder(Module):
         # Create encoder context (excluding the first position)
         # as note_tokens['dtime'] (B, T+1)
         encoder_context = {
-            'dtime': note_tokens['dtime'][:, 1:],
-            'pitch': note_tokens['pitch'][:, 1:],
+            'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, 1:], # includes current pitch
         } # (B, T)
         e = self.encoder(encoder_context) # encoder output (batch, seq_len) (2, 1024)
         b = self.quantizer(e) # generate buttons (batch, seq_len) (2, 1024)
@@ -1486,10 +1494,10 @@ class AutoregressiveAutoencoder(Module):
         # note_tokens['dtime'][:,-1] is the current dtime
         # b[:,-1] is the current button 
         decoder_context = {
-            'dtime': note_tokens['dtime'][:, 1:],
-            'pitch': note_tokens['pitch'][:, :-1],
-            'dur': note_tokens['dur'][:, :-1],
-            'button': b[:, :] # b.shape = (B, T)
+            'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, :-1], # no current pitch 
+            'dur': note_tokens['dur'][:, :-1], # no current dur
+            'button': b[:, :] # b.shape = (B, T) # includes current button
         } # (B, T)
 
         logits = self.decoder(decoder_context) # (B, T (seq_len), VOCAB_SIZE_PITCH) (2, 1024, 128)
@@ -1507,19 +1515,10 @@ class AutoregressiveAutoencoder(Module):
             ignore_index = self.ignore_index # 128 vocab_pitch_size
         )
         
-        # flat loss??
+        # flat all batches ??
         #loss_recons = F.cross_entropy(y.view(-1, PIANO_NUM_KEYS), tgt.view(-1)) 
 
-        # Regularize to encourage encoder to output in range [-1, 1]
-        # This implements Lmargin = Σ max(|encs(x)| − 1, 0)²:
-        # Penalizes encoder outputs that fall outside [-1, 1] range
-        # torch.abs(pre_iq_encoding) - 1: How far values are from the [-1,1] boundary
-        # torch.maximum(..., 0): Only penalize values outside the range
-        # torch.square: Square the penalty (makes loss smoother)
-        loss_margin = torch.square(
-            torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
-        ).mean()
-            
+        
         # Calculate contour penalty
         #"We also contribute a musically motivated regularization strategy which gives the model an 
         # awareness of melodic contour. By comparing the finite differences (musical intervals in semitones) 
@@ -1535,41 +1534,70 @@ class AutoregressiveAutoencoder(Module):
         # torch.diff(k, dim=1) = ∆x = (k[:, 1:] - k[:, :-1]).float()  # Piano note intervals
         
         # Penalizes when the product/quotient is less than the margin
-        pitch_diff = torch.diff(note_tokens['pitch'][:,:-1], dim=1)
-        e_diff = torch.diff(e, dim=1)
+        pitch_diff = torch.diff(note_tokens['pitch'][:,1:], dim=1)
+        e_diff = torch.diff(e, dim=1) # [:, :-1]    
         loss_contour = torch.square(
             torch.maximum(
                 1 - pitch_diff.float() * e_diff,
                     torch.zeros_like(pitch_diff, dtype=torch.float)
             )
         ).mean()
-
-        # Deviate Penalty
-        # Identifies when the same note is held (no pitch change)
-        # Penalizes any change in button values during held notes
-        # Helps maintain consistency in the mapping
-        # Identify held notes (where consecutive pitches are the same)
-        notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()
-        # Penalize button changes when notes are held
-        loss_deviate = torch.square(
-            torch.diff(e, dim=1) * notes_held  # button contour * notes held
+        
+        # Regularize to encourage encoder to output in range [-1, 1]
+        loss_margin = torch.square(
+            # torch.abs(e) - 1: only values outside the range [-1,1] are negative, no penalty
+            # in higher values (like 10, or -10), torch.abs(e) - 1 > 0, so penalty
+            torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
         ).mean()
 
-        # Total loss
+        # Add multi-step contour losses
+        loss_multi_step = multi_step_contour_loss(
+            note_tokens['pitch'][:,1:], 
+            e,
+            max_steps=5
+        ).mean()
+        
+        loss_interval = interval_preservation_loss(
+            note_tokens['pitch'][:,1:],
+            e,
+            max_steps=5
+        ).mean()
+        
+        loss_shape = melodic_shape_loss(
+            note_tokens['pitch'][:,1:],
+            e,
+            window_size=5
+        ).mean()
+         
+        # Combine losses with appropriate weights
         loss_total = torch.zeros_like(loss_recons)
         loss_total += loss_recons
+        
+        if LOSS_CONTOUR_MULTIPLIER > 0:
+            loss_total += LOSS_CONTOUR_MULTIPLIER * (
+                0.4 * loss_contour +
+                0.3 * loss_multi_step +
+                0.2 * loss_interval +
+                0.1 * loss_shape
+            )
+        
         if LOSS_MARGIN_MULTIPLIER > 0:
             loss_total += LOSS_MARGIN_MULTIPLIER * loss_margin
-        if LOSS_CONTOUR_MULTIPLIER > 0:
-            loss_total += LOSS_CONTOUR_MULTIPLIER * loss_contour
+            # Total loss
+        
+        '''
         if LOSS_DEVIATE_MULTIPLIER > 0:
             loss_total += LOSS_DEVIATE_MULTIPLIER * loss_deviate
-
+        '''
 
         #loss_total = loss_recons
         acc = self.compute_accuracy(logits, target)
         return loss_total, acc
-
+ 
+    @torch.inference_mode()
+    def real_to_discrete(self, x, eps=1e-6):
+        return self.quantizer.real_to_discrete(x, eps)
+    
     @torch.inference_mode()
     def gen_pitch_token(self, 
             note_tokens: Dict[str, Tensor],
@@ -1607,7 +1635,7 @@ class AutoregressiveAutoencoder(Module):
         return sample.unsqueeze(1).item()
 
     @torch.inference_mode()
-    def gen_last_button(self, note_tokens: Dict[str, Tensor])  -> Tensor:
+    def gen_buttons(self, note_tokens: Dict[str, Tensor])  -> Tensor:
         
         # B = batch size = 1
         # note_tokens suposed on gpu
@@ -1618,8 +1646,9 @@ class AutoregressiveAutoencoder(Module):
         e = self.encoder(note_tokens) # encoder output (batch, seq_len)
         b = self.quantizer(e) # generate buttons (batch, seq_len)
 
-        b = b[:, -1] # (B=1, 1)
-        return b.unsqueeze(1).item()
+        #b = b[:, -1] # (B=1, 1)
+        #b = b.unsqueeze(1).item()
+        return b
     
     @torch.inference_mode()
     def generate(
@@ -1730,3 +1759,243 @@ class AutoregressiveAutoencoder(Module):
         acc = num_right / len(labels) 
         return acc
 
+
+class EncoderOnly(Module):
+    def __init__(
+        self,
+        encoder,
+        ignore_index = -100,
+        pad_value = 0
+    ):
+        super().__init__()
+
+        self.encoder = encoder
+        #self.quantizer = IntegerQuantizer()
+
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+        #seq, ignore_index = x.shape[1], self.ignore_index
+
+        # Create encoder context (excluding the first position)
+        # as note_tokens['dtime'] (B, T+1)
+        encoder_context = {
+            'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, 1:], # includes current pitch
+        } # (B, T)
+        e = self.encoder(encoder_context) # encoder output (batch, seq_len) (2, 1024)
+
+        # Calculate contour penalty
+        #"We also contribute a musically motivated regularization strategy which gives the model an 
+        # awareness of melodic contour. By comparing the finite differences (musical intervals in semitones) 
+        # of the input ∆x to the finite differences of the real-valued encoder output ∆encs(x), 
+        # the Lcontour term encourages the encoder to produce "button contours" that match the shape 
+        # of the input melodic contours."
+            
+        # This implements Lcontour = Σ max(1 − ∆x∆encs(x), 0)²:
+        # Encourages button intervals to match piano note intervals in direction
+
+        # Calculate differences between consecutive notes/latents
+        # torch.diff(e, dim=1) = ∆encs(x) = e[:, 1:] - e[:, :-1]  # Button intervals
+        # torch.diff(k, dim=1) = ∆x = (k[:, 1:] - k[:, :-1]).float()  # Piano note intervals
+        
+        # Penalizes when the product/quotient is less than the margin
+        pitch_diff = torch.diff(note_tokens['pitch'][:,1:], dim=1)
+        e_diff = torch.diff(e, dim=1) # [:, :-1]    
+        loss_contour = torch.square(
+            torch.maximum(
+                1 - pitch_diff.float() * e_diff,
+                    torch.zeros_like(pitch_diff, dtype=torch.float)
+            )
+        ).mean()
+        
+        # Regularize to encourage encoder to output in range [-1, 1]
+        loss_margin = torch.square(
+            # torch.abs(e) - 1: only values outside the range [-1,1] are negative, no penalty
+            # in higher values (like 10, or -10), torch.abs(e) - 1 > 0, so penalty
+            torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
+        ).mean()
+
+        # Add multi-step contour losses
+        loss_multi_step = multi_step_contour_loss(
+            note_tokens['pitch'][:,1:], 
+            e,
+            max_steps=5
+        ).mean()
+        
+        loss_interval = interval_preservation_loss(
+            note_tokens['pitch'][:,1:],
+            e,
+            max_steps=5
+        ).mean()
+        
+        loss_shape = melodic_shape_loss(
+            note_tokens['pitch'][:,1:],
+            e,
+            window_size=5
+        ).mean()
+        
+        # Combine losses with appropriate weights
+        loss_total = torch.zeros_like(loss_contour)
+        
+        if LOSS_CONTOUR_MULTIPLIER > 0:
+            loss_total += LOSS_CONTOUR_MULTIPLIER * (
+                0.4 * loss_contour +
+                0.3 * loss_multi_step +
+                0.2 * loss_interval +
+                0.1 * loss_shape
+            )
+        
+        if LOSS_MARGIN_MULTIPLIER > 0:
+            loss_total += LOSS_MARGIN_MULTIPLIER * loss_margin
+           
+        return loss_total, torch.tensor(0.0)
+
+    def gen_buttons(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+        #seq, ignore_index = x.shape[1], self.ignore_index
+
+        # Create encoder context (excluding the first position)
+        # as note_tokens['dtime'] (B, T+1)
+        encoder_context = {
+            'dtime': note_tokens['dtime'], # includes current dtime
+            'pitch': note_tokens['pitch'], # includes current pitch
+        } # (B, T)
+        e = self.encoder(encoder_context) # encoder output (batch, seq_len) (2, 1024)
+
+        return e
+
+    def real_to_discrete(self, x, eps=1e-6):
+        x = (x + 1) / 2 # normalize to [0,1]
+        x = torch.clamp(x, 0, 1) # clip to [0,1]
+        x *= NUM_BUTTONS - 1 # scale to [0,7]
+        x = (torch.round(x) + eps).long() # round to nearest integer and convert to long
+        return x
+  
+def multi_step_contour_loss(pitches, buttons, max_steps=5):
+    """
+    Computes a contour preservation loss that considers relationships
+    between the current note and multiple previous notes.
+    
+    Args:
+        pitches: Tensor of shape [batch, seq_len] containing pitch values
+        buttons: Tensor of shape [batch, seq_len] containing button values (encoder output)
+        max_steps: Maximum number of steps back to consider
+    
+    Returns:
+        A differentiable loss tensor
+    """
+    batch_size, seq_len = pitches.shape
+    total_loss = torch.zeros(1, device=pitches.device)
+    
+    # Convert to float for calculations
+    pitches = pitches.float()
+    buttons = buttons.float()
+    
+    # For each step size (1 to max_steps)
+    for step in range(1, min(max_steps + 1, seq_len)):
+        # Calculate differences with notes 'step' positions back
+        pitch_diffs = pitches[:, step:] - pitches[:, :-step]  # [batch, seq_len-step]
+        button_diffs = buttons[:, step:] - buttons[:, :-step]  # [batch, seq_len-step]
+        
+        # Normalize the importance by step size (closer relationships matter more)
+        step_weight = 1.0 / step
+        
+        # Calculate directional agreement
+        # When pitch_diffs and button_diffs have the same sign, their product is positive
+        # When they have opposite signs, their product is negative
+        agreement = pitch_diffs * button_diffs
+        
+        # Penalize disagreements (when the product is <= 0)
+        # The penalty increases with the magnitude of the disagreement
+        disagreement_penalty = torch.square(
+            torch.maximum(
+                1 - agreement,  # 1 minus the agreement (higher for disagreements)
+                torch.zeros_like(agreement)  # Zero floor to avoid penalizing agreements
+            )
+        )
+        
+        # Weight by step size and add to total loss
+        step_loss = step_weight * disagreement_penalty.mean()
+        total_loss += step_loss
+        
+    return total_loss
+
+def interval_preservation_loss(pitches, buttons, max_steps=5):
+    """
+    Encourages the relative magnitudes of intervals to be preserved
+    between pitches and buttons.
+    """
+    batch_size, seq_len = pitches.shape
+    total_loss = torch.zeros(1, device=pitches.device)
+    
+    # Normalize both to [0,1] range for fair comparison
+    pitch_range = torch.max(pitches) - torch.min(pitches)
+    button_range = torch.max(buttons) - torch.min(buttons)
+    
+    norm_pitches = (pitches - torch.min(pitches)) / pitch_range.clamp(min=1e-5)
+    norm_buttons = (buttons - torch.min(buttons)) / button_range.clamp(min=1e-5)
+    
+    for step in range(1, min(max_steps + 1, seq_len)):
+        # Calculate normalized intervals
+        pitch_intervals = torch.abs(norm_pitches[:, step:] - norm_pitches[:, :-step])
+        button_intervals = torch.abs(norm_buttons[:, step:] - norm_buttons[:, :-step])
+        
+        # Compute difference between normalized intervals
+        interval_diff = torch.abs(pitch_intervals - button_intervals)
+        
+        # Weight by step size (closer relationships matter more)
+        step_weight = 1.0 / step
+        step_loss = step_weight * interval_diff.mean()
+        
+        total_loss += step_loss
+        
+    return total_loss
+
+def melodic_shape_loss(pitches, buttons, window_size=5):
+    """
+    Preserves the overall shape of melodic phrases by comparing
+    the pattern of ups and downs within sliding windows.
+    """
+    batch_size, seq_len = pitches.shape
+    
+    if seq_len < window_size:
+        return torch.zeros(1, device=pitches.device)
+    
+    total_loss = torch.zeros(1, device=pitches.device)
+    
+    # For each possible window position
+    for i in range(seq_len - window_size + 1):
+        # Extract windows
+        pitch_window = pitches[:, i:i+window_size]
+        button_window = buttons[:, i:i+window_size]
+        
+        # Calculate all pairwise differences within the window
+        pitch_pairs = torch.zeros((batch_size, window_size, window_size), device=pitches.device)
+        button_pairs = torch.zeros((batch_size, window_size, window_size), device=buttons.device)
+        
+        for j in range(window_size):
+            for k in range(window_size):
+                pitch_pairs[:, j, k] = pitch_window[:, j] - pitch_window[:, k]
+                button_pairs[:, j, k] = button_window[:, j] - button_window[:, k]
+        
+        # Get signs of differences
+        pitch_signs = torch.sign(pitch_pairs)
+        button_signs = torch.sign(button_pairs)
+        
+        # Calculate disagreement in signs
+        # When signs match, their product is 1
+        # When signs differ, their product is -1 or 0
+        sign_agreement = pitch_signs * button_signs
+        
+        # Penalize disagreements (when product < 1)
+        disagreement = torch.maximum(
+            1 - sign_agreement,
+            torch.zeros_like(sign_agreement)
+        )
+        
+        # Add to total loss
+        window_loss = disagreement.mean()
+        total_loss += window_loss
+    
+    return total_loss / (seq_len - window_size + 1)

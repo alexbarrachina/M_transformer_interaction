@@ -37,9 +37,9 @@ def midi_to_tokens(input_midi,
     notes_counter = 0
     
     for i, c in enumerate(cscore):
-        score.append(max(0, min(127, c[0][1]-pc[0][1])))
+        score.append(max(0, min(127, c[0][1]-pc[0][1]))) # calculate dtime: the time difference between the current chord and the previous note
     
-        for n in c:
+        for n in c: # tokens in note event
             if encode_velocity:
                 score.extend([max(1, min(127, n[2]))+128, max(1, min(127, n[4]))+256, max(1, min(127, n[5]))+384])
 

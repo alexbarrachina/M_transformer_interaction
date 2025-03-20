@@ -18,7 +18,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_dataset, load_from_disk
-import TMIDIX
+from TMIDIX import tegridy_tokens_to_dict, Tegridy_Any_Pickle_File_Writer
 
 from x_transformer_1_23_2 import *
 
@@ -49,46 +49,8 @@ class MusicSamplerDataset(Dataset):
         self.is_eval = is_eval
         self.indices = []
 
-        filtered_score = []
- 
-        for entry in tqdm.tqdm(data):
-            score = entry['midi_score']
+        self.feature_data, self.num_notes = tegridy_tokens_to_dict(data)
 
-            i = 0
-            while i < len(score):
-                if score[i] < 384:  # Process valid tokens (dtime, pitch, dur)
-                    # If we're missing notes in a triplet (chord case), add dtime=0
-                    if score[i] > 127 and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
-                        filtered_score.append(0)  # Insert dtime=0 for chord notes
-                    
-                    # range checker. We don't need it for now.
-                    '''if len(filtered_score) % 3 == 0:
-                        assert(score[i] < 128), "not a valid dtime"
-                    if len(filtered_score) % 3 == 1:
-                        assert(127 < score[i] < 256), "not a valid dur"
-                    if len(filtered_score) % 3 == 2:
-                        assert (255 < score[i] < 384), "not a valid pitch"'''
-
-                    # revert offsets to homogenize the data for the purpose of aggregating embbedings
-                    offset = 0
-                    if len(filtered_score) % 3 == 1:
-                        offset = OFFSET_DUR
-                    elif len(filtered_score) % 3 == 2:
-                        offset = OFFSET_PITCH
-
-                    filtered_score.append(score[i] - offset)
-                i += 1
-
-        # Ensure we have complete triplets
-        assert len(filtered_score) % 3 == 0, "Data length must be divisible by 3 (dtime, pitch, dur)"
-
-        self.num_notes = len(filtered_score) // 3
-        self.feature_data = {
-            'dtime': filtered_score[0::3],  # Every 3rd token starting at index 0. observed min = 0, max = 70
-            'dur': filtered_score[1::3],  # Every 3rd token starting at index 2. observed min = 1, max = 74
-            'pitch': filtered_score[2::3]     # Every 3rd token starting at index 3. observed min = 30, max = 88
-        }
-        
         if self.is_eval:
             max_indices = self.num_notes - (self.seq_len+1)
             self.indices = list(range(0, max_indices, self.seq_len+1))
@@ -108,12 +70,18 @@ class MusicSamplerDataset(Dataset):
 
         # Extract sequences for each feature, +1 to include the current token
         # convert to tensors, move to device
-        x = {
+        if TESTING:
+            x = {
+            'dtime': torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], dtype=torch.long).to(device),
+            'dur': torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], dtype=torch.long).to(device),
+            'pitch': torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], dtype=torch.long).to(device)
+            }
+        else:
+            x = {
             'dtime': torch.tensor(self.feature_data['dtime'][rand:rand + self.seq_len+1], dtype=torch.long).to(device),
             'dur': torch.tensor(self.feature_data['dur'][rand:rand + self.seq_len+1], dtype=torch.long).to(device),
             'pitch': torch.tensor(self.feature_data['pitch'][rand:rand + self.seq_len+1], dtype=torch.long).to(device)
-        }
-
+            }
         return x
 
 #monster_piano = load_dataset('asigalov61/Monster-Piano') # original
@@ -128,11 +96,11 @@ monster_piano = load_from_disk(local_dataset_path)
 #monster_piano_val = load_dataset('asigalov61/Monster-Piano', split='train[99%:100%]') 
 # If you need specific splits, you can select them after loading
 train_dataset = monster_piano['train']
-if TESTING:
+if TESTING or LIGHT_DATASET:
     monster_piano_train = train_dataset.select(range(int(len(train_dataset) * 0.01)))  # 1% for training
     monster_piano_val = train_dataset.select(range(int(len(train_dataset) * 0.99), len(train_dataset)))  # Last 1% for validation
 else:
-    monster_piano_train = train_dataset.select(range(int(len(train_dataset) * 0.7)))  # 1% for training
+    monster_piano_train = train_dataset.select(range(int(len(train_dataset) * 0.4)))  # 1% for training
     monster_piano_val = train_dataset.select(range(int(len(train_dataset) * 0.95), len(train_dataset)))  # Last 1% for validation
 
 
@@ -169,7 +137,21 @@ model = AutoregressiveAutoencoder(
         attn_flash = True
         )
     )
+'''
 
+model = EncoderOnly(
+    ignore_index = PAD_IDX, 
+    pad_value=PAD_IDX,
+    encoder = Encoder(
+        num_tokens = PAD_IDX+1,
+        max_seq_len = SEQ_LEN,
+        dim = EMB_DIM,
+        depth = NUM_LAYERS,
+        heads = NUM_HEADS,
+        rotary_pos_emb = True,
+        attn_flash = True
+        )
+    )'''
 model.to(device)
 
 #print(model)
@@ -309,6 +291,6 @@ for ep in range(NUM_EPOCHS):
 
             data = [train_losses, train_accs, val_losses, val_accs]
 
-            TMIDIX.Tegridy_Any_Pickle_File_Writer(data, './save_models/losses_accs')
+            Tegridy_Any_Pickle_File_Writer(data, './save_models/losses_accs')
 
             #print('Done!')

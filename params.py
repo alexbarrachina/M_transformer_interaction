@@ -5,7 +5,8 @@ import torch
 
 ''' TESTING '''
 TESTING = False
-LIGHT_MODEL = True
+LIGHT_MODEL = False
+LIGHT_DATASET = False
 
 ''' MODEL '''
 # constants
@@ -14,44 +15,43 @@ if LIGHT_MODEL:
     NUM_LAYERS = 4
     EMB_DIM = 512 # 2048
     NUM_HEADS = 32
+    SAVE_EVERY = 100000
 else:
-    SEQ_LEN = 2048 # orig 2048
+    SEQ_LEN = 1024 # orig 2048
     NUM_LAYERS = 4
     EMB_DIM = 2048 # 2048
     NUM_HEADS = 32
+    SAVE_EVERY = 10000
 
 ''' TRAINING '''
 # Taken from the paper
-if torch.cuda.is_available(): # on pepinón
+if torch.cuda.is_available(): 
     #BATCH_SIZE = 3 #2 # Change this to your specs (4 batches per 48GB)
     #BATCH_SIZE = 116 # original
     if TESTING:
         BATCH_SIZE = 1
+        SEQ_LEN = 16 # orig 2048
     else:
         BATCH_SIZE = 20 
     WORKERS = 4
-    # Path to your locally saved dataset
-    local_dataset_path = "../Datasets/asigalov61___monster-piano"
     print("using CUDA")
 else: # on macbook pro  
     BATCH_SIZE = 1  
     WORKERS = 1
-    local_dataset_path = "../../../Datasets/MIDI/asigalov61___monster-piano"
     print("using CPU")
     
 VALIDATE_EVERY  = 500
-SAVE_EVERY = 50000
 GENERATE_EVERY  = 1000
 GENERATE_LENGTH = 512
 PRINT_STATS_EVERY = 50
 
-NUM_EPOCHS = 10
+NUM_EPOCHS = 40
 
 LEARNING_RATE = 1e-4
 GRAD_CLIP = 1.5
 
 LOSS_MARGIN_MULTIPLIER:Final[float] = 0.01 # TODO decide values
-LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.01
+LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.1 # 0.01 original
 LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.01
 
 USE_TENSORBOARD = True
@@ -83,6 +83,16 @@ OFFSET_DUR:Final[int] = 128
 OFFSET_PITCH:Final[int] = 256
 OFFSET_VEL:Final[int] = 384
 
+''' DATASET '''
+# if using pickle files
+dataset_train_path = './Training-Data/asigalov_train'
+dataset_val_path = './Training-Data/asigalov_val'
+
+if torch.cuda.is_available(): 
+    # Path to your locally saved dataset
+    local_dataset_path = "../Datasets/asigalov61___monster-piano"
+else:
+    local_dataset_path = "../../../Datasets/MIDI/asigalov61___monster-piano"
 
 # TODO solve for separate vocab sizes. Provisionally the maxium vocab_size
 #TOKEN_END:Final[int]  = VOCAB_SIZE_DTIME

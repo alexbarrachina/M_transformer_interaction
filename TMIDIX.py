@@ -11093,3 +11093,105 @@ def escore_notes_pitches_range(escore_notes,
 # This is the end of the TMIDI X Python module
 #
 ###################################################################################
+
+from params import OFFSET_DUR, OFFSET_PITCH
+
+def tegridy_tokens_to_dict(data):
+        
+        filtered_score = []
+
+        for entry in tqdm.tqdm(data):
+            score = entry['midi_score']
+
+            i = 0
+            while i < len(score):
+                if score[i] < 384:  # Process valid tokens (dtime, pitch, dur)
+                    # If we're missing notes in a triplet (chord case), add dtime=0
+                    if score[i] > 127 and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
+                        filtered_score.append(0)  # Insert dtime=0 for chord notes
+                    
+                    # range checker. We don't need it for now.
+                    if len(filtered_score) % 3 == 0:
+                        assert(score[i] < 128), "not a valid dtime"
+                    if len(filtered_score) % 3 == 1:
+                        assert(127 < score[i] < 256), "not a valid dur"
+                    if len(filtered_score) % 3 == 2:
+                        assert (255 < score[i] < 384), "not a valid pitch"
+
+                    # revert offsets to homogenize the data for the purpose of aggregating embbedings
+                    offset = 0
+                    if len(filtered_score) % 3 == 1:
+                        offset = OFFSET_DUR
+                    elif len(filtered_score) % 3 == 2:
+                        offset = OFFSET_PITCH
+
+                    filtered_score.append(score[i] - offset)
+                i += 1
+
+        # Ensure we have complete triplets
+        assert len(filtered_score) % 3 == 0, "Data length must be divisible by 3 (dtime, pitch, dur)"
+
+        num_notes = len(filtered_score) // 3
+        feature_data = {
+            'dtime': filtered_score[0::3],  # Every 3rd token starting at index 0. observed min = 0, max = 70
+            'dur': filtered_score[1::3],  # Every 3rd token starting at index 2. observed min = 1, max = 74
+            'pitch': filtered_score[2::3]     # Every 3rd token starting at index 3. observed min = 30, max = 88
+        }
+
+        return feature_data, num_notes
+
+
+def midi_tokens_to_dict(score):
+        
+            filtered_score = []
+
+            i = 0
+            while i < len(score):
+                if score[i] < 384:  # Process valid tokens (dtime, pitch, dur)
+                    # If we're missing notes in a triplet (chord case), add dtime=0
+                    if score[i] > 127 and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
+                        filtered_score.append(0)  # Insert dtime=0 for chord notes
+                    
+                    # range checker. We don't need it for now.
+                    if len(filtered_score) % 3 == 0:
+                        assert(score[i] < 128), "not a valid dtime"
+                    if len(filtered_score) % 3 == 1:
+                        assert(127 < score[i] < 256), "not a valid dur"
+                    if len(filtered_score) % 3 == 2:
+                        assert (255 < score[i] < 384), "not a valid pitch"
+
+                    # revert offsets to homogenize the data for the purpose of aggregating embbedings
+                    offset = 0
+                    if len(filtered_score) % 3 == 1:
+                        offset = OFFSET_DUR
+                    elif len(filtered_score) % 3 == 2:
+                        offset = OFFSET_PITCH
+
+                    filtered_score.append(score[i] - offset)
+                i += 1
+
+            # Ensure we have complete triplets
+            assert len(filtered_score) % 3 == 0, "Data length must be divisible by 3 (dtime, pitch, dur)"
+
+            num_notes = len(filtered_score) // 3
+            feature_data = {
+              'dtime': filtered_score[0::3],  # Every 3rd token starting at index 0. observed min = 0, max = 70
+              'dur': filtered_score[1::3],  # Every 3rd token starting at index 2. observed min = 1, max = 74
+              'pitch': filtered_score[2::3]     # Every 3rd token starting at index 3. observed min = 30, max = 88
+          }
+
+            return feature_data, num_notes
+
+def dict_to_song(dict_data, add_vel=True):
+    song_d = []
+    time = 0
+    if add_vel:
+        vel = 90
+        for i in range(len(dict_data['dtime'])):
+            time += dict_data['dtime'][i] * 32
+            song_d.append(['note', time, dict_data['dur'][i]*32, 0, dict_data['pitch'][i], vel, 0])
+    else:
+        for i in range(len(dict_data['dtime'])):
+            time += dict_data['dtime'][i] * 32
+            song_d.append(['note', time, dict_data['dur'][i]*32, 0, dict_data['pitch'][i], dict_data['vel'][i], 0])
+    return song_d
