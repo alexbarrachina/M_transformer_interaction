@@ -1209,6 +1209,11 @@ class Decoder(nn.Module):
         logits_dim = None,
         causal = True  # True for decoder
     ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
         super().__init__()
 
         self.emb_dim = dim # 2048
@@ -1218,11 +1223,16 @@ class Decoder(nn.Module):
 
         # Embeddings
         # Token embeddings for each feature type
-        self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
+        #self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
         self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
-        self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
-        self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
+        #self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
+        #self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
 
+        # For the concatenation approach (like original Piano Genie)
+        # Input projection for concatenated features (pitch one-hot + continuous values)
+        input_dim = VOCAB_SIZE_PITCH + 3  # one-hot pitch + dtime + dur + button (all continuous)
+        self.input_proj = nn.Linear(input_dim, dim)
+ 
        # positional embeddings is inside the attention layers
         #self.pos_emb = nn.Embedding(seq_len, d_model) if rotary_pos_emb else None
  
@@ -1252,10 +1262,10 @@ class Decoder(nn.Module):
  
     def init_(self):
 #        nn.init.kaiming_normal_(self.token_emb.emb.weight)
-        nn.init.kaiming_normal_(self.dtime_emb.weight)
+        #nn.init.kaiming_normal_(self.dtime_emb.weight)
         nn.init.kaiming_normal_(self.pitch_emb.weight)
-        nn.init.kaiming_normal_(self.dur_emb.weight)
-        nn.init.kaiming_normal_(self.button_emb.weight)
+        #nn.init.kaiming_normal_(self.dur_emb.weight)
+        #nn.init.kaiming_normal_(self.button_emb.weight)
 
     def forward(
         self,
@@ -1272,14 +1282,30 @@ class Decoder(nn.Module):
         Returns logits of shape [B, T, vocab_size_pitch],
         predicting the pitch at every time step.
         """
-       # Embed past notes, sum all embedding values, 
+        # One-hot encode pitch for concatenation
+        pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        # Handle button, dtime, dur as continuous values
+        dtime= past_tokens['dtime'].float().unsqueeze(-1)
+        dur= past_tokens['dur'].float().unsqueeze(-1)
+        button= past_tokens['button'].float().unsqueeze(-1)
+        
+        # Concatenate all features as in original Piano Genie
+        concat_inputs = torch.cat([pitch_onehot, dtime, dur, button], dim=-1)
+
+        # Project concatenated inputs to embedding dimension
+        x = self.input_proj(concat_inputs)
+        
+
+        '''
+        # Embed past notes, sum all embedding values, 
         x = ( # (1,4,768)
             self.dtime_emb(past_tokens['dtime']) + # past_notes['dtime'] (1,1024) [1:]
             self.pitch_emb(past_tokens['pitch']) + # [:-1]
             self.dur_emb(past_tokens['dur']) + # [:-1]
             self.button_emb(past_tokens['button']) # [:]
         )  # [B, T, emb_dim] (dtime_emb + pitch_emb + dur_emb + but_emb) -> note embeddings
-    
+        '''
+
         # embedding dropout
         x = self.emb_dropout(x)
 
@@ -1329,9 +1355,16 @@ class Encoder(nn.Module):
         # Embeddings
         # Separate embeddings for each feature.
         # vel and dur are not influencial to the contour, so we don't need to embed them
-        self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
+        #self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
         self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
         #self.input = nn.Linear(VOCAB_SIZE_PITCH + 1, dim) # (89, 128) # orignal implementation, one_hot encoding
+
+        # For the concatenation approach (like original Piano Genie)
+        # Input projection for concatenated features (pitch one-hot + continuous values)
+        input_dim = VOCAB_SIZE_PITCH + 1  # one-hot pitch + dtime (continuous)
+        self.input_proj = nn.Linear(input_dim, dim)
+
+
         # Dropout
         self.emb_dropout = nn.Dropout(emb_dropout) # Dropout function
 
@@ -1357,7 +1390,7 @@ class Encoder(nn.Module):
 
  
     def init_(self):
-        nn.init.kaiming_normal_(self.dtime_emb.weight)
+        #nn.init.kaiming_normal_(self.dtime_emb.weight)
         nn.init.kaiming_normal_(self.pitch_emb.weight)
 
     def forward(
@@ -1381,12 +1414,13 @@ class Encoder(nn.Module):
         if torch.max(note_tokens['pitch']) >= VOCAB_SIZE_PITCH:
             raise ValueError(f"pitch token out of range: {torch.max(note_tokens['pitch'])} >= {VOCAB_SIZE_PITCH}")
         '''
-            
+
+        '''   
         # Forward the encoder - combine embeddings
         x = (
             self.dtime_emb(note_tokens['dtime']) +
             self.pitch_emb(note_tokens['pitch'])
-        ) # [B, T, n_embd]
+        ) # [B, T, n_embd]'''
         '''inputs = [ 
         # Convert one-hot encoding to the same dtype as the model's parameters
             F.one_hot(note_tokens['pitch'], VOCAB_SIZE_PITCH).to(dtype=self.input.weight.dtype), 
@@ -1399,6 +1433,16 @@ class Encoder(nn.Module):
         # absolute positional embedding
         #x = self.token_emb(x) # (B, T(seq_len), D(emb_dim)) (20, 1024, 2048)
 
+                # One-hot encode pitch for concatenation
+        pitch_onehot = F.one_hot(note_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        # Handle button, dtime, dur as continuous values
+        dtime= note_tokens['dtime'].float().unsqueeze(-1)
+        # Concatenate all features as in original Piano Genie
+        concat_inputs = torch.cat([pitch_onehot, dtime], dim=-1)
+
+        # Project concatenated inputs to embedding dimension
+        x = self.input_proj(concat_inputs)
+ 
         # embedding dropout
         x = self.emb_dropout(x)
 
@@ -1442,15 +1486,15 @@ class IntegerQuantizer(nn.Module):
         # Quantize w/ straight-through estimator
         with torch.no_grad():
             x_disc = self.real_to_discrete(x)
-            # TODO Modified to use button discrete values instead of continuous values [-1,1]
-            #x_quant = self.discrete_to_real(x_disc)
-            #x_quant_delta = x_quant - x
-            x_quant_delta = x_disc - x
+            x_quant = self.discrete_to_real(x_disc)
+            x_quant_delta = x_quant - x
 
+        # Quantize w/ straight-through estimator - add the delta to x
+        # This effectively replaces x with x_quant in the forward pass
+        # while preserving gradients in the backward pass
         x = x + x_quant_delta
 
-        # cast to long to be used as discrete tokens
-        return x.long()
+        return x
 
 
 # autoregressive wrapper class
