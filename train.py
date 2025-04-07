@@ -77,10 +77,17 @@ class MusicSamplerDataset(Dataset):
             'pitch': torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], dtype=torch.long).to(device)
             }
         else:
+            dtimes = torch.tensor(self.feature_data['dtime'][rand:rand + self.seq_len+1], dtype=torch.long)
+            # converting to continuous values
+            #dtimes = torch.div(dtimes, OFFSET_DUR)
+            durs = torch.tensor(self.feature_data['dur'][rand:rand + self.seq_len+1], dtype=torch.long)
+            # converting to continuous values
+            #durs = torch.div(durs, OFFSET_DUR)
+            pitches = torch.tensor(self.feature_data['pitch'][rand:rand + self.seq_len+1], dtype=torch.long)
             x = {
-            'dtime': torch.tensor(self.feature_data['dtime'][rand:rand + self.seq_len+1], dtype=torch.long).to(device),
-            'dur': torch.tensor(self.feature_data['dur'][rand:rand + self.seq_len+1], dtype=torch.long).to(device),
-            'pitch': torch.tensor(self.feature_data['pitch'][rand:rand + self.seq_len+1], dtype=torch.long).to(device)
+            'dtime': dtimes.to(device),
+            'dur':  durs.to(device),
+            'pitch': pitches.to(device)
             }
         return x
 
@@ -100,7 +107,7 @@ if TESTING or LIGHT_DATASET:
     monster_piano_train = train_dataset.select(range(int(len(train_dataset) * 0.01)))  # 1% for training
     monster_piano_val = train_dataset.select(range(int(len(train_dataset) * 0.99), len(train_dataset)))  # Last 1% for validation
 else:
-    monster_piano_train = train_dataset.select(range(int(len(train_dataset) * 0.4)))  # 1% for training
+    monster_piano_train = train_dataset.select(range(int(len(train_dataset) * 0.2)))  # 1% for training
     monster_piano_val = train_dataset.select(range(int(len(train_dataset) * 0.95), len(train_dataset)))  # Last 1% for validation
 
 
@@ -115,9 +122,10 @@ val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
 
 ''' MODEL '''
 
+
 model = AutoregressiveAutoencoder(
     ignore_index = PAD_IDX, 
-    pad_value=PAD_IDX,
+    #pad_value=PAD_IDX,
     decoder = Decoder(
         num_tokens = PAD_IDX+1,
         max_seq_len = SEQ_LEN,
@@ -137,8 +145,8 @@ model = AutoregressiveAutoencoder(
         attn_flash = True
         )
     )
-'''
 
+'''
 model = EncoderOnly(
     ignore_index = PAD_IDX, 
     pad_value=PAD_IDX,
@@ -151,7 +159,22 @@ model = EncoderOnly(
         rotary_pos_emb = True,
         attn_flash = True
         )
+    )
+
+model = DecoderOnly(
+    ignore_index = PAD_IDX, 
+    #pad_value=PAD_IDX,
+    decoder = DecoderSimple(
+        num_tokens = PAD_IDX+1,
+        max_seq_len = SEQ_LEN,
+        dim = EMB_DIM,
+        depth = NUM_LAYERS,
+        heads = NUM_HEADS,
+        rotary_pos_emb = True,
+        attn_flash = True
+        )
     )'''
+
 model.to(device)
 
 #print(model)
@@ -180,8 +203,8 @@ nsteps = 0
 
 for ep in range(NUM_EPOCHS):
     print('Epoch #', ep)
-    model.train()
     
+    model.train()
     for i, x in enumerate(tqdm.tqdm(train_loader, desc='Training')):
         
         optim.zero_grad()
@@ -285,7 +308,7 @@ for ep in range(NUM_EPOCHS):
             print('Saving model progress. Please wait...')
             print('model_checkpoint_' + str(nsteps) + '_steps_' + str(round(float(train_losses[-1]), 4)) + '_loss_' + str(round(float(train_accs[-1]), 4)) + '_acc.pth')
 
-            fname = './save_models/model_checkpoint_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(train_losses[-1]), 4)) + '_loss_' + str(round(float(train_accs[-1]), 4)) + '_acc.pth'
+            fname = './save_models/' + MODEL_NAME + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(train_losses[-1]), 4)) + '_loss_' + str(round(float(train_accs[-1]), 4)) + '_acc.pth'
 
             torch.save(model.state_dict(), fname)
 

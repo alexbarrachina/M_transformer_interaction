@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J tgenie
+#SBATCH -J tgenie_light
 #SBATCH -p high
 #SBATCH -N 1
 #SBATCH --gres=gpu:quadro:1

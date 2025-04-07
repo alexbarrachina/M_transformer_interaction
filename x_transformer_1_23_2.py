@@ -1223,14 +1223,14 @@ class Decoder(nn.Module):
 
         # Embeddings
         # Token embeddings for each feature type
-        #self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
+        self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
         self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
         #self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
         #self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
 
         # For the concatenation approach (like original Piano Genie)
         # Input projection for concatenated features (pitch one-hot + continuous values)
-        input_dim = VOCAB_SIZE_PITCH + 3  # one-hot pitch + dtime + dur + button (all continuous)
+        input_dim = dim + dim + 1  # one-hot pitch + dtime + dur + button (all continuous)
         self.input_proj = nn.Linear(input_dim, dim)
  
        # positional embeddings is inside the attention layers
@@ -1261,11 +1261,12 @@ class Decoder(nn.Module):
 
  
     def init_(self):
-#        nn.init.kaiming_normal_(self.token_emb.emb.weight)
-        #nn.init.kaiming_normal_(self.dtime_emb.weight)
+#       nn.init.kaiming_normal_(self.token_emb.emb.weight)
+        nn.init.kaiming_normal_(self.dtime_emb.weight)
         nn.init.kaiming_normal_(self.pitch_emb.weight)
         #nn.init.kaiming_normal_(self.dur_emb.weight)
         #nn.init.kaiming_normal_(self.button_emb.weight)
+        nn.init.kaiming_normal_(self.input_proj.weight)
 
     def forward(
         self,
@@ -1283,14 +1284,16 @@ class Decoder(nn.Module):
         predicting the pitch at every time step.
         """
         # One-hot encode pitch for concatenation
-        pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        #pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        pitch = self.pitch_emb(past_tokens['pitch'])
+        dtime = self.dtime_emb(past_tokens['dtime'])
         # Handle button, dtime, dur as continuous values
-        dtime= past_tokens['dtime'].float().unsqueeze(-1)
-        dur= past_tokens['dur'].float().unsqueeze(-1)
+        #dtime= past_tokens['dtime'].float().unsqueeze(-1)
+        #dur= past_tokens['dur'].float().unsqueeze(-1)
         button= past_tokens['button'].float().unsqueeze(-1)
         
         # Concatenate all features as in original Piano Genie
-        concat_inputs = torch.cat([pitch_onehot, dtime, dur, button], dim=-1)
+        concat_inputs = torch.cat([pitch, dtime, button], dim=-1)
 
         # Project concatenated inputs to embedding dimension
         x = self.input_proj(concat_inputs)
@@ -1361,7 +1364,7 @@ class Encoder(nn.Module):
 
         # For the concatenation approach (like original Piano Genie)
         # Input projection for concatenated features (pitch one-hot + continuous values)
-        input_dim = VOCAB_SIZE_PITCH + 1  # one-hot pitch + dtime (continuous)
+        input_dim = dim + 1  # one-hot pitch + dtime (continuous)
         self.input_proj = nn.Linear(input_dim, dim)
 
 
@@ -1392,6 +1395,7 @@ class Encoder(nn.Module):
     def init_(self):
         #nn.init.kaiming_normal_(self.dtime_emb.weight)
         nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.input_proj.weight)
 
     def forward(
         self,
@@ -1434,11 +1438,12 @@ class Encoder(nn.Module):
         #x = self.token_emb(x) # (B, T(seq_len), D(emb_dim)) (20, 1024, 2048)
 
                 # One-hot encode pitch for concatenation
-        pitch_onehot = F.one_hot(note_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        pitch = self.pitch_emb(note_tokens['pitch'])
+        #pitch_onehot = F.one_hot(note_tokens['pitch'], VOCAB_SIZE_PITCH).float()
         # Handle button, dtime, dur as continuous values
         dtime= note_tokens['dtime'].float().unsqueeze(-1)
         # Concatenate all features as in original Piano Genie
-        concat_inputs = torch.cat([pitch_onehot, dtime], dim=-1)
+        concat_inputs = torch.cat([pitch, dtime], dim=-1)
 
         # Project concatenated inputs to embedding dimension
         x = self.input_proj(concat_inputs)
@@ -1505,10 +1510,8 @@ class AutoregressiveAutoencoder(Module):
         encoder,
         decoder,
         ignore_index = -100,
-        pad_value = 0
     ):
         super().__init__()
-        self.pad_value = pad_value
         self.ignore_index = ignore_index
 
         self.encoder = encoder
@@ -1527,7 +1530,7 @@ class AutoregressiveAutoencoder(Module):
             'pitch': note_tokens['pitch'][:, 1:], # includes current pitch
         } # (B, T)
         e = self.encoder(encoder_context) # encoder output (batch, seq_len) (2, 1024)
-        b = self.quantizer(e) # generate buttons (batch, seq_len) (2, 1024)
+        b = self.quantizer(e) # generate buttons (batch, seq_len) (2, 1024), continuous values
 
         # Get current tokens (the last note_token)
         #current_dtime = note_tokens['dtime'][:,-1].unsqueeze(1)
@@ -1648,6 +1651,8 @@ class AutoregressiveAutoencoder(Module):
             temperature = 1.0
             ):
 
+        b = self.quantizer.discrete_to_real( note_tokens['button'])
+
         # B = batch size = 1
         # note_tokens suposed on gpu
         # Create encoder context (excluding the first position)
@@ -1660,7 +1665,7 @@ class AutoregressiveAutoencoder(Module):
             'dtime': note_tokens['dtime'][:, 1:],
             'pitch': note_tokens['pitch'][:, :-1],
             'dur': note_tokens['dur'][:, :-1],
-            'button': note_tokens['button'][:, 1:]
+            'button': b[:, 1:]
         } # (B, T)
 
         logits, _ = self.decoder(
@@ -1688,7 +1693,7 @@ class AutoregressiveAutoencoder(Module):
         #    'pitch': note_tokens['pitch'][:, :] -> (B=1, T)
                 
         e = self.encoder(note_tokens) # encoder output (batch, seq_len)
-        b = self.quantizer(e) # generate buttons (batch, seq_len)
+        b = self.real_to_discrete(e) # generate buttons (batch, seq_len)
 
         #b = b[:, -1] # (B=1, 1)
         #b = b.unsqueeze(1).item()
@@ -1699,7 +1704,6 @@ class AutoregressiveAutoencoder(Module):
         self,
         prompts,
         seq_len,
-        eos_token = None,
         temperature = 1.,
         filter_logits_fn: Callable = top_k,
         restrict_to_max_seq_len = True,
@@ -1764,19 +1768,6 @@ class AutoregressiveAutoencoder(Module):
               if sl % 32 == 0:
                 print(sl, '/', seq_len)
 
-            if exists(eos_token): # None
-                is_eos_tokens = (out == eos_token)
-
-                if is_eos_tokens.any(dim = -1).all():
-                    # mask out everything after the eos tokens
-                    shifted_is_eos_tokens = F.pad(is_eos_tokens, (1, -1))
-                    mask = shifted_is_eos_tokens.float().cumsum(dim = -1) >= 1
-                    out = out.masked_fill(mask, self.pad_value)
-
-                    if verbose: 
-                      print('Model called the end of sequence at:', sl, '/', seq_len)
-
-                    break
 
         if return_prime:
           return out[:, :]
@@ -1809,7 +1800,6 @@ class EncoderOnly(Module):
         self,
         encoder,
         ignore_index = -100,
-        pad_value = 0
     ):
         super().__init__()
 
@@ -2043,3 +2033,491 @@ def melodic_shape_loss(pitches, buttons, window_size=5):
         total_loss += window_loss
     
     return total_loss / (seq_len - window_size + 1)
+
+#===================================================================================================================
+
+class DecoderSimple(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_tokens, # PAD_IDX+1
+        max_seq_len, # SEQ_LEN
+        dim,
+        depth,
+        heads,
+        #attn_layers, # Decoder(dim, depth, heads, rotary_pos_emb = True, attn_flash = True)
+        emb_dropout = 0.,
+        post_emb_norm = False,
+        num_memory_tokens = None,
+        memory_tokens_interspersed_every = None,
+        rotary_pos_emb = True,
+        attn_flash = True,
+        logits_dim = None,
+        causal = True  # True for decoder
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        super().__init__()
+
+        self.emb_dim = dim # 2048
+        self.num_tokens = num_tokens # 385 (vocabulary size)
+
+        self.max_seq_len = max_seq_len # 1024
+
+        # Embeddings
+        # Token embeddings for each feature type
+        self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        #self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
+        #self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
+
+        # For the concatenation approach (like original Piano Genie)
+        # Input projection for concatenated features (pitch one-hot + continuous values)
+        #input_dim = dim + 2  # one-hot pitch + dtime + dur (all continuous)
+        # testing Alex, with no duration
+        input_dim = dim + dim  # one-hot pitch + dtime (all continuous)
+        self.input_proj = nn.Linear(input_dim, dim)
+ 
+       # positional embeddings is inside the attention layers
+        #self.pos_emb = nn.Embedding(seq_len, d_model) if rotary_pos_emb else None
+ 
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout) # Dropout function
+
+        # Attention layers
+        self.attn_layers  = AttentionLayers(
+                          dim = dim,
+                          depth = depth,
+                          heads = heads,
+                          rotary_pos_emb = rotary_pos_emb,
+                          attn_flash = attn_flash,
+                          causal = causal
+                         )
+
+        self.init_()
+
+        #logits_dim = default(logits_dim, num_tokens) # 385
+        # Linear layer
+        #self.to_logits = nn.Linear(dim, logits_dim) # if not tie_embedding else lambda t: t @ self.token_emb.emb.weight.t()
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+
+ 
+    def init_(self):
+#       nn.init.kaiming_normal_(self.token_emb.emb.weight)
+        #nn.init.kaiming_normal_(self.dtime_emb.weight)
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        #nn.init.kaiming_normal_(self.dur_emb.weight)
+        #nn.init.kaiming_normal_(self.button_emb.weight)
+        nn.init.kaiming_normal_(self.input_proj.weight)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],  # Contains past dtime, vel, pitch, dur, button
+        return_intermediates = False,
+        mask = None,
+        mems = None,
+        seq_start_pos = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        # One-hot encode pitch for concatenation
+        #pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        pitch = self.pitch_emb(past_tokens['pitch']) # [Batch, SeqLen, EmbDim]
+        dtime= self.dtime_emb(past_tokens['dtime']) # [Batch, SeqLen, EmbDim]
+        # Handle button, dtime, dur as continuous values
+        #dur= past_tokens['dur'].float().unsqueeze(-1)
+        #button= past_tokens['button'].float().unsqueeze(-1)
+        
+        # Concatenate all features as in original Piano Genie
+        #concat_inputs = torch.cat([pitch, dtime, dur], dim=-1)
+        # testing Alex, with no duration
+        concat_inputs = torch.cat([pitch, dtime], dim=-1) # [Batch, SeqLen, EmbDim * 2]
+
+        # Project concatenated inputs to embedding dimension
+        x = self.input_proj(concat_inputs) # [Batch, SeqLen, EmbDim]
+        
+
+        '''
+        # Embed past notes, sum all embedding values, 
+        x = ( # (1,4,768)
+            self.dtime_emb(past_tokens['dtime']) + # past_notes['dtime'] (1,1024) [1:]
+            self.pitch_emb(past_tokens['pitch']) + # [:-1]
+            self.dur_emb(past_tokens['dur']) + # [:-1]
+            self.button_emb(past_tokens['button']) # [:]
+        )  # [B, T, emb_dim] (dtime_emb + pitch_emb + dur_emb + but_emb) -> note embeddings
+        '''
+
+        # embedding dropout
+        x = self.emb_dropout(x)
+
+        # positional embeddings is inside the attention layers
+        # x = x + self.pos_emb(positions)  # [B, T, d_model]
+
+        # ¿? Create a causal mask or supply your custom mask if needed
+        x, intermediates = self.attn_layers(x, mask = mask, mems = mems, cache = cache, return_hiddens = True, seq_start_pos = seq_start_pos, **kwargs)
+
+        logits = self.to_logits(x) # (B, T (seq_len), Pitch_Vocab_size) (20, 1024, 128)
+
+        if return_intermediates:
+            return logits, intermediates
+
+        return logits
+
+class DecoderSimple_continuous_dtime(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_tokens, # PAD_IDX+1
+        max_seq_len, # SEQ_LEN
+        dim,
+        depth,
+        heads,
+        #attn_layers, # Decoder(dim, depth, heads, rotary_pos_emb = True, attn_flash = True)
+        emb_dropout = 0.,
+        post_emb_norm = False,
+        num_memory_tokens = None,
+        memory_tokens_interspersed_every = None,
+        rotary_pos_emb = True,
+        attn_flash = True,
+        logits_dim = None,
+        causal = True  # True for decoder
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        super().__init__()
+
+        self.emb_dim = dim # 2048
+        self.num_tokens = num_tokens # 385 (vocabulary size)
+
+        self.max_seq_len = max_seq_len # 1024
+
+        # Embeddings
+        # Token embeddings for each feature type
+        #self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        #self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
+        #self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
+
+        # For the concatenation approach (like original Piano Genie)
+        # Input projection for concatenated features (pitch one-hot + continuous values)
+        #input_dim = dim + 2  # one-hot pitch + dtime + dur (all continuous)
+        # testing Alex, with no duration
+        input_dim = dim + 1  # one-hot pitch + dtime (all continuous)
+        self.input_proj = nn.Linear(input_dim, dim)
+ 
+       # positional embeddings is inside the attention layers
+        #self.pos_emb = nn.Embedding(seq_len, d_model) if rotary_pos_emb else None
+ 
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout) # Dropout function
+
+        # Attention layers
+        self.attn_layers  = AttentionLayers(
+                          dim = dim,
+                          depth = depth,
+                          heads = heads,
+                          rotary_pos_emb = rotary_pos_emb,
+                          attn_flash = attn_flash,
+                          causal = causal
+                         )
+
+        self.init_()
+
+        #logits_dim = default(logits_dim, num_tokens) # 385
+        # Linear layer
+        #self.to_logits = nn.Linear(dim, logits_dim) # if not tie_embedding else lambda t: t @ self.token_emb.emb.weight.t()
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+
+ 
+    def init_(self):
+#       nn.init.kaiming_normal_(self.token_emb.emb.weight)
+        #nn.init.kaiming_normal_(self.dtime_emb.weight)
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        #nn.init.kaiming_normal_(self.dur_emb.weight)
+        #nn.init.kaiming_normal_(self.button_emb.weight)
+        nn.init.kaiming_normal_(self.input_proj.weight)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],  # Contains past dtime, vel, pitch, dur, button
+        return_intermediates = False,
+        mask = None,
+        mems = None,
+        seq_start_pos = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        # One-hot encode pitch for concatenation
+        #pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        pitch = self.pitch_emb(past_tokens['pitch']) # [Batch, SeqLen, EmbDim]
+        dtime= past_tokens['dtime'].float().unsqueeze(-1)
+        
+        # Concatenate all features as in original Piano Genie
+        #concat_inputs = torch.cat([pitch, dtime, dur], dim=-1)
+        # testing Alex, with no duration
+        concat_inputs = torch.cat([pitch, dtime], dim=-1) # [Batch, SeqLen, EmbDim +1]
+
+        # Project concatenated inputs to embedding dimension
+        x = self.input_proj(concat_inputs) # [Batch, SeqLen, EmbDim]
+        
+
+        '''
+        # Embed past notes, sum all embedding values, 
+        x = ( # (1,4,768)
+            self.dtime_emb(past_tokens['dtime']) + # past_notes['dtime'] (1,1024) [1:]
+            self.pitch_emb(past_tokens['pitch']) + # [:-1]
+            self.dur_emb(past_tokens['dur']) + # [:-1]
+            self.button_emb(past_tokens['button']) # [:]
+        )  # [B, T, emb_dim] (dtime_emb + pitch_emb + dur_emb + but_emb) -> note embeddings
+        '''
+
+        # embedding dropout
+        x = self.emb_dropout(x)
+
+        # positional embeddings is inside the attention layers
+        # x = x + self.pos_emb(positions)  # [B, T, d_model]
+
+        # ¿? Create a causal mask or supply your custom mask if needed
+        x, intermediates = self.attn_layers(x, mask = mask, mems = mems, cache = cache, return_hiddens = True, seq_start_pos = seq_start_pos, **kwargs)
+
+        logits = self.to_logits(x) # (B, T (seq_len), Pitch_Vocab_size) (20, 1024, 128)
+
+        if return_intermediates:
+            return logits, intermediates
+
+        return logits
+
+class DecoderOnly(Module):
+    def __init__(
+        self,
+        #encoder,
+        decoder,
+        ignore_index = -100,
+    ):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+        #self.encoder = encoder
+        #self.quantizer = IntegerQuantizer()
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+        #seq, ignore_index = x.shape[1], self.ignore_index
+
+        # Create encoder context (excluding the first position)
+        # as note_tokens['dtime'] (B, T+1)
+        '''encoder_context = {
+            'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, 1:], # includes current pitch
+        } # (B, T)
+        e = self.encoder(encoder_context) # encoder output (batch, seq_len) (2, 1024)
+        b = self.quantizer(e) # generate buttons (batch, seq_len) (2, 1024), continuous values
+        '''
+        # Get current tokens (the last note_token)
+        #current_dtime = note_tokens['dtime'][:,-1].unsqueeze(1)
+        #current_button = b[:,-1].unsqueeze(1)
+        #e = e.unsqueeze(1)
+
+        # Create decoder context
+        # note_tokens['dtime'][:,-1] is the current dtime
+        # b[:,-1] is the current button 
+        decoder_context = {
+            'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, :-1], # no current pitch 
+            'dur': note_tokens['dur'][:, :-1], # no current dur
+            #'button': b[:, :] # b.shape = (B, T) # includes current button
+        } # (B, T)
+
+        logits = self.decoder(decoder_context) # (B, T (seq_len), VOCAB_SIZE_PITCH) (2, 1024, 128)
+
+        # Target should be the pitch at the current (last) position
+        target = note_tokens['pitch'][:,1:]
+
+        # Compute reconstruction loss (cross entropy between predicted and true pitches)
+        #loss_recons = loss.forward(y, tgt)
+        # Compute losses and update params
+        # loss_recons = cross entropy loss between predicted pitch sample list and true pitch sample list
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index = self.ignore_index # 128 vocab_pitch_size
+        )
+        
+        # flat all batches ??
+        #loss_recons = F.cross_entropy(y.view(-1, PIANO_NUM_KEYS), tgt.view(-1)) 
+
+        
+        # Calculate contour penalty
+        #"We also contribute a musically motivated regularization strategy which gives the model an 
+        # awareness of melodic contour. By comparing the finite differences (musical intervals in semitones) 
+        # of the input ∆x to the finite differences of the real-valued encoder output ∆encs(x), 
+        # the Lcontour term encourages the encoder to produce "button contours" that match the shape 
+        # of the input melodic contours."
+            
+        # This implements Lcontour = Σ max(1 − ∆x∆encs(x), 0)²:
+        # Encourages button intervals to match piano note intervals in direction
+
+        # Calculate differences between consecutive notes/latents
+        # torch.diff(e, dim=1) = ∆encs(x) = e[:, 1:] - e[:, :-1]  # Button intervals
+        # torch.diff(k, dim=1) = ∆x = (k[:, 1:] - k[:, :-1]).float()  # Piano note intervals
+        '''
+        # Penalizes when the product/quotient is less than the margin
+        pitch_diff = torch.diff(note_tokens['pitch'][:,1:], dim=1)
+        e_diff = torch.diff(e, dim=1) # [:, :-1]    
+        loss_contour = torch.square(
+            torch.maximum(
+                1 - pitch_diff.float() * e_diff,
+                    torch.zeros_like(pitch_diff, dtype=torch.float)
+            )
+        ).mean()
+        
+        # Regularize to encourage encoder to output in range [-1, 1]
+        loss_margin = torch.square(
+            # torch.abs(e) - 1: only values outside the range [-1,1] are negative, no penalty
+            # in higher values (like 10, or -10), torch.abs(e) - 1 > 0, so penalty
+            torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
+        ).mean()
+
+        # Add multi-step contour losses
+        loss_multi_step = multi_step_contour_loss(
+            note_tokens['pitch'][:,1:], 
+            e,
+            max_steps=5
+        ).mean()
+        
+        loss_interval = interval_preservation_loss(
+            note_tokens['pitch'][:,1:],
+            e,
+            max_steps=5
+        ).mean()
+        
+        loss_shape = melodic_shape_loss(
+            note_tokens['pitch'][:,1:],
+            e,
+            window_size=5
+        ).mean()
+         '''
+        # Combine losses with appropriate weights
+        loss_total = torch.zeros_like(loss_recons)
+        loss_total += loss_recons
+        '''
+        if LOSS_CONTOUR_MULTIPLIER > 0:
+            loss_total += LOSS_CONTOUR_MULTIPLIER * (
+                0.4 * loss_contour +
+                0.3 * loss_multi_step +
+                0.2 * loss_interval +
+                0.1 * loss_shape
+            )
+        
+        if LOSS_MARGIN_MULTIPLIER > 0:
+            loss_total += LOSS_MARGIN_MULTIPLIER * loss_margin
+            # Total loss
+        
+        
+        if LOSS_DEVIATE_MULTIPLIER > 0:
+            loss_total += LOSS_DEVIATE_MULTIPLIER * loss_deviate
+        '''
+
+        #loss_total = loss_recons
+        acc = self.compute_accuracy(logits, target)
+        return loss_total, acc
+ 
+    @torch.inference_mode()
+    def real_to_discrete(self, x, eps=1e-6):
+        return self.quantizer.real_to_discrete(x, eps)
+    
+    @torch.inference_mode()
+    def gen_pitch_token(self, 
+            note_tokens: Dict[str, Tensor],
+            temperature = 1.0
+            ):
+
+        # B = batch size = 1
+        # note_tokens suposed on gpu
+        # Create encoder context (excluding the first position)
+        # as note_tokens['dtime'] (B, T+1)
+
+        # Create decoder context
+        # note_tokens['dtime'][:,-1] is the current dtime
+        # b[:,-1] is the current button 
+        decoder_context = {
+            'dtime': note_tokens['dtime'][:, 1:],
+            'pitch': note_tokens['pitch'][:, :-1],
+            'dur': note_tokens['dur'][:, :-1],
+            #'button': note_tokens['button'][:, 1:]
+        } # (B, T)
+
+        #decoder_context['dtime'] = torch.div(decoder_context['dtime'], OFFSET_DUR)        
+        
+        logits, _ = self.decoder(
+                decoder_context,
+                return_intermediates = True,
+                cache = None,
+                seq_start_pos = None
+        )
+
+        #decoder_context['dtime'] = torch.mul(decoder_context['dtime'], OFFSET_DUR)        
+
+        logits = logits[:, -1]  # [B, 1, vocab_size]
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        sample = torch.multinomial(probs, 1)
+
+        return sample.unsqueeze(1).item()
+
+    @torch.inference_mode()
+    def gen_buttons(self, note_tokens: Dict[str, Tensor])  -> Tensor:
+        
+        # B = batch size = 1
+        # note_tokens suposed on gpu
+        # get:
+        #    'dtime': note_tokens['dtime'][:, :] -> (B=1, T)
+        #    'pitch': note_tokens['pitch'][:, :] -> (B=1, T)
+                
+        e = self.encoder(note_tokens) # encoder output (batch, seq_len)
+        b = self.real_to_discrete(e) # generate buttons (batch, seq_len)
+
+        #b = b[:, -1] # (B=1, 1)
+        #b = b.unsqueeze(1).item()
+        return b
+    
+ 
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
+
+        acc = num_right / len(labels) 
+        return acc

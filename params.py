@@ -5,8 +5,10 @@ import torch
 
 ''' TESTING '''
 TESTING = False
-LIGHT_MODEL = False
-LIGHT_DATASET = False
+LIGHT_MODEL = True
+LIGHT_DATASET = True
+
+MODEL_NAME = 'autoenc_apr7_light_deviate'
 
 ''' MODEL '''
 # constants
@@ -15,33 +17,31 @@ if LIGHT_MODEL:
     NUM_LAYERS = 4
     EMB_DIM = 512 # 2048
     NUM_HEADS = 32
-    SAVE_EVERY = 100000
+    SAVE_EVERY = 50000
+    BATCH_SIZE = 20 # 20 in esmuc
 else:
     SEQ_LEN = 1024 # orig 2048
     NUM_LAYERS = 4
     EMB_DIM = 2048 # 2048
     NUM_HEADS = 32
-    SAVE_EVERY = 10000
+    SAVE_EVERY = 5000
+    BATCH_SIZE = 4 # 10 upf decoder-only,  20 esmuc orignal decoder_only
 
 ''' TRAINING '''
 # Taken from the paper
 if torch.cuda.is_available(): 
-    #BATCH_SIZE = 3 #2 # Change this to your specs (4 batches per 48GB)
-    #BATCH_SIZE = 116 # original
-    if TESTING:
-        BATCH_SIZE = 1
-        SEQ_LEN = 16 # orig 2048
-    else:
-        BATCH_SIZE = 20 
     WORKERS = 4
     print("using CUDA")
 else: # on macbook pro  
-    BATCH_SIZE = 1  
     WORKERS = 1
     print("using CPU")
-    
+
+if TESTING:
+    BATCH_SIZE = 1
+    SEQ_LEN = 16 
+
 VALIDATE_EVERY  = 500
-GENERATE_EVERY  = 1000
+GENERATE_EVERY  = 500
 GENERATE_LENGTH = 512
 PRINT_STATS_EVERY = 50
 
@@ -50,9 +50,9 @@ NUM_EPOCHS = 40
 LEARNING_RATE = 1e-4
 GRAD_CLIP = 1.5
 
-LOSS_MARGIN_MULTIPLIER:Final[float] = 0.01 # TODO decide values
-LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.1 # 0.01 original
-LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.01
+LOSS_MARGIN_MULTIPLIER:Final[float] = 0.1 #0.01 # TODO decide values
+LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.1 # 0.1, but 0.01 original
+LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.1 # 0.01
 
 USE_TENSORBOARD = True
 
