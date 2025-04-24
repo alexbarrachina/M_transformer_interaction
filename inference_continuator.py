@@ -1,3 +1,5 @@
+import time
+
 # Import Monster Piano Transformer as mpt
 from model_loader import load_model
 from midi_processors import midi_to_tokens, tokens_to_midi
@@ -7,15 +9,28 @@ import TMIDIX
 
 ''' DEVICE '''
 # Model precision option
-if torch.backends.mps.is_available(): 
-  device = torch.device("cpu")
-else:
-  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Helper function to safely move tensors to MPS
+def to_device(tensor_or_dict):
+    if isinstance(tensor_or_dict, dict):
+        return {k: to_device(v) for k, v in tensor_or_dict.items()}
+    elif isinstance(tensor_or_dict, torch.Tensor):
+        # For MPS, ensure float32 for better compatibility
+        if device.type == 'mps' and tensor_or_dict.dtype == torch.float64:
+            tensor_or_dict = tensor_or_dict.float()
+        return tensor_or_dict.to(device)
+    return tensor_or_dict
+
+#device = torch.device('cpu')
+device = torch.device('mps')
+
 
 ''' MODEL '''
 
-model = load_model(model_name='light__apr4_autoencoder', device='cpu')
+model = load_model(model_name='full_apr7_autoencoder', device='cpu')
 model.to(device)
+model.eval()
+
 #print(model)
 
 ''' PARAMS '''
@@ -49,15 +64,17 @@ for j in range(0, 10):  # generate 10 continuation files
     'pitch': torch.tensor(dict_input_tokens['pitch'], dtype=torch.long).unsqueeze(0),
     'dur': torch.tensor(dict_input_tokens['dur'], dtype=torch.long).unsqueeze(0)
           }
-  #b = model.gen_buttons(context).squeeze(0) # generate buttons, continuous values
-  #e = model.encoder(context).squeeze(0)
-  e = model.encoder(context) # encoder output (batch, seq_len)
-  b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
-  e = e.squeeze(0)
+  context = to_device(context)
+  
+  with torch.inference_mode():
+    e = model.encoder(context) # encoder output (batch, seq_len)
+    b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
+    e = e.squeeze(0)
 
+  timeStart = time.perf_counter()
   # generate pitches
   for i in range(0, TOTAL_GEN_LEN-1-CTX_LEN):
-
+    
     context = {
       'dtime': torch.tensor(dict_input_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
       'pitch': torch.tensor(dict_input_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
@@ -65,10 +82,15 @@ for j in range(0, 10):  # generate 10 continuation files
       'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
     }
 
-    new_pitch_token = model.gen_pitch_token(context)
+    context = to_device(context)
+  
+    with torch.inference_mode():
+        new_pitch_token = model.gen_pitch_token(context)
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
     print(new_pitch_token)
 
+  timeEnd = time.perf_counter()
+  print("t=", (timeEnd-timeStart) * 1000 / i, "ms") # in miliseconds, promig
 
   context = {
       'dtime': dict_output_tokens['dtime'][:TOTAL_GEN_LEN],
@@ -100,5 +122,5 @@ for j in range(0, 10):  # generate 10 continuation files
   # generate a midi file from buttons
   song_d = TMIDIX.dict_to_song(context)
   detailed_stats = TMIDIX.Tegridy_ms_SONG_to_MIDI_Converter(song_d,output_file_name = output_e_midi_name+str(j),  
-                                                              timings_multiplier=2
+                                                              timings_multiplier=1
                                                             )

@@ -28,8 +28,9 @@ MODELS_INFO = {'tester': 'tester. light model not trained',
                 'light_apr3_decoder_only_no_dur_cont_dtime': 'light model, decoder only, no encoder, no button loss, no duration, light dataset 1%, interruption before overfitting on checkpoint_12_eps_25417_steps_0.8986_loss_0.7389_acc',
                 'full_apr4_decoder_only_no_dur': 'full model, decoder only, no encoder, no button loss, no duration, full dataset 20%, model_checkpoint_1_eps_26233_steps_1.1316_loss_0.6802_acc',
                 'light__apr4_autoencoder': 'light model, autoencoder, no duration, light dataset 20%,  losses de button 0 per error',
-                'full_apr7_autoencoder': 'light model, autoencoder, no duration, full dataset 20%, ????????',
-                'light_apr7_autoencoder': 'light model, autoencoder, no duration, light dataset, more deviate 0.1, margin 0.1, contour 0.1'
+                'full_apr7_autoencoder': 'full model, autoencoder, no duration, full dataset 20%, autoenc_apr7_full_0_eps_5001_steps_2.2775_loss_0.6992_acc',
+                'light_apr7_autoencoder': 'light model, autoencoder, no duration, light dataset, more deviate 0.1, margin 0.1, contour 0.1, autoenc_apr7_light_deviate_14_eps_29653_steps_1.1294_loss_0.8396_acc.pth',
+                'full_apr7_hi_losses': 'full model, autoencoder, more deviate 0.1, margin 0.1, contour 0.1, full dataset 20%'
             }     
 
 #===================================================================================================
@@ -50,8 +51,9 @@ MODELS_FILE_NAMES = {'tester': './save_models/tester.pth',
                      'light_apr3_decoder_only_no_dur_cont_dtime': './save_models/light_apr3_decoder_only_no_dur_cont_dtime.pth',
                      'full_apr4_decoder_only_no_dur': './save_models/full_apr4_decoder_only_no_dur.pth',
                      'light__apr4_autoencoder': './save_models/light__apr4_autoencoder.pth',
-                     'full_apr7_autoencoder': './save_models/?????encara no.pth',
-                     'light_apr7_autoencoder': './save_models/?????encara no.pth'
+                     'full_apr7_autoencoder': './save_models/autoenc_apr7_full_0_eps_30001_steps_0.6359_loss_0.8169_acc.pth',
+                     'light_apr7_autoencoder': './save_models/autoenc_apr7_light_deviate_39_eps_82603_steps_0.4157_loss_0.9494_acc.pth',
+                     'full_apr7_hi_losses': './save_models/?????'
                    }
 
 #===================================================================================================
@@ -220,7 +222,7 @@ MODELS_PARAMETERS = {
     'full_apr7_autoencoder': {
         'seq_len': 1024,
         'pad_idx': 128,
-        'emb_dim': 2018,
+        'emb_dim': 2048,
         'num_layers': 4,
         'heads': 32,
         'loss_margin': 0.01,
@@ -235,7 +237,19 @@ MODELS_PARAMETERS = {
         'heads': 32,
         'loss_margin': 0.01,
         'loss_contour': 0.1,
-        'loss_deviate': 0.01
+        'loss_deviate': 0.01,
+        'dataset': 'light'
+        },
+    'full_apr7_hi_losses': {
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full'
         }
 }
 

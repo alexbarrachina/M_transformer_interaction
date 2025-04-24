@@ -91,16 +91,9 @@ class MusicSamplerDataset(Dataset):
             }
         return x
 
-#monster_piano = load_dataset('asigalov61/Monster-Piano') # original
-#monster_piano = load_dataset('asigalov61/Monster-Piano', split='train[:70%]') 
-#monster_piano_val = load_dataset('asigalov61/Monster-Piano', split='train[95%:100%]') 
-
-
 # Load the dataset from disk
 monster_piano = load_from_disk(local_dataset_path)
 
-#monster_piano = load_dataset('asigalov61/Monster-Piano', split='train[:1%]') 
-#monster_piano_val = load_dataset('asigalov61/Monster-Piano', split='train[99%:100%]') 
 # If you need specific splits, you can select them after loading
 train_dataset = monster_piano['train']
 if TESTING or LIGHT_DATASET:
@@ -208,6 +201,7 @@ for ep in range(NUM_EPOCHS):
     for i, x in enumerate(tqdm.tqdm(train_loader, desc='Training')):
         
         optim.zero_grad()
+
         with ctx:
             loss, acc = model(x)  # Update your model to accept target separately
         scaler.scale(loss).backward()
@@ -248,61 +242,7 @@ for ep in range(NUM_EPOCHS):
 
             model.train()
 
-        '''if i % GENERATE_EVERY == 0:
-            model.eval()
-
-            inp = random.choice(get_batch(train_data, i, BATCH_SIZE))[:GENERATE_LENGTH]
-
-            #print(inp)
-
-            with ctx:
-                sample = model.generate(inp[None, ...], GENERATE_LENGTH)
-
-            #print(sample)
-
-            data = sample.tolist()[0]
-
-            #print('Sample INTs', data[:15])
-
-            if len(data) != 0:
-
-                song = data
-                song_f = []
-
-                time = 0
-                dur = 1
-                vel = 90
-                pitch = 60
-                channel = 0
-                patch = 0
-
-                patches = [0] * 16
-
-                for m in song:
-
-                    if 0 <= m < 128:
-                        time += m * 32
-                
-                    elif 128 < m < 256:
-                        dur = (m-128) * 32
-                
-                    elif 256 < m < 384:
-                        pitch = (m-256)
-                
-                        song_f.append(['note', time, dur, 0, pitch, vel, 0])
-
-
-                detailed_stats = TMIDIX.Tegridy_ms_SONG_to_MIDI_Converter(song_f,
-                                                                          output_signature = 'Monster Piano Transformer',
-                                                                          output_file_name = './out/train_sample',
-                                                                          track_name='Project Los Angeles',
-                                                                          list_of_MIDI_patches=patches
-                                                                          )
-
-            #print('Done!')
-
-            model.train()
-        '''
+ 
         if i % SAVE_EVERY == 0:
 
             print('Saving model progress. Please wait...')
@@ -317,3 +257,4 @@ for ep in range(NUM_EPOCHS):
             Tegridy_Any_Pickle_File_Writer(data, './save_models/losses_accs')
 
             #print('Done!')
+

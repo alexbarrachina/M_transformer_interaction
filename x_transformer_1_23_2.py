@@ -1235,7 +1235,7 @@ class Decoder(nn.Module):
  
        # positional embeddings is inside the attention layers
         #self.pos_emb = nn.Embedding(seq_len, d_model) if rotary_pos_emb else None
- 
+
         # Dropout
         self.emb_dropout = nn.Dropout(emb_dropout) # Dropout function
 
@@ -1308,7 +1308,7 @@ class Decoder(nn.Module):
             self.button_emb(past_tokens['button']) # [:]
         )  # [B, T, emb_dim] (dtime_emb + pitch_emb + dur_emb + but_emb) -> note embeddings
         '''
-
+    
         # embedding dropout
         x = self.emb_dropout(x)
 
@@ -1447,7 +1447,7 @@ class Encoder(nn.Module):
 
         # Project concatenated inputs to embedding dimension
         x = self.input_proj(concat_inputs)
- 
+
         # embedding dropout
         x = self.emb_dropout(x)
 
@@ -1651,6 +1651,7 @@ class AutoregressiveAutoencoder(Module):
             temperature = 1.0
             ):
 
+        device = note_tokens['pitch'].device
         b = self.quantizer.discrete_to_real( note_tokens['button'])
 
         # B = batch size = 1
@@ -1679,9 +1680,12 @@ class AutoregressiveAutoencoder(Module):
 
         probs = F.softmax(logits / temperature, dim=-1)
 
-        sample = torch.multinomial(probs, 1)
-
-        return sample.unsqueeze(1).item()
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
 
     @torch.inference_mode()
     def gen_buttons(self, note_tokens: Dict[str, Tensor])  -> Tensor:
@@ -1698,7 +1702,7 @@ class AutoregressiveAutoencoder(Module):
         #b = b[:, -1] # (B=1, 1)
         #b = b.unsqueeze(1).item()
         return b
-    
+
     @torch.inference_mode()
     def generate(
         self,
@@ -2498,7 +2502,7 @@ class DecoderOnly(Module):
         # get:
         #    'dtime': note_tokens['dtime'][:, :] -> (B=1, T)
         #    'pitch': note_tokens['pitch'][:, :] -> (B=1, T)
-                
+        
         e = self.encoder(note_tokens) # encoder output (batch, seq_len)
         b = self.real_to_discrete(e) # generate buttons (batch, seq_len)
 
@@ -2506,7 +2510,7 @@ class DecoderOnly(Module):
         #b = b.unsqueeze(1).item()
         return b
     
- 
+    
     def compute_accuracy(self, logits, labels): 
         out = torch.argmax(logits, dim=-1) 
         out = out.flatten() 
