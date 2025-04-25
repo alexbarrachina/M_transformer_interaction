@@ -5,11 +5,11 @@ import torch
 
 ''' TESTING '''
 TESTING = False
-LIGHT_MODEL = False
-LIGHT_DATASET = False
+LIGHT_MODEL = True
+LIGHT_DATASET = True
 USE_TOPK = False
 
-MODEL_NAME = 'autoenc_apr23_light_hi_losses_light_dataset'
+MODEL_NAME = 'autoenc_apr25_light_hi_losses_light_dataset'
 
 ''' MODEL '''
 # constants
@@ -18,7 +18,7 @@ if LIGHT_MODEL:
     NUM_LAYERS = 4
     EMB_DIM = 512 # 2048
     NUM_HEADS = 32
-    SAVE_EVERY = 50000
+    SAVE_EVERY = 10000
     BATCH_SIZE = 20 # 20 in esmuc
 else:
     SEQ_LEN = 512 # orig 2048
@@ -26,7 +26,12 @@ else:
     EMB_DIM = 2048 # 2048
     NUM_HEADS = 32
     SAVE_EVERY = 5000
-    BATCH_SIZE = 20 # 10 upf decoder-only,  20 esmuc orignal decoder_only
+    BATCH_SIZE = 28 # 10 upf decoder-only,  20 esmuc orignal decoder_only
+ 
+if LIGHT_DATASET:
+    DATA_SIZE = 1 # 1%
+else:
+    DATA_SIZE = 20 # 20%
 
 ''' TRAINING '''
 # Taken from the paper

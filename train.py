@@ -1,13 +1,9 @@
 import os
-
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 import tqdm
-from torch.utils.tensorboard import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 from params import *
-
-if(USE_TENSORBOARD):
-    tensorboard_summary = SummaryWriter()
 
 #!set USE_FLASH_ATTENTION=1
 os.environ['USE_FLASH_ATTENTION'] = '1'
@@ -29,6 +25,27 @@ torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+#==========================================================================
+
+''' WANDB '''
+if(USE_LOGS):
+    #tensorboard_summary = SummaryWriter()
+    import wandb
+    wandb.login()
+    config = {
+        "learning_rate": LEARNING_RATE,
+        "batch_size": BATCH_SIZE,
+        "epochs": NUM_EPOCHS,
+        "seq_len": SEQ_LEN,
+        "emb_dim": EMB_DIM,
+        "num_layers": NUM_LAYERS,
+        "loss_margin": LOSS_MARGIN_MULTIPLIER,
+        "loss_contour": LOSS_CONTOUR_MULTIPLIER,
+        "loss_deviate": LOSS_DEVIATE_MULTIPLIER,
+        "data%": DATA_SIZE,
+        "model": MODEL_NAME
+    }
+    wandb.init(project="monsterGenie", config=config)
 
 #==========================================================================
 
@@ -187,10 +204,10 @@ scaler = torch.amp.GradScaler(device_type)
 # Train the model
 
 train_losses = []
-val_losses = []
+#val_losses = []
 
 train_accs = []
-val_accs = []
+#val_accs = []
 
 nsteps = 0
 
@@ -207,9 +224,12 @@ for ep in range(NUM_EPOCHS):
         scaler.scale(loss).backward()
         
         if i % PRINT_STATS_EVERY == 0:
-            if(USE_TENSORBOARD):                
-                tensorboard_summary.add_scalar("train_loss", loss.item(), nsteps)
-
+            if(USE_LOGS):                
+                #tensorboard_summary.add_scalar("train_loss", loss.item(), nsteps)
+                wandb.log({
+                    "train_loss": loss.item(),
+                    "train_acc": acc.item()
+                })
             train_losses.append(loss.item())
             train_accs.append(acc.item())
 
@@ -232,12 +252,16 @@ for ep in range(NUM_EPOCHS):
                     # run the model
                     val_loss, val_acc = model(x)
 
-                if(USE_TENSORBOARD):                
-                    tensorboard_summary.add_scalar("val_loss", val_loss.item(), nsteps)
-                    tensorboard_summary.add_scalar("val_acc", val_acc.item(), nsteps)
+                if(USE_LOGS):                
+                    #tensorboard_summary.add_scalar("val_loss", val_loss.item(), nsteps)
+                    #tensorboard_summary.add_scalar("val_acc", val_acc.item(), nsteps)
+                    wandb.log({
+                        "val_loss": val_loss.item(),
+                        "val_acc": val_acc.item()
+                    })
 
-                    val_losses.append(val_loss.item())
-                    val_accs.append(val_acc.item())
+                    #val_losses.append(val_loss.item())
+                    #val_accs.append(val_acc.item())
 
 
             model.train()
@@ -252,9 +276,8 @@ for ep in range(NUM_EPOCHS):
 
             torch.save(model.state_dict(), fname)
 
-            data = [train_losses, train_accs, val_losses, val_accs]
-
-            Tegridy_Any_Pickle_File_Writer(data, './save_models/losses_accs')
+            #data = [train_losses, train_accs, val_losses, val_accs]
+            #Tegridy_Any_Pickle_File_Writer(data, './save_models/losses_accs')
 
             #print('Done!')
 
