@@ -43,7 +43,8 @@ if(USE_LOGS):
         "loss_contour": LOSS_CONTOUR_MULTIPLIER,
         "loss_deviate": LOSS_DEVIATE_MULTIPLIER,
         "data%": DATA_SIZE,
-        "model": MODEL_NAME
+        "model": MODEL_NAME,
+        "description": DESCRIPTION
     }
     wandb.init(project="monsterGenie", config=config)
 
@@ -132,7 +133,7 @@ val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
 
 ''' MODEL '''
 
-
+'''
 model = AutoregressiveAutoencoder(
     ignore_index = PAD_IDX, 
     #pad_value=PAD_IDX,
@@ -159,7 +160,7 @@ model = AutoregressiveAutoencoder(
 '''
 model = EncoderOnly(
     ignore_index = PAD_IDX, 
-    pad_value=PAD_IDX,
+    #pad_value=PAD_IDX,
     encoder = Encoder(
         num_tokens = PAD_IDX+1,
         max_seq_len = SEQ_LEN,
@@ -170,7 +171,7 @@ model = EncoderOnly(
         attn_flash = True
         )
     )
-
+'''
 model = DecoderOnly(
     ignore_index = PAD_IDX, 
     #pad_value=PAD_IDX,
@@ -203,10 +204,10 @@ scaler = torch.amp.GradScaler(device_type)
 
 # Train the model
 
-train_losses = []
+#train_losses = []
 #val_losses = []
 
-train_accs = []
+#train_accs = []
 #val_accs = []
 
 nsteps = 0
@@ -220,26 +221,38 @@ for ep in range(NUM_EPOCHS):
         optim.zero_grad()
 
         with ctx:
-            loss, acc = model(x)  # Update your model to accept target separately
+            loss, loss_margin, loss_deviate, loss_contour, loss_multi_step, loss_interval, loss_shape, loss_button_held, acc = model(x)  # Update your model to accept target separately
         scaler.scale(loss).backward()
         
         if i % PRINT_STATS_EVERY == 0:
             if(USE_LOGS):                
                 #tensorboard_summary.add_scalar("train_loss", loss.item(), nsteps)
-                wandb.log({
-                    "train_loss": loss.item(),
-                    "train_acc": acc.item()
-                })
-            train_losses.append(loss.item())
-            train_accs.append(acc.item())
+                wandb.log({"train_loss": loss.item()}, step=nsteps)
+                wandb.log({"train_acc": acc.item()}, step=nsteps)
+                if LOSS_MARGIN_MULTIPLIER>0:
+                    wandb.log({"train_loss_margin": loss_margin.item()}, step=nsteps)
+                if LOSS_DEVIATE_MULTIPLIER>0:
+                    wandb.log({"train_loss_deviate": LOSS_DEVIATE_MULTIPLIER*loss_deviate.item()}, step=nsteps)
+                if LOSS_CONTOUR_MULTIPLIER>0:
+                    wandb.log({"train_loss_contour": LOSS_CONTOUR_MULTIPLIER*LOSS_CONTOUR_MULTIPLIER*loss_contour.item()}, step=nsteps)
+                if LOSS_MULTI_STEP_PERC>0:
+                    wandb.log({"train_loss_multi_step": LOSS_CONTOUR_MULTIPLIER*LOSS_MULTI_STEP_PERC*loss_multi_step.item()}, step=nsteps)
+                if LOSS_INTERVAL_PERC>0:
+                    wandb.log({"train_loss_interval": LOSS_CONTOUR_MULTIPLIER*LOSS_INTERVAL_PERC*loss_interval.item()}, step=nsteps)
+                if LOSS_SHAPE_PERC>0:
+                    wandb.log({"train_loss_shape": LOSS_CONTOUR_MULTIPLIER*LOSS_SHAPE_PERC*loss_shape.item()}, step=nsteps)
+                if LOSS_BUTTON_HELD_MULTIPLIER>0: 
+                    wandb.log({"train_loss_button_held": LOSS_BUTTON_HELD_MULTIPLIER*loss_button_held.item()}, step=nsteps)
+                nsteps += 1
+           #train_losses.append(loss.item())
+            #train_accs.append(acc.item())
 
         scaler.unscale_(optim)
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
         scaler.step(optim)
         scaler.update()
 
-        nsteps += 1
-
+ 
         if (i % VALIDATE_EVERY == 0) or TESTING:
             try:
                 x = next(iter(val_loader)) # extract batches from test dataloader
@@ -250,15 +263,28 @@ for ep in range(NUM_EPOCHS):
             with torch.no_grad():
                 with ctx:
                     # run the model
-                    val_loss, val_acc = model(x)
+                    #val_loss, val_acc = model(x)
+                    val_loss, loss_margin, loss_deviate, loss_contour, loss_multi_step, loss_interval, loss_shape, loss_button_held, acc = model(x)  # Update your model to accept target separately
 
                 if(USE_LOGS):                
                     #tensorboard_summary.add_scalar("val_loss", val_loss.item(), nsteps)
                     #tensorboard_summary.add_scalar("val_acc", val_acc.item(), nsteps)
-                    wandb.log({
-                        "val_loss": val_loss.item(),
-                        "val_acc": val_acc.item()
-                    })
+                    wandb.log({"val_loss": val_loss.item()}, step=nsteps)
+                    wandb.log({"val_acc": acc.item()}, step=nsteps)
+                    if LOSS_MARGIN_MULTIPLIER>0:
+                        wandb.log({"val_loss_margin": LOSS_MARGIN_MULTIPLIER*loss_margin.item()}, step=nsteps)
+                    if LOSS_DEVIATE_MULTIPLIER>0:
+                        wandb.log({"val_loss_deviate": LOSS_DEVIATE_MULTIPLIER*loss_deviate.item()}, step=nsteps)
+                    if LOSS_CONTOUR_MULTIPLIER>0:
+                        wandb.log({"val_loss_contour": LOSS_CONTOUR_MULTIPLIER*LOSS_MULTI_STEP_PERC*loss_contour.item()}, step=nsteps)
+                    if LOSS_MULTI_STEP_PERC>0:
+                        wandb.log({"val_loss_multi_step": LOSS_CONTOUR_MULTIPLIER*LOSS_MULTI_STEP_PERC*loss_multi_step.item()}, step=nsteps)
+                    if LOSS_INTERVAL_PERC>0:
+                        wandb.log({"val_loss_interval": LOSS_CONTOUR_MULTIPLIER*LOSS_INTERVAL_PERC*loss_interval.item()}, step=nsteps)
+                    if LOSS_SHAPE_PERC>0:
+                        wandb.log({"val_loss_shape": LOSS_CONTOUR_MULTIPLIER*LOSS_SHAPE_PERC*loss_shape.item()}, step=nsteps)
+                    if LOSS_BUTTON_HELD_MULTIPLIER>0: 
+                        wandb.log({"val_loss_button_held": LOSS_BUTTON_HELD_MULTIPLIER*loss_button_held.item()}, step=nsteps)
 
                     #val_losses.append(val_loss.item())
                     #val_accs.append(val_acc.item())
@@ -268,12 +294,9 @@ for ep in range(NUM_EPOCHS):
 
  
         if i % SAVE_EVERY == 0:
-
-            print('Saving model progress. Please wait...')
-            print('model_checkpoint_' + str(nsteps) + '_steps_' + str(round(float(train_losses[-1]), 4)) + '_loss_' + str(round(float(train_accs[-1]), 4)) + '_acc.pth')
-
-            fname = './save_models/' + MODEL_NAME + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(train_losses[-1]), 4)) + '_loss_' + str(round(float(train_accs[-1]), 4)) + '_acc.pth'
-
+            #print('Saving model progress. Please wait...')
+            #print('model_checkpoint_' + str(nsteps) + '_steps_' + str(round(float(loss.item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth')
+            fname = './save_models/' + MODEL_NAME + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss.item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
             torch.save(model.state_dict(), fname)
 
             #data = [train_losses, train_accs, val_losses, val_accs]

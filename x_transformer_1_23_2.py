@@ -1597,49 +1597,88 @@ class AutoregressiveAutoencoder(Module):
             torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
         ).mean()
 
-        # Add multi-step contour losses
-        loss_multi_step = multi_step_contour_loss(
-            note_tokens['pitch'][:,1:], 
-            e,
-            max_steps=5
-        ).mean()
-        
-        loss_interval = interval_preservation_loss(
-            note_tokens['pitch'][:,1:],
-            e,
-            max_steps=5
-        ).mean()
-        
-        loss_shape = melodic_shape_loss(
-            note_tokens['pitch'][:,1:],
-            e,
-            window_size=5
-        ).mean()
+        loss_multi_step = 0
+        if LOSS_MULTI_STEP_PERC > 0:
+            # Add multi-step contour losses
+            loss_multi_step = multi_step_contour_loss(
+                note_tokens['pitch'][:,1:], 
+                e,
+                max_steps=5
+            ).mean()
+
+        loss_interval = 0
+        if LOSS_INTERVAL_PERC > 0:
+            loss_interval = interval_preservation_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                max_steps=5
+            ).mean()
+
+        loss_shape = 0
+        if LOSS_SHAPE_PERC > 0:
+            loss_shape = melodic_shape_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                window_size=5
+            ).mean()
          
+        # Deviate Penalty
+        # Identifies when the same note is held (no pitch change)
+        # Penalizes any change in button values during held notes
+        # Helps maintain consistency in the mapping
+        # Identify held notes (where consecutive pitches are the same)
+        notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()    
+        # Penalize button changes (contour) when notes are held
+        loss_deviate = torch.square(
+            torch.diff(e, dim=1) * notes_held # button contour * notes held
+        ).mean()
+
+        loss_button_held = 0
+        if LOSS_BUTTON_HELD_MULTIPLIER > 0:
+            # Button Held Penalty
+            # Identifies when consecutive notes are different (pitch change)
+            # Penalizes same button values when consecutive notes are different
+            # Helps maintain consistency in the mapping
+            notes_diff = (note_tokens['pitch'][:, 1:] != note_tokens['pitch'][:, :-1]).float()    
+            
+            # Get discretized button values for comparison
+            buttons = self.real_to_discrete(e)
+            # Compare consecutive discretized buttons
+            button_diff = (buttons[:, 1:] != buttons[:, :-1]).float()
+            
+            # Penalize when discretized buttons are the same for different notes
+            loss_button_held = torch.square(
+                (1 - button_diff) * notes_diff # 1 when buttons are same, 0 when different
+            ).mean()
+
         # Combine losses with appropriate weights
         loss_total = torch.zeros_like(loss_recons)
         loss_total += loss_recons
         
         if LOSS_CONTOUR_MULTIPLIER > 0:
             loss_total += LOSS_CONTOUR_MULTIPLIER * (
-                0.4 * loss_contour +
-                0.3 * loss_multi_step +
-                0.2 * loss_interval +
-                0.1 * loss_shape
+                LOSS_CONTOUR_PERC * loss_contour +
+                LOSS_MULTI_STEP_PERC * loss_multi_step +
+                LOSS_INTERVAL_PERC * loss_interval +
+                LOSS_SHAPE_PERC * loss_shape
             )
         
         if LOSS_MARGIN_MULTIPLIER > 0:
             loss_total += LOSS_MARGIN_MULTIPLIER * loss_margin
             # Total loss
         
-        '''
         if LOSS_DEVIATE_MULTIPLIER > 0:
             loss_total += LOSS_DEVIATE_MULTIPLIER * loss_deviate
-        '''
+        
+        if LOSS_BUTTON_HELD_MULTIPLIER > 0:
+            loss_total += LOSS_BUTTON_HELD_MULTIPLIER * loss_button_held
 
         #loss_total = loss_recons
         acc = self.compute_accuracy(logits, target)
-        return loss_total, acc
+        
+        return loss_total, loss_margin, loss_deviate, loss_contour, loss_multi_step, loss_interval, loss_shape, loss_button_held, acc
+
+        #return loss_total, acc
  
     @torch.inference_mode()
     def real_to_discrete(self, x, eps=1e-6):
@@ -1873,21 +1912,48 @@ class EncoderOnly(Module):
             window_size=5
         ).mean()
         
+        # Deviate Penalty
+        # Identifies when the same note is held (no pitch change)
+        # Penalizes any change in button values during held notes
+        # Helps maintain consistency in the mapping
+        # Identify held notes (where consecutive pitches are the same)
+        notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()    
+        # Penalize button changes (contour) when notes are held
+        loss_deviate = torch.square(
+            torch.diff(e, dim=1) * notes_held # button contour * notes held
+        ).mean()
+
+        # Button Held Penalty
+        # Penalize when discretized buttons are the same for different notes
+        notes_diff = (note_tokens['pitch'][:, 1:-1] != note_tokens['pitch'][:, :-2]).float()    
+       # Get discretized button values for comparison
+        buttons = self.real_to_discrete(e)
+        # Compare consecutive discretized buttons
+        button_eq = (buttons[:, 1:] == buttons[:, :-1]).float()
+        loss_button_held = torch.square(
+            button_eq * notes_diff # 1 when buttons are same, 0 when different
+        ).mean()
+       
+
         # Combine losses with appropriate weights
         loss_total = torch.zeros_like(loss_contour)
         
         if LOSS_CONTOUR_MULTIPLIER > 0:
             loss_total += LOSS_CONTOUR_MULTIPLIER * (
-                0.4 * loss_contour +
-                0.3 * loss_multi_step +
-                0.2 * loss_interval +
-                0.1 * loss_shape
+                LOSS_CONTOUR_PERC * loss_contour +
+                LOSS_MULTI_STEP_PERC * loss_multi_step +
+                LOSS_INTERVAL_PERC * loss_interval +
+                LOSS_SHAPE_PERC * loss_shape
             )
         
         if LOSS_MARGIN_MULTIPLIER > 0:
             loss_total += LOSS_MARGIN_MULTIPLIER * loss_margin
-           
-        return loss_total, torch.tensor(0.0)
+        if LOSS_DEVIATE_MULTIPLIER > 0:
+            loss_total += LOSS_DEVIATE_MULTIPLIER * loss_deviate
+        if LOSS_BUTTON_HELD_MULTIPLIER > 0:
+            loss_total += LOSS_BUTTON_HELD_MULTIPLIER * loss_button_held
+
+        return loss_total, loss_margin, loss_deviate, loss_contour, loss_multi_step, loss_interval, loss_shape, loss_button_held, torch.tensor(0.0) # acc=0.0
 
     def gen_buttons(self, note_tokens: Dict[str, Tensor]):
         ''' only used for training'''

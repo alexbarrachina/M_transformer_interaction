@@ -27,28 +27,26 @@ model.eval()
 ''' PARAMS '''
 # Get sample seed MIDI path
 #sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
-sample_midi_path = './samples/Bach_BWV_891.mid'
-output_midi_name = './out/continuator_Bach_BWV_891'
-output_butt_midi_name = './out/continuator_Bach_BWV_891_buttons'
-output_e_midi_name = './out/continuator_Bach_BWV_891_e'
+sample_midi_path = './samples/test'
+output_midi_name = './out/continuator_test'
+output_butt_midi_name = './out/continuator_test_b'
+output_e_midi_name = './out/continuator_test_e'
 CTX_LEN = 120 # num notes in context. 
 TOTAL_GEN_LEN = 500 # num notes to generate
 
+for j in range(1, 8):  # generate 10 continuation files
 
-''' BUILD CTX '''
-# Load seed MIDI
-input_tokens = midi_to_tokens(sample_midi_path) # tokens, without vel
+  ''' BUILD CTX '''
+  # Load seed MIDI
+  input_tokens = midi_to_tokens(sample_midi_path+str(j)+'.midi') # tokens, without vel
 
-output_tokens = input_tokens.copy()
+  output_tokens = input_tokens.copy()
 
-dict_input_tokens, num_notes = TMIDIX.midi_tokens_to_dict(input_tokens) # vel already filtered out
-dict_output_tokens, num_notes = TMIDIX.midi_tokens_to_dict(output_tokens) # vel already filtered out
-
-print("num_notes",num_notes)
-
-''' GENERATE 10 files'''
-
-for j in range(0, 10):  # generate 10 continuation files
+  dict_input_tokens, num_notes = TMIDIX.midi_tokens_to_dict(input_tokens) # vel already filtered out
+  dict_output_tokens, num_notes = TMIDIX.midi_tokens_to_dict(output_tokens) # vel already filtered out
+  CTX_LEN = num_notes 
+  print("num_notes",num_notes)
+  
   # Build context tokens
   context = {
     'dtime': torch.tensor(dict_input_tokens['dtime'], dtype=torch.long).unsqueeze(0),

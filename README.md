@@ -9,4 +9,11 @@ tqdm
 datasets
 tensorboard
 einops
+wandb
+matplotlib
+python-rtmidi
+pyfluidsynth
+
+
+
 

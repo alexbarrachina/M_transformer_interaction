@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J l_l_hi_losses
+#SBATCH -J mai2b
 #SBATCH -p high
 #SBATCH -N 1
 #SBATCH --gres=gpu:quadro:1

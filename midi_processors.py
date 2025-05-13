@@ -36,7 +36,7 @@ def midi_to_tokens(input_midi,
     
     notes_counter = 0
     
-    for i, c in enumerate(cscore):
+    for i, c in enumerate(cscore): # c[0][1] absolute time in miliseconds /32 -> dtime 0-127
         score.append(max(0, min(127, c[0][1]-pc[0][1]))) # calculate dtime: the time difference between the current chord and the previous note
     
         for n in c: # tokens in note event
