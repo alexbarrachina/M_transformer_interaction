@@ -4,15 +4,22 @@ import torch
 ########################################################
 
 ''' TESTING '''
-TESTING = False
-LIGHT_MODEL = True
+LIGHT_MODEL = False
 LIGHT_DATASET = False
-USE_TOPK = False
+TRAIN_SELECTION = True
 
+TESTING = False
 UPF = False
 
-MODEL_NAME = 'mai13_encoder_only_lo_m_multi_&_held_margin_1.0_deviate_1.0'
-DESCRIPTION = 'multi-step contour, with deviate and margin, and button held'
+if torch.cuda.is_available(): 
+    USE_LOGS = True
+else:
+    USE_LOGS = False
+
+USE_TOPK = False
+
+MODEL_NAME = 'mai21_no_dtime_hi_multi_held'
+DESCRIPTION = 'no_dtime, monster dataset, multi-step contour, with deviate and margin, and button held 0.01 each'
 
 ''' MODEL '''
 # constants
@@ -21,22 +28,28 @@ if LIGHT_MODEL:
     NUM_LAYERS = 4
     EMB_DIM = 512 # 2048
     NUM_HEADS = 32
-    SAVE_EVERY = 10000
+    if TRAIN_SELECTION:
+        SAVE_EVERY = 10 # in epochs # 25000 orig in steps
+    else:
+        SAVE_EVERY = 25000 # in epochs # 25000 orig in steps
     if UPF:
         BATCH_SIZE = 10 # 10 upf decoder-only, 
     else:
         BATCH_SIZE = 420 # 20 esmuc orignal decoder_only
     
 else:
-    SEQ_LEN = 512 # orig 2048
-    NUM_LAYERS = 4
+    SEQ_LEN = 1024 # orig 2048
+    NUM_LAYERS = 4 # orig 4
     EMB_DIM = 2048 # 2048
     NUM_HEADS = 32
-    SAVE_EVERY = 25000
-    if UPF:
-        BATCH_SIZE = 10 
+    if TRAIN_SELECTION:
+        SAVE_EVERY = 10 # in epochs # 25000 orig in steps
     else:
-        BATCH_SIZE = 20 # 10 upf decoder-only,  20 esmuc orignal decoder_only
+        SAVE_EVERY = 25000 # in epochs # 25000 orig in steps
+    if UPF:
+        BATCH_SIZE = 10
+    else:
+        BATCH_SIZE = 8 # 10 upf decoder-only,  20 esmuc orignal 
  
 if LIGHT_DATASET:
     DATA_SIZE = 1 # 1%
@@ -46,10 +59,10 @@ else:
 ''' TRAINING '''
 # Taken from the paper
 if torch.cuda.is_available(): 
-    WORKERS = 4
-    print("using CUDA")
+    NUM_WORKERS = 10
+    #print("using CUDA")
 else: # on macbook pro  
-    WORKERS = 1
+    NUM_WORKERS = 1
     print("using CPU/MPS")
 
 if TESTING:
@@ -57,28 +70,27 @@ if TESTING:
     SEQ_LEN = 16 
 
 VALIDATE_EVERY  = 500
-GENERATE_EVERY  = 500
+GENERATE_EVERY  = 10000
 GENERATE_LENGTH = 512
 PRINT_STATS_EVERY = 50
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 6000
 
 LEARNING_RATE = 1e-4
 GRAD_CLIP = 1.5
 
-LOSS_MARGIN_MULTIPLIER:Final[float] = 1.0 #0.01 # 
-LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.1 # 0.01
-LOSS_CONTOUR_MULTIPLIER:Final[float] = 1.0 # 0.1, but 0.01 original
-LOSS_BUTTON_HELD_MULTIPLIER:Final[float] = 0.1 # 0.01 # Penalty for mapping different keys to same button
+LOSS_MARGIN_MULTIPLIER:Final[float] = 0.01 #0.01 # 
+LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.01 # 0.01
+LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.01 # 0.1, but 0.01 original
+LOSS_BUTTON_HELD_MULTIPLIER:Final[float] = 0.01 #0.01 #
+LOSS_NORM_POS_MULTIPLIER:Final[float] = 0.01 #0.01 #
+LOSS_PITCH_BUTTON_MULTIPLIER:Final[float] = 0.01 #0.01 # Multiplier for pitch-button correlation loss
 
 # % of every component in loss contour
 LOSS_CONTOUR_PERC:Final[float] = 0. # 0.4, original
 LOSS_MULTI_STEP_PERC:Final[float] = 1. # 0.3, original
 LOSS_INTERVAL_PERC:Final[float] = 0. # 0.2, original
 LOSS_SHAPE_PERC:Final[float] = 0. # 0.1, original
-
-USE_LOGS = True
-
 
 ''' VOCABULARY '''
 
@@ -88,7 +100,7 @@ VOCAB_SIZE_PITCH:Final[int] = 128
 SOS:Final[int] = 127
 PAD_IDX = 128 
 
-NUM_BUTTONS:Final[int] = 12
+NUM_BUTTONS:Final[int] = 19 # 19 buttons (0-18) with central button at 9 # 12 original
 SOS_BUTTONS:Final[int] = NUM_BUTTONS
 VOCAB_SIZE_BUTTONS:Final[int] = NUM_BUTTONS + 1
 
@@ -106,6 +118,13 @@ OFFSET_DUR:Final[int] = 128
 OFFSET_PITCH:Final[int] = 256
 OFFSET_VEL:Final[int] = 384
 
+# Max time stretch for data augmentation (+- 5%)
+DATA_AUGMENT_TIME_STRETCH_MAX:Final[float] = 0.05
+# Max transpose for data augmentation (+- 6 semitones, tritone)
+DATA_AUGMENT_TRANSPOSE_MAX:Final[int] = 6
+# Define chord threshold (e.g., notes within 2 time units are considered part of same chord)
+AUGMENT_CHORD_THRESHOLD:Final[int] = 2
+  
 ''' DATASET '''
 # if using pickle files
 dataset_train_path = './Training-Data/asigalov_train'

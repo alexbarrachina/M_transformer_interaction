@@ -31,7 +31,10 @@ MODELS_INFO = {'tester': 'tester. light model not trained',
                 'full_apr7_autoencoder': 'full model, autoencoder, no duration, full dataset 20%, autoenc_apr7_full_0_eps_5001_steps_2.2775_loss_0.6992_acc',
                 'light_apr7_autoencoder': 'light model, autoencoder, no duration, light dataset, more deviate 0.1, margin 0.1, contour 0.1, autoenc_apr7_light_deviate_14_eps_29653_steps_1.1294_loss_0.8396_acc.pth',
                 'full_apr24_hi_losses': 'full model, autoencoder, more deviate 0.1, margin 0.1, contour 0.1, full dataset 20%, autoenc_apr24_full_hi_losses_11_eps_121112_steps_0.359_loss_0.8954_acc.pth',
-                'encoder_only': 'encoder only, full dataset, light model, for testing'
+                'encoder_only': 'encoder only, full dataset, light model, for testing',
+                'full_giantmidi': 'full model, autoencoder, no duration, giantMIDI dataset, multi-step contour 0.1, button held margin 0.1, deviate 0.1, data augmentation',
+                'ultra_full': 'ultra hi full model, autoencoder, no duration, giantMIDI dataset, multi-step contour 0.1, button held margin 0.1, deviate 0.1, data augmentation',
+                'no_dtime': 'no dtime model, autoencoder, no duration, full dataset, no dtime'
             }     
 
 #===================================================================================================
@@ -56,7 +59,11 @@ MODELS_FILE_NAMES = {'tester': './save_models/tester.pth',
                      'light_apr7_autoencoder': './save_models/autoenc_apr7_light_deviate_39_eps_82603_steps_0.4157_loss_0.9494_acc.pth',
                      'full_apr24_hi_losses': './save_models/autoenc_apr24_full_hi_losses_11_eps_121112_steps_0.359_loss_0.8954_acc.pth',
                      'full_tester': './save_models/mai6_original_m_lo_losses_full_dataset_7_eps_2129_steps_0.6687_loss_0.817_acc.pth',
-                     'encoder_only': './save_models/encoder/mai13_encoder_only_lo_m_multi_&_held_margin_1.0_deviate_1.0_16_eps_657_steps_0.1721_loss_0.0_acc.pth'
+                     'encoder_only': './save_models/encoder/mai20_encoder_hi_m_norm_pos_button_held_17_eps_698_steps_0.0067_loss_0.0_acc.pth',
+                     'full_giantmidi': './save_models/mai14_hi_m_giantMIDI_data_990_eps_5946_steps_0.1842_loss_0.9458_acc.pth',
+                     'ultra_full': './save_models/mai3_ultra_m_hi_losses_full_dataset_0_eps_2701_steps_2.1077_loss_0.4922_acc.pth',
+                     'no_dtime': './save_models/mai21_no_dtime_hi_multi_held_1450_eps_10157_steps_0.2668_loss_0.9213_acc.pth'
+                   
                    }
 
 #===================================================================================================
@@ -275,9 +282,58 @@ MODELS_PARAMETERS = {
         'loss_contour': 0.1,
         'loss_deviate': 0.1,
         'dataset': 'full'
-        }
+        },
+    'full_giantmidi': {
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full'
+        },
+    'no_dtime': {
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full'
+        },
+
 }
 
+
+MODELS_TYPES = {'tester': 'autoencoder_w_encoder_antic',
+               'light': 'autoencoder_w_encoder_antic',
+               'full': 'autoencoder_w_encoder_antic',
+               'encoder_light_mar14': 'encoder_only',
+               'encoder full': 'encoder_only',
+                'encoder_orig': 'encoder_only',
+                'encoder_new_loss_mar17': 'encoder_only',
+                'full_mar18': 'autoencoder_w_encoder_antic',
+                'light_mar24': 'autoencoder_w_encoder_antic',
+                'light_mar26_only_butt_loss': 'autoencoder_w_encoder_antic',
+                'light_mar26_only_recon_loss': 'autoencoder_w_encoder_antic',
+                'light_mar27_decoder_only': 'decoder_only',
+                'big_mar28_decoder_only': 'decoder_only',
+                'light_apr3_decoder_only_no_dur_cont_dtime': 'decoder_only',
+                'full_apr4_decoder_only_no_dur': 'decoder_only',
+                'light__apr4_autoencoder': 'autoencoder_w_encoder_antic',
+                'full_apr7_autoencoder': 'autoencoder_w_encoder_antic',
+                'light_apr7_autoencoder': 'autoencoder_w_encoder_antic',
+                'full_apr24_hi_losses': 'autoencoder_w_encoder_antic',
+                'encoder_only': 'encoder_only',
+                'full_giantmidi': 'autoencoder_w_encoder_antic',
+                'ultra_full': 'autoencoder_w_encoder_antic',
+                'full_tester': 'autoencoder_w_encoder_antic',
+                'no_dtime': 'autoencoder_no_dtime'
+            }  
 #===================================================================================================
 
 def detect_model_type(model):

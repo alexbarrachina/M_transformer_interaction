@@ -18,7 +18,7 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model = load_model(model_name='full_apr24_hi_losses', device='cpu')
+model = load_model(model_name='full_giantmidi', device='cpu', model_type='autoencoder_w_encoder_antic')
 model.to(device)
 model.eval()
 
@@ -26,13 +26,12 @@ model.eval()
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-#sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
-sample_midi_path = './samples/Bach_BWV_891.mid'
-output_midi_name = './out/continuator_Bach_BWV_891'
-output_butt_midi_name = './out/continuator_Bach_BWV_891_buttons'
-output_e_midi_name = './out/continuator_Bach_BWV_891_e'
-CTX_LEN = 120 # num notes in context. 
-TOTAL_GEN_LEN = 500 # num notes to generate
+sample_midi_path = './samples/clairTester_to_end.midi'
+output_midi_name = './out/continuator_clairTester_to_end'
+output_butt_midi_name = './out/continuator_clairTester_to_end_buttons'
+output_e_midi_name = './out/continuator_clairTester_to_end_e'
+CTX_LEN = 512 # num notes in context. 
+#TOTAL_GEN_LEN = 500 # num notes to generate
 
 
 ''' BUILD CTX '''
@@ -44,6 +43,7 @@ output_tokens = input_tokens.copy()
 dict_input_tokens, num_notes = TMIDIX.midi_tokens_to_dict(input_tokens) # vel already filtered out
 dict_output_tokens, num_notes = TMIDIX.midi_tokens_to_dict(output_tokens) # vel already filtered out
 
+TOTAL_GEN_LEN = num_notes
 print("num_notes",num_notes)
 
 ''' GENERATE 10 files'''

@@ -1,5 +1,5 @@
 # Import Monster Piano Transformer as mpt
-from model_loader import load_encoder
+from model_loader import load_model
 from midi_processors import midi_to_tokens, tokens_to_midi
 #from monsterpianotransformer import generate
 import torch
@@ -15,7 +15,7 @@ else:
 
 ''' MODEL '''
 
-model = load_encoder(model_name='encoder_only', device='cpu')
+model = load_model(model_name='encoder_only', device='cpu', model_type='encoder_only')
 model.to(device)
 
 for i in range(1,8):

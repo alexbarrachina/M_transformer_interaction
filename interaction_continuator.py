@@ -14,6 +14,8 @@ import rtmidi
 import threading
 from threading import Lock
 
+from visualizer import Visualizer
+
 # Import Monster Piano Transformer as mpt
 from model_loader import load_model
 from midi_processors import midi_to_tokens, tokens_to_midi
@@ -22,21 +24,21 @@ import torch
 import TMIDIX
 from params import NUM_BUTTONS
 
-TRACES = True
+TRACES = False
 
 ''' DEVICE '''
 #device = torch.device('cpu')
 device = torch.device('mps') 
 
 ''' MODEL '''
-model = load_model(model_name='full_tester', device='cpu')
+model = load_model(model_name='no_dtime', device='cpu')
 model.to(device)
 model.eval()
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-#sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
-sample_midi_path = './samples/test1.midi'
+#sample_midi_path = './samples/test4_long.midi'
+sample_midi_path = './samples/clairTester_to_end.midi'
 output_midi_name = './out/interactive_performance'
 
 CTX_LEN = 120 # num notes in context. tokens = CTX_LENGTH * 3
@@ -46,6 +48,10 @@ MAX_GEN_LEN = 1024 # num notes to generate
 # Add these at the global scope after your imports
 buffer_lock = Lock()
 save_lock = Lock()
+
+'''VISUALIZER'''
+visualizer = Visualizer()
+
 
 '''MIDI IN CALLBACK'''
 def midiin_callback(event, data=None):
@@ -68,6 +74,10 @@ def midiin_callback(event, data=None):
             print("saving performance")
             save_performance()
             os._exit(1)
+        if message[1] == 17 and message[2] > 0: # Using PLAY button as a trigger to reset the context
+          with save_lock:
+            print("resetting context")
+            reset_context()
 
 def key_to_button(key):
     key = key - 48 # keyboard starts at C = 48
@@ -96,7 +106,6 @@ def save_performance():
   global dict_output_tokens
   global i
 
-
   context = {
       'dtime': dict_output_tokens['dtime'][:i+CTX_LEN+1],
       'pitch': dict_output_tokens['pitch'][:i+CTX_LEN+1],
@@ -114,6 +123,16 @@ def save_performance():
                                                             )
   print("saved performance")
 
+def reset_context():
+    global i
+    global dict_output_tokens, dict_input_tokens
+
+    i = 0
+    dict_output_tokens['dtime'] = dict_input_tokens['dtime'] 
+    dict_output_tokens['pitch'] = dict_input_tokens['pitch'] 
+    dict_output_tokens['dur'] = dict_input_tokens['dur'] 
+    dict_output_tokens['button'] = dict_input_tokens['button'] 
+
 ''' VARIABLES '''
 context = None
 timeLast = 0
@@ -127,20 +146,10 @@ input_tokens = midi_to_tokens(sample_midi_path) # tokens, without vel
 
 output_tokens = input_tokens.copy()
 
+output_tokens_extended = output_tokens * 10
+
 dict_input_tokens, num_notes = TMIDIX.midi_tokens_to_dict(input_tokens) # vel already filtered out
-
-dict_output_tokens = {
-    'dtime': [10] * MAX_GEN_LEN,
-    'pitch': [10] * MAX_GEN_LEN,
-    'dur': [10] * MAX_GEN_LEN,
-    'button': [10] * MAX_GEN_LEN,
-    }
-dict_output_tokens['dtime'][:CTX_LEN] = dict_input_tokens['dtime']
-dict_output_tokens['pitch'][:CTX_LEN] = dict_input_tokens['pitch']
-dict_output_tokens['dur'][:CTX_LEN] = dict_input_tokens['dur']
-
-
-print("num_notes", num_notes)
+dict_output_tokens, num_notes = TMIDIX.midi_tokens_to_dict(output_tokens) # vel already filtered out
 
 # Build context tokens
 context = {
@@ -154,7 +163,9 @@ with torch.inference_mode():
     e = model.encoder(context) # encoder output (batch, seq_len)
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     b = b.clone().detach().tolist()
-    dict_output_tokens['button'][:CTX_LEN] = b
+    #dict_output_tokens['button'][:CTX_LEN] = b
+
+visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN ], b[:CTX_LEN])
 
 def manageNote(note, velocity): 
   global context  # Access the global context
@@ -164,7 +175,9 @@ def manageNote(note, velocity):
   global dict_output_tokens # output tokens
   global noteOn_dict # button: (pitch, timeIn)
   global first_note
+  global visualizer
 
+  print("i", i)
   if TRACES:
     print("manageNote", note, velocity)
 
@@ -206,14 +219,12 @@ def manageNote(note, velocity):
         new_pitch_token = model.gen_pitch_token(context)
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
 
-    if TRACES:
-        print("pass pitch inference")
     playNote(new_pitch_token, velocity) 
+    visualizer.get_note(new_pitch_token, velocity)
+    visualizer.get_button(but, velocity)
         # add (user_note, pitch, time) to dictionary
     noteOn_dict[but] = (new_pitch_token, timeNew)
     i += 1
-    if TRACES:
-        print("i", i)
 
   else: # noteOff
     #print("noteOff", note)
@@ -224,6 +235,8 @@ def manageNote(note, velocity):
       # get pitch and time in dictionary of accumulated notesOns without noteOff
       pitch, noteOn_time = noteOn_dict[but]
       playNote(pitch, 0)
+      visualizer.get_note(pitch, 0)
+      visualizer.get_button(but, 0)
 
 
 """# MIDI IN """
@@ -254,6 +267,7 @@ try:
 
     while True:
       time.sleep(0.0001)
+      visualizer.draw()
 except (EOFError, KeyboardInterrupt):
     print("Bye.")
 

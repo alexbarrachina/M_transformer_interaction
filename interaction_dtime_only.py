@@ -11,8 +11,9 @@ from rtmidi.midiconstants import NOTE_ON, NOTE_OFF
 from rtmidi.midiutil import open_midiinput
 import rtmidi
 # pip install python-rtmidi
-import threading
 from threading import Lock
+
+from visualizer import Visualizer
 
 # Import Monster Piano Transformer as mpt
 from model_loader import load_model
@@ -36,16 +37,19 @@ model.eval()
 ''' PARAMS '''
 # Get sample seed MIDI path
 #sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
-sample_midi_path = './samples/test1.midi'
+sample_midi_path = './samples/clairTester_to_end.midi'
 output_midi_name = './out/interactive_performance'
 
-CTX_LEN = 128 # num notes in context. tokens = CTX_LENGTH * 3
+CTX_LEN = 256 # num notes in context. tokens = CTX_LENGTH * 3
 TOTAL_GEN_LEN = 1024 # num notes to generate
 
 '''THREADING'''
 # Add these at the global scope after your imports
 buffer_lock = Lock()
 save_lock = Lock()
+
+'''VISUALIZER'''
+visualizer = Visualizer()
 
 '''MIDI IN CALLBACK'''
 def midiin_callback(event, data=None):
@@ -63,11 +67,18 @@ def midiin_callback(event, data=None):
         manageNote(note, 0)
     
     if message[0] & 0xF0 == 176:  # 176 is the status for control change
+
         if message[1] == 18 and message[2] > 0: # Using REC button as a trigger to save performance
           with save_lock:
             print("saving performance")
             save_performance()
             os._exit(1)
+
+        if message[1] == 17 and message[2] > 0: # Using PLAY button as a trigger to reset the context
+          with save_lock:
+            print("resetting context")
+            reset_context()
+
 
 def key_to_button(key):
     key = key - 48 # keyboard starts at C = 48
@@ -95,7 +106,6 @@ def save_performance():
   global dict_output_tokens
   global i
 
-
   context = {
       'dtime': dict_output_tokens['dtime'][:i+CTX_LEN+1],
       'pitch': dict_output_tokens['pitch'][:i+CTX_LEN+1],
@@ -112,6 +122,16 @@ def save_performance():
                                                             timings_multiplier=2
                                                             )
   print("saved performance")
+
+def reset_context():
+    global i
+    global dict_output_tokens, dict_input_tokens
+
+    i = 0
+    dict_output_tokens['dtime'] = dict_input_tokens['dtime'] 
+    dict_output_tokens['pitch'] = dict_input_tokens['pitch'] 
+    dict_output_tokens['dur'] = dict_input_tokens['dur'] 
+    dict_output_tokens['button'] = dict_input_tokens['button'] 
 
 ''' VARIABLES '''
 context = None
@@ -143,7 +163,9 @@ with torch.inference_mode():
     e = model.encoder(context) # encoder output (batch, seq_len)
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     b = b.clone().detach().tolist()
-    
+
+visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN ], b[:CTX_LEN])
+
 def manageNote(note, velocity): 
   global context  # Access the global context
   global timeLast # time of last note, global variable
@@ -152,6 +174,7 @@ def manageNote(note, velocity):
   global dict_output_tokens # output tokens
   global noteOn_dict # button: (pitch, timeIn)
   global first_note
+  global visualizer
   
   if TRACES:
     print("key", note)
@@ -186,10 +209,12 @@ def manageNote(note, velocity):
     with torch.inference_mode():
         new_pitch_token = model.gen_pitch_token(context)
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
+
     playNote(new_pitch_token, velocity) 
-    if TRACES:
-        print("new_pitch_token", new_pitch_token)
-        # add (user_note, pitch, time) to dictionary
+    visualizer.get_note(new_pitch_token, velocity)
+    visualizer.get_button(but, velocity)
+
+    # add (user_note, pitch, time) to dictionary
     noteOn_dict[but] = (new_pitch_token, timeNew)
     i += 1
 
@@ -204,6 +229,9 @@ def manageNote(note, velocity):
       # get pitch and time in dictionary of accumulated notesOns without noteOff
       pitch, noteOn_time = noteOn_dict[but]
       playNote(pitch, 0)
+      visualizer.get_note(pitch, 0)
+      visualizer.get_button(but, 0)
+      #visualizer.update(noteOn_time)
 
 
 """# MIDI IN """
@@ -234,6 +262,9 @@ try:
 
     while True:
       time.sleep(0.0001)
+      #visualizer.get_note(60, 100)
+      #visualizer.get_button(0, 100)
+      visualizer.draw()
 except (EOFError, KeyboardInterrupt):
     print("Bye.")
 

@@ -18,7 +18,7 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model = load_model(model_name='full_apr24_hi_losses', device='cpu')
+model = load_model(model_name='full_apr24_hi_losses', device='cpu', model_type='autoencoder_w_encoder_antic')
 model.to(device)
 model.eval()
 
