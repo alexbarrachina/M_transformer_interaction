@@ -15,10 +15,10 @@ else:
 
 ''' MODEL '''
 
-model = load_model(model_name='encoder_only', device='cpu', model_type='encoder_only')
+model = load_model(model_name='encoder_only', device='cpu')
 model.to(device)
 
-for i in range(1,8):
+for i in range(1,9):
   ''' PARAMS '''
   # Get sample seed MIDI path
   #sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'

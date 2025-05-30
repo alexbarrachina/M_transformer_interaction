@@ -31,7 +31,7 @@ TRACES = False
 device = torch.device('mps') 
 
 ''' MODEL '''
-model = load_model(model_name='no_dtime', device='cpu')
+model = load_model(model_name='ultra_full', device='cpu')
 model.to(device)
 model.eval()
 
@@ -81,8 +81,8 @@ def midiin_callback(event, data=None):
 
 def key_to_button(key):
     key = key - 48 # keyboard starts at C = 48
-    button = key % 20 # 12 white keys, 8 black keys
-    toWhite = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11]
+    button = key % 40 # orig 20, 12 white keys, 8 black keys
+    toWhite = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11,12,12,13,14,14,15,15,16,17,17]
     button = toWhite[button] # convert to white key index
     if TRACES:
         print("k_2_b", button)
@@ -177,9 +177,9 @@ def manageNote(note, velocity):
   global first_note
   global visualizer
 
-  print("i", i)
   if TRACES:
     print("manageNote", note, velocity)
+    print("i", i)
 
   timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_tokens()
 

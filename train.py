@@ -157,7 +157,7 @@ model = AutoregressiveAutoencoder(
         )
     )
 
-'''
+
 model = AutoregressiveAutoencoder_no_dtime(
         ignore_index = PAD_IDX, 
         #pad_value=PAD_IDX,
@@ -194,7 +194,7 @@ model = EncoderOnly(
         attn_flash = True
         )
     )
-
+'''
 model = DecoderOnly(
     ignore_index = PAD_IDX, 
     #pad_value=PAD_IDX,
@@ -239,7 +239,7 @@ for ep in range(NUM_EPOCHS):
             loss, acc = model(x)  # Update your model to accept target separately
         scaler.scale(loss['loss_total']).backward()
         
-        if i % PRINT_STATS_EVERY == 0:
+        if (i % PRINT_STATS_EVERY == 0) or TESTING:
             if(USE_LOGS):                
                 wandb.log({"train_loss": loss['loss_total'].item()}, step=nsteps)
                 wandb.log({"train_acc": acc.item()}, step=nsteps)
@@ -261,6 +261,8 @@ for ep in range(NUM_EPOCHS):
                     wandb.log({"train_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*loss['loss_norm_pos'].item()}, step=nsteps)
                 if LOSS_PITCH_BUTTON_MULTIPLIER>0:
                     wandb.log({"train_loss_pitch_button": LOSS_PITCH_BUTTON_MULTIPLIER*loss['loss_pitch_button'].item()}, step=nsteps)
+                if LOSS_BUTTON_CONCENTRATION_MULTIPLIER>0:
+                    wandb.log({"train_loss_button_concentration": LOSS_BUTTON_CONCENTRATION_MULTIPLIER*loss['loss_button_concentration'].item()}, step=nsteps)
 
                 nsteps += 1
 
@@ -285,7 +287,7 @@ for ep in range(NUM_EPOCHS):
                 if(USE_LOGS):                
                     wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
                     wandb.log({"val_acc": val_acc.item()}, step=nsteps)
-                    if LOSS_MARGIN_MULTIPLIER>0:
+                    '''if LOSS_MARGIN_MULTIPLIER>0:
                         wandb.log({"val_loss_margin": LOSS_MARGIN_MULTIPLIER*val_loss['loss_margin'].item()}, step=nsteps)
                     if LOSS_DEVIATE_MULTIPLIER>0:
                         wandb.log({"val_loss_deviate": LOSS_DEVIATE_MULTIPLIER*val_loss['loss_deviate'].item()}, step=nsteps)
@@ -301,7 +303,11 @@ for ep in range(NUM_EPOCHS):
                         wandb.log({"val_loss_button_held": LOSS_BUTTON_HELD_MULTIPLIER*val_loss['loss_button_held'].item()}, step=nsteps)
                     if LOSS_NORM_POS_MULTIPLIER>0:
                         wandb.log({"val_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*val_loss['loss_norm_pos'].item()}, step=nsteps)
-
+                    if LOSS_PITCH_BUTTON_MULTIPLIER>0:
+                        wandb.log({"val_loss_pitch_button": LOSS_PITCH_BUTTON_MULTIPLIER*val_loss['loss_pitch_button'].item()}, step=nsteps)
+                    if LOSS_BUTTON_CONCENTRATION_MULTIPLIER>0:
+                        wandb.log({"val_loss_button_concentration": LOSS_BUTTON_CONCENTRATION_MULTIPLIER*val_loss['loss_button_concentration'].item()}, step=nsteps)
+                    '''
 
 
             model.train()

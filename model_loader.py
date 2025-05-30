@@ -191,6 +191,20 @@ def load_model(model_name='default',
             attn_flash = True
             )
         )
+    elif model_type == 'encoder_only_antic':
+        mpt_model = EncoderOnly(
+            ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
+            #pad_value=MODELS_PARAMETERS[model_name]['pad_idx'],
+            encoder = Encoder_antic(
+            num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
+            max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
+            dim = MODELS_PARAMETERS[model_name]['emb_dim'],
+            depth = MODELS_PARAMETERS[model_name]['num_layers'],
+            heads = MODELS_PARAMETERS[model_name]['heads'],
+            rotary_pos_emb = True,
+            attn_flash = True
+            )
+        )
     if verbose:
         print('Done!')
         print('=' * 70)

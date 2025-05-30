@@ -1595,12 +1595,17 @@ class AutoregressiveAutoencoder(Module):
             
         loss_margin = 0
         if LOSS_MARGIN_MULTIPLIER > 0:
-            # Regularize to encourage encoder to output in range [-1, 1]
-            loss_margin = torch.square(
-                # torch.abs(e) - 1: only values outside the range [-1,1] are negative, no penalty
-                # in higher values (like 10, or -10), torch.abs(e) - 1 > 0, so penalty
+            # Improved margin loss: encourage values to be closer to [-1, 1] range
+            # Instead of only penalizing values outside [-1, 1], also encourage 
+            # values to use the full range effectively
+            margin_penalty = torch.square(
                 torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
-            ).mean()
+            )
+            
+            # Add a term to encourage using the full range (prevent collapse to center)
+            range_utilization = 1.0 - torch.var(e, dim=1).mean()  # Penalize low variance
+            
+            loss_margin = margin_penalty.mean() + 0.1 * range_utilization
 
         loss_multi_step = 0
         if LOSS_MULTI_STEP_PERC > 0:
@@ -1627,18 +1632,21 @@ class AutoregressiveAutoencoder(Module):
                 window_size=5
             ).mean()
          
-        # Deviate Penalty
-        # Identifies when the same note is held (no pitch change)
-        # Penalizes any change in button values during held notes
-        # Helps maintain consistency in the mapping
-        # Identify held notes (where consecutive pitches are the same)
+        # Improved Deviate Penalty
         loss_deviate = 0
         if LOSS_DEVIATE_MULTIPLIER > 0:
-            notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()    
-            # Penalize button changes (contour) when notes are held
-            loss_deviate = torch.square(
-                torch.diff(e, dim=1) * notes_held # button contour * notes held
-            ).mean()
+            # Identify held notes (where consecutive pitches are the same)
+            notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()
+            
+            # Only apply loss if there are actually held notes in the batch
+            if notes_held.sum() > 0:
+                # Penalize button changes when notes are held
+                button_changes = torch.diff(e, dim=1)
+                held_button_changes = button_changes * notes_held
+                loss_deviate = torch.square(held_button_changes).sum() / notes_held.sum().clamp(min=1e-6)
+            else:
+                # If no held notes, add small penalty to encourage stability
+                loss_deviate = 0.01 * torch.square(torch.diff(e, dim=1)).mean()
 
         loss_button_held = 0
         if LOSS_BUTTON_HELD_MULTIPLIER > 0:
@@ -1676,6 +1684,14 @@ class AutoregressiveAutoencoder(Module):
                 window_size=5
             )
 
+        # Calculate button concentration loss
+        loss_button_concentration = 0
+        if LOSS_BUTTON_CONCENTRATION_MULTIPLIER > 0:
+            loss_button_concentration = button_concentration_loss(
+                e,
+                note_tokens
+            )
+
         # Combine losses with appropriate weights
         loss_total = torch.zeros_like(loss_recons)
         loss_total += loss_recons
@@ -1705,6 +1721,10 @@ class AutoregressiveAutoencoder(Module):
         if LOSS_PITCH_BUTTON_MULTIPLIER > 0:
             loss_total += LOSS_PITCH_BUTTON_MULTIPLIER * loss_pitch_button
 
+        # Add button concentration loss
+        if LOSS_BUTTON_CONCENTRATION_MULTIPLIER > 0:
+            loss_total += LOSS_BUTTON_CONCENTRATION_MULTIPLIER * loss_button_concentration
+
         acc = self.compute_accuracy(logits, target)
         
         loss = {
@@ -1717,7 +1737,8 @@ class AutoregressiveAutoencoder(Module):
             'loss_shape': loss_shape,
             'loss_button_held': loss_button_held,
             'loss_norm_pos': loss_norm_pos,
-            'loss_pitch_button': loss_pitch_button
+            'loss_pitch_button': loss_pitch_button,
+            'loss_button_concentration': loss_button_concentration
         }
         return loss, acc
 
@@ -1929,12 +1950,15 @@ class EncoderOnly(Module):
             )
         ).mean()
         
-        # Regularize to encourage encoder to output in range [-1, 1]
-        loss_margin = torch.square(
-            # torch.abs(e) - 1: only values outside the range [-1,1] are negative, no penalty
-            # in higher values (like 10, or -10), torch.abs(e) - 1 > 0, so penalty
+        # Improved margin loss: encourage values to be closer to [-1, 1] range
+        margin_penalty = torch.square(
             torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
-        ).mean()
+        )
+        
+        # Add a term to encourage using the full range (prevent collapse to center)
+        range_utilization = 1.0 - torch.var(e, dim=1).mean()  # Penalize low variance
+        
+        loss_margin = margin_penalty.mean() + 0.1 * range_utilization
 
         # Add multi-step contour losses
         loss_multi_step = multi_step_contour_loss(
@@ -1955,16 +1979,19 @@ class EncoderOnly(Module):
             window_size=5
         ).mean()
         
-        # Deviate Penalty
-        # Identifies when the same note is held (no pitch change)
-        # Penalizes any change in button values during held notes
-        # Helps maintain consistency in the mapping
+        # Improved Deviate Penalty
         # Identify held notes (where consecutive pitches are the same)
-        notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()    
-        # Penalize button changes (contour) when notes are held
-        loss_deviate = torch.square(
-            torch.diff(e, dim=1) * notes_held # button contour * notes held
-        ).mean()
+        notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()
+        
+        # Only apply loss if there are actually held notes in the batch
+        if notes_held.sum() > 0:
+            # Penalize button changes when notes are held
+            button_changes = torch.diff(e, dim=1)
+            held_button_changes = button_changes * notes_held
+            loss_deviate = torch.square(held_button_changes).sum() / notes_held.sum().clamp(min=1e-6)
+        else:
+            # If no held notes, add small penalty to encourage stability
+            loss_deviate = 0.01 * torch.square(torch.diff(e, dim=1)).mean()
 
         # Button Held Penalty
         # Penalize when discretized buttons are the same for different notes
@@ -2008,6 +2035,31 @@ class EncoderOnly(Module):
         if LOSS_NORM_POS_MULTIPLIER > 0:
             loss_total += LOSS_NORM_POS_MULTIPLIER * loss_norm_pos
 
+        # Calculate pitch-button correlation loss
+        loss_pitch_button = 0
+        if LOSS_PITCH_BUTTON_MULTIPLIER > 0:
+            loss_pitch_button = pitch_button_correlation_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                window_size=5
+            )
+
+        # Calculate button concentration loss
+        loss_button_concentration = 0
+        if LOSS_BUTTON_CONCENTRATION_MULTIPLIER > 0:
+            loss_button_concentration = button_concentration_loss(
+                e,
+                note_tokens
+            )
+
+        # Add pitch-button correlation loss
+        if LOSS_PITCH_BUTTON_MULTIPLIER > 0:
+            loss_total += LOSS_PITCH_BUTTON_MULTIPLIER * loss_pitch_button
+
+        # Add button concentration loss
+        if LOSS_BUTTON_CONCENTRATION_MULTIPLIER > 0:
+            loss_total += LOSS_BUTTON_CONCENTRATION_MULTIPLIER * loss_button_concentration
+
         loss = {
             'loss_total': loss_total,
             'loss_margin': loss_margin,
@@ -2017,7 +2069,9 @@ class EncoderOnly(Module):
             'loss_interval': loss_interval,
             'loss_shape': loss_shape,
             'loss_button_held': loss_button_held,
-            'loss_norm_pos': loss_norm_pos
+            'loss_norm_pos': loss_norm_pos,
+            'loss_pitch_button': loss_pitch_button,
+            'loss_button_concentration': loss_button_concentration
         }
         return loss, torch.tensor(0.0) # acc=0.0
 
@@ -2892,13 +2946,18 @@ class AutoregressiveAutoencoder_no_dtime(Module):
                     torch.zeros_like(pitch_diff, dtype=torch.float)
             )
         ).mean()
-        
-        # Regularize to encourage encoder to output in range [-1, 1]
-        loss_margin = torch.square(
-            # torch.abs(e) - 1: only values outside the range [-1,1] are negative, no penalty
-            # in higher values (like 10, or -10), torch.abs(e) - 1 > 0, so penalty
-            torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
-        ).mean()
+
+        # Improved margin loss: encourage values to be closer to [-1, 1] range
+        loss_margin = 0
+        if LOSS_MARGIN_MULTIPLIER > 0:
+            margin_penalty = torch.square(
+                torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
+            )
+            
+            # Add a term to encourage using the full range (prevent collapse to center)
+            range_utilization = 1.0 - torch.var(e, dim=1).mean()  # Penalize low variance
+            
+            loss_margin = margin_penalty.mean() + 0.1 * range_utilization
 
         loss_multi_step = 0
         if LOSS_MULTI_STEP_PERC > 0:
@@ -2925,16 +2984,19 @@ class AutoregressiveAutoencoder_no_dtime(Module):
                 window_size=5
             ).mean()
          
-        # Deviate Penalty
-        # Identifies when the same note is held (no pitch change)
-        # Penalizes any change in button values during held notes
-        # Helps maintain consistency in the mapping
+        # Improved Deviate Penalty
         # Identify held notes (where consecutive pitches are the same)
-        notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()    
-        # Penalize button changes (contour) when notes are held
-        loss_deviate = torch.square(
-            torch.diff(e, dim=1) * notes_held # button contour * notes held
-        ).mean()
+        notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()
+        
+        # Only apply loss if there are actually held notes in the batch
+        if notes_held.sum() > 0:
+            # Penalize button changes when notes are held
+            button_changes = torch.diff(e, dim=1)
+            held_button_changes = button_changes * notes_held
+            loss_deviate = torch.square(held_button_changes).sum() / notes_held.sum().clamp(min=1e-6)
+        else:
+            # If no held notes, add small penalty to encourage stability
+            loss_deviate = 0.01 * torch.square(torch.diff(e, dim=1)).mean()
 
         loss_button_held = 0
         if LOSS_BUTTON_HELD_MULTIPLIER > 0:
@@ -2958,6 +3020,15 @@ class AutoregressiveAutoencoder_no_dtime(Module):
         loss_norm_pos = 0
         if LOSS_NORM_POS_MULTIPLIER > 0:
             loss_norm_pos = normalized_position_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                window_size=5
+            )
+
+        # Calculate pitch-button correlation loss
+        loss_pitch_button = 0
+        if LOSS_PITCH_BUTTON_MULTIPLIER > 0:
+            loss_pitch_button = pitch_button_correlation_loss(
                 note_tokens['pitch'][:,1:],
                 e,
                 window_size=5
@@ -2989,6 +3060,23 @@ class AutoregressiveAutoencoder_no_dtime(Module):
         if LOSS_NORM_POS_MULTIPLIER > 0:
             loss_total += LOSS_NORM_POS_MULTIPLIER * loss_norm_pos
 
+        # Add pitch-button correlation loss
+        if LOSS_PITCH_BUTTON_MULTIPLIER > 0:
+            loss_total += LOSS_PITCH_BUTTON_MULTIPLIER * loss_pitch_button
+
+        # Calculate button concentration loss
+        loss_button_concentration = 0
+        if LOSS_BUTTON_CONCENTRATION_MULTIPLIER > 0:
+            loss_button_concentration = button_concentration_loss(
+                e,
+                note_tokens,
+                window_size=15
+            )
+
+        # Add button concentration loss
+        if LOSS_BUTTON_CONCENTRATION_MULTIPLIER > 0:
+            loss_total += LOSS_BUTTON_CONCENTRATION_MULTIPLIER * loss_button_concentration
+
         #loss_total = loss_recons
         acc = self.compute_accuracy(logits, target)
         
@@ -3001,7 +3089,9 @@ class AutoregressiveAutoencoder_no_dtime(Module):
             'loss_interval': loss_interval,
             'loss_shape': loss_shape,
             'loss_button_held': loss_button_held,
-            'loss_norm_pos': loss_norm_pos
+            'loss_norm_pos': loss_norm_pos,
+            'loss_pitch_button': loss_pitch_button,
+            'loss_button_concentration': loss_button_concentration
         }
         return loss, acc
 
@@ -3527,15 +3617,15 @@ def normalized_position_loss(pitches, buttons, window_size=40):
     
     return position_diff.mean()
 
-def pitch_button_correlation_loss(pitches, e, window_size=30):
+def pitch_button_correlation_loss(pitches, e, window_size=15, tendency_distance=40):
     """
     Calculates loss that correlates pitch tendencies with button concentrations.
-    Uses only past events in the sliding window and centers button concentrations around e=0.
     
     Args:
         pitches: Tensor of shape [batch, seq_len] containing pitch values
         e: Tensor of shape [batch, seq_len] containing encoder outputs in [-1,1] range
-        window_size: Size of window to calculate local tendencies and concentrations
+        window_size: Size of window to calculate local pitch means
+        tendency_distance: Distance between tokens to calculate pitch tendency
     
     Returns:
         A differentiable loss tensor
@@ -3546,107 +3636,137 @@ def pitch_button_correlation_loss(pitches, e, window_size=30):
     pitches = pitches.float()
     e = e.float()
     
-    # Initialize tensors for tendencies and concentrations
+    # Calculate pitch means for each position using sliding window
+    pitch_means = torch.zeros_like(pitches)
+    
+    for i in range(seq_len):
+        # Calculate window boundaries (centered around current position)
+        start = max(0, i - window_size // 2)
+        end = min(seq_len, i + window_size // 2 + 1)
+        
+        # Get local window and calculate mean
+        pitch_window = pitches[:, start:end]
+        pitch_means[:, i:i+1] = pitch_window.mean(dim=1, keepdim=True)
+    
+    # Calculate pitch tendencies by comparing current pitch_mean with earlier pitch_mean
     pitch_tendencies = torch.zeros_like(pitches)
+    
+    for i in range(tendency_distance, seq_len):
+        # Compare current pitch_mean with pitch_mean from tendency_distance steps ago
+        current_pitch_mean = pitch_means[:, i:i+1]
+        earlier_pitch_mean = pitch_means[:, i-tendency_distance:i-tendency_distance+1]
+        pitch_tendencies[:, i:i+1] = current_pitch_mean - earlier_pitch_mean
+    
+    # Calculate button concentrations (mean of e values in sliding window)
     button_concentrations = torch.zeros_like(e)
     
-    # For each position in the sequence
     for i in range(seq_len):
-        # Calculate window boundaries (only past events)
-        start = max(0, i - window_size + 1)
-        end = i + 1  # Include current position
+        # Calculate window boundaries (centered around current position)
+        start = max(0, i - window_size // 2)
+        end = min(seq_len, i + window_size // 2 + 1)
         
-        # Get local windows
-        pitch_window = pitches[:, start:end]
+        # Get local window and calculate mean
         button_window = e[:, start:end]
-        
-        # Calculate pitch tendency (linear regression slope)
-        # Create x coordinates for the window
-        x = torch.arange(end - start, device=pitches.device).float()
-        x = x.unsqueeze(0).expand(batch_size, -1)  # [batch_size, window_size]
-        
-        # Calculate means
-        x_mean = x.mean(dim=1, keepdim=True)
-        pitch_mean = pitch_window.mean(dim=1, keepdim=True)
-        
-        # Calculate slope (tendency)
-        numerator = ((x - x_mean) * (pitch_window - pitch_mean)).sum(dim=1, keepdim=True)
-        denominator = ((x - x_mean) ** 2).sum(dim=1, keepdim=True).clamp(min=1e-6)
-        pitch_tendencies[:, i:i+1] = numerator / denominator
-        
-        # Calculate button concentration (mean of values)
-        # e is already in [-1,1] range, no need for normalization
         button_concentrations[:, i:i+1] = button_window.mean(dim=1, keepdim=True)
     
     # Calculate correlation loss
     # We want:
-    # - High button concentrations (>0) to correlate with positive pitch tendencies
-    # - Low button concentrations (<0) to correlate with negative pitch tendencies
+    # - High pitch tendencies (positive) to correlate with high button concentrations (>0)
+    # - Low pitch tendencies (negative) to correlate with low button concentrations (<0)
     # So their product should be positive in both cases
-    correlation = pitch_tendencies * button_concentrations
+    
+    # Only consider positions where we have valid pitch tendencies
+    valid_mask = torch.zeros_like(pitch_tendencies)
+    valid_mask[:, tendency_distance:] = 1.0
+    
+    # Calculate correlation only for valid positions
+    correlation = pitch_tendencies * button_concentrations * valid_mask
     
     # Penalize when correlation is negative (opposite tendencies)
-    # This means:
-    # - When pitch tendency is positive and button concentration is negative
-    # - When pitch tendency is negative and button concentration is positive
     loss = torch.square(
         torch.maximum(
             -correlation,  # Negative when tendencies are opposite
             torch.zeros_like(correlation)
         )
-    ).mean()
+    ).sum() / valid_mask.sum().clamp(min=1e-6)  # Average only over valid positions
     
     return loss
 
-def button_concentration_loss(e, note_tokens, window_size=5):
+def button_concentration_loss(e, note_tokens, window_size=15, tendency_distance=40):
     """
-    Calculates loss that enforces button concentration in a 12-button window
+    Calculates loss that enforces button concentration in a BUTTON_CONCENTRATION_WINDOW_SIZE window
     that shifts based on pitch tendency.
     
     Args:
         e: Tensor of shape [batch, seq_len] containing encoder outputs in [-1,1] range
         note_tokens: Dictionary containing pitch tokens
-        window_size: Size of window to calculate pitch tendencies
+        window_size: Size of window to calculate local pitch means
+        tendency_distance: Distance between tokens to calculate pitch tendency
     
     Returns:
         A differentiable loss tensor
     """
     batch_size, seq_len = e.shape
+    pitches = note_tokens['pitch'][:, 1:]  # Use same pitch slice as in other functions
     
-    # Calculate pitch tendencies for each position
-    pitch_tendencies = torch.zeros_like(e)
+    # Convert to float for calculations
+    pitches = pitches.float()
+    e = e.float()
+    
+    # Calculate pitch means for each position using sliding window
+    pitch_means = torch.zeros_like(pitches)
+    
     for i in range(seq_len):
-        start = max(0, i - window_size + 1)
-        end = i + 1
-        pitch_window = note_tokens['pitch'][:, start:end]
-        x = torch.arange(end - start, device=e.device).float()
-        x = x.unsqueeze(0).expand(batch_size, -1)
-        x_mean = x.mean(dim=1, keepdim=True)
-        pitch_mean = pitch_window.float().mean(dim=1, keepdim=True)
-        numerator = ((x - x_mean) * (pitch_window.float() - pitch_mean)).sum(dim=1, keepdim=True)
-        denominator = ((x - x_mean) ** 2).sum(dim=1, keepdim=True).clamp(min=1e-6)
-        pitch_tendencies[:, i:i+1] = numerator / denominator
+        # Calculate window boundaries (centered around current position)
+        start = max(0, i - window_size // 2)
+        end = min(seq_len, i + window_size // 2 + 1)
+        
+        # Get local window and calculate mean
+        pitch_window = pitches[:, start:end]
+        pitch_means[:, i:i+1] = pitch_window.mean(dim=1, keepdim=True)
     
-    # Scale tendency to [-0.5, 0.5] range to control window shift
-    scaled_tendency = torch.tanh(pitch_tendencies) * 0.5
+    # Calculate pitch tendencies by comparing current pitch_mean with earlier pitch_mean
+    pitch_tendencies = torch.zeros_like(pitches)
     
-    # Calculate target center for button window
-    # For positive tendency: center at 0.5 (buttons 0-1)
-    # For negative tendency: center at -0.5 (buttons -1-0)
-    # For neutral tendency: center at 0 (buttons -0.5-0.5)
-    target_center = scaled_tendency
+    for i in range(tendency_distance, seq_len):
+        # Compare current pitch_mean with pitch_mean from tendency_distance steps ago
+        current_pitch_mean = pitch_means[:, i:i+1]
+        earlier_pitch_mean = pitch_means[:, i-tendency_distance:i-tendency_distance+1]
+        pitch_tendencies[:, i:i+1] = current_pitch_mean - earlier_pitch_mean
     
-    # Calculate how far buttons are from their target center
+    # Scale pitch tendencies to control window shift
+    # Use tanh to bound the tendencies and scale appropriately
+    scaled_tendency = torch.tanh(pitch_tendencies / 10.0)  # Normalize pitch differences
+    
+    # Calculate target center for button concentration window
+    # e range [-1,1] equivalent to button range [0-18]
+    # BUTTON_CONCENTRATION_WINDOW_SIZE (12) in e space = 12/19*2 = 1.263
+    window_size_e = BUTTON_CONCENTRATION_WINDOW_SIZE / NUM_BUTTONS * 2  # 1.263
+    max_shift = (2 - window_size_e) / 2  # Maximum shift from center = (2-1.263)/2 = 0.368
+    
+    # For positive tendency: shift toward +1 (high buttons)
+    # For negative tendency: shift toward -1 (low buttons)
+    # For neutral tendency: center at 0
+    target_center = scaled_tendency * max_shift
+    
+    # Calculate how far e values are from their target center
     distance_from_center = torch.abs(e - target_center)
     
-    # Penalize when buttons are too far from their target center
-    # Allow for a 0.5 range on each side of the center (total 1.0)
-    loss = torch.square(
-        torch.maximum(
-            distance_from_center - 0.5,  # 0.5 is half of 1.0
-            torch.zeros_like(distance_from_center)
-        )
-    ).mean()
+    # Penalize when e values are too far from their target center
+    # Allow for half the window size on each side
+    allowed_distance = window_size_e / 2  # 1.263/2 = 0.632
+    
+    # Only consider positions where we have valid pitch tendencies
+    valid_mask = torch.zeros_like(pitch_tendencies)
+    valid_mask[:, tendency_distance:] = 1.0
+    
+    # Calculate loss only for valid positions
+    violations = torch.maximum(
+        distance_from_center - allowed_distance,
+        torch.zeros_like(distance_from_center)
+    ) * valid_mask
+    
+    loss = torch.square(violations).sum() / valid_mask.sum().clamp(min=1e-6)
     
     return loss
 

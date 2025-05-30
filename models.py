@@ -34,7 +34,8 @@ MODELS_INFO = {'tester': 'tester. light model not trained',
                 'encoder_only': 'encoder only, full dataset, light model, for testing',
                 'full_giantmidi': 'full model, autoencoder, no duration, giantMIDI dataset, multi-step contour 0.1, button held margin 0.1, deviate 0.1, data augmentation',
                 'ultra_full': 'ultra hi full model, autoencoder, no duration, giantMIDI dataset, multi-step contour 0.1, button held margin 0.1, deviate 0.1, data augmentation',
-                'no_dtime': 'no dtime model, autoencoder, no duration, full dataset, no dtime'
+                'no_dtime': 'no dtime model, autoencoder, no duration, full dataset, no dtime',
+                'encoder_only_antic': 'encoder only, with an error in dtime embedding'
             }     
 
 #===================================================================================================
@@ -59,11 +60,13 @@ MODELS_FILE_NAMES = {'tester': './save_models/tester.pth',
                      'light_apr7_autoencoder': './save_models/autoenc_apr7_light_deviate_39_eps_82603_steps_0.4157_loss_0.9494_acc.pth',
                      'full_apr24_hi_losses': './save_models/autoenc_apr24_full_hi_losses_11_eps_121112_steps_0.359_loss_0.8954_acc.pth',
                      'full_tester': './save_models/mai6_original_m_lo_losses_full_dataset_7_eps_2129_steps_0.6687_loss_0.817_acc.pth',
-                     'encoder_only': './save_models/encoder/mai20_encoder_hi_m_norm_pos_button_held_17_eps_698_steps_0.0067_loss_0.0_acc.pth',
+                     'encoder_only': './save_models/encoder/mai27_encoder_button_concent_x10_97_eps_9798_steps_0.0013_loss_0.0_acc.pth',
                      'full_giantmidi': './save_models/mai14_hi_m_giantMIDI_data_990_eps_5946_steps_0.1842_loss_0.9458_acc.pth',
-                     'ultra_full': './save_models/mai3_ultra_m_hi_losses_full_dataset_0_eps_2701_steps_2.1077_loss_0.4922_acc.pth',
-                     'no_dtime': './save_models/mai21_no_dtime_hi_multi_held_1450_eps_10157_steps_0.2668_loss_0.9213_acc.pth'
-                   
+                     'ultra_full': './save_models/mai24_no_dtime_ultra_m_multi_held_650_eps_4557_steps_0.3407_loss_0.8965_acc.pth',
+                     'no_dtime_good_reference': './save_models/mai21_no_dtime_hi_multi_held_2860_eps_20027_steps_0.13_loss_0.959_acc.pth',
+                     'no_dtime_19_buttons': './save_models/mai27_19but_pitch_button_correlation_1220_eps_159951_steps_0.191_loss.pth',
+                     'encoder_only_antic': './save_models/encoder/mai13_encoder_only_lo_m_multi_&_held_margin_1.0_deviate_1.0_16_eps_657_steps_0.1721_loss_0.0_acc.pth',
+                     'mai27_big_m_5buttons_original_loss': './save_models/mai27_big_m_5buttons_original_loss_3.pth',
                    }
 
 #===================================================================================================
@@ -294,7 +297,7 @@ MODELS_PARAMETERS = {
         'loss_deviate': 0.1,
         'dataset': 'full'
         },
-    'no_dtime': {
+    'no_dtime_good_reference': {
         'seq_len': 1024,
         'pad_idx': 128,
         'emb_dim': 2048,
@@ -305,7 +308,50 @@ MODELS_PARAMETERS = {
         'loss_deviate': 0.1,
         'dataset': 'full'
         },
-
+    'no_dtime_19_buttons': {
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full'
+        },    
+    'encoder_only_antic': {
+        'seq_len': 256,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full'
+        },
+    'mai27_big_m_5buttons_original_loss': {
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full'
+    },    
+    'ultra_full': {
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 6,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full'
+    }
 }
 
 
@@ -330,9 +376,12 @@ MODELS_TYPES = {'tester': 'autoencoder_w_encoder_antic',
                 'full_apr24_hi_losses': 'autoencoder_w_encoder_antic',
                 'encoder_only': 'encoder_only',
                 'full_giantmidi': 'autoencoder_w_encoder_antic',
-                'ultra_full': 'autoencoder_w_encoder_antic',
+                'ultra_full': 'autoencoder_no_dtime',
                 'full_tester': 'autoencoder_w_encoder_antic',
-                'no_dtime': 'autoencoder_no_dtime'
+                'no_dtime_good_reference': 'autoencoder_no_dtime',
+                'no_dtime_19_buttons': 'autoencoder_no_dtime',
+                'encoder_only_antic': 'encoder_only_antic',
+                'mai27_big_m_5buttons_original_loss': 'autoencoder_no_dtime',
             }  
 #===================================================================================================
 

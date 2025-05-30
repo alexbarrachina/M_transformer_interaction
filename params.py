@@ -4,7 +4,7 @@ import torch
 ########################################################
 
 ''' TESTING '''
-LIGHT_MODEL = False
+MODEL_TYPE = 'super' # 'light', 'big' or 'super'
 LIGHT_DATASET = False
 TRAIN_SELECTION = True
 
@@ -18,38 +18,53 @@ else:
 
 USE_TOPK = False
 
-MODEL_NAME = 'mai21_no_dtime_hi_multi_held'
-DESCRIPTION = 'no_dtime, monster dataset, multi-step contour, with deviate and margin, and button held 0.01 each'
+MODEL_NAME = 'mai24_no_dtime_ultra_resume'
+DESCRIPTION = 'resume, 6layers, full model, giantsel dataset, original losses'
 
 ''' MODEL '''
 # constants
-if LIGHT_MODEL:
+if MODEL_TYPE == 'light':
     SEQ_LEN = 256 # orig 2048
     NUM_LAYERS = 4
     EMB_DIM = 512 # 2048
     NUM_HEADS = 32
     if TRAIN_SELECTION:
-        SAVE_EVERY = 10 # in epochs # 25000 orig in steps
+        SAVE_EVERY = 20 # in epochs 
     else:
-        SAVE_EVERY = 25000 # in epochs # 25000 orig in steps
+        SAVE_EVERY = 25000 # 25000 orig in steps
     if UPF:
         BATCH_SIZE = 10 # 10 upf decoder-only, 
     else:
         BATCH_SIZE = 420 # 20 esmuc orignal decoder_only
     
-else:
+elif MODEL_TYPE == 'big':
     SEQ_LEN = 1024 # orig 2048
     NUM_LAYERS = 4 # orig 4
     EMB_DIM = 2048 # 2048
     NUM_HEADS = 32
     if TRAIN_SELECTION:
-        SAVE_EVERY = 10 # in epochs # 25000 orig in steps
+        SAVE_EVERY = 20 # in epochs 
+    else:
+        SAVE_EVERY = 25000 #  25000 orig in steps
+    if UPF:
+        BATCH_SIZE = 10
+    else:
+        BATCH_SIZE = 20 # 10 upf decoder-only,  20 esmuc orignal 
+
+elif MODEL_TYPE == 'super':
+    SEQ_LEN = 1024 # orig 2048
+    NUM_LAYERS = 6 # orig 4
+    EMB_DIM = 2048 # 2048
+    NUM_HEADS = 32
+    if TRAIN_SELECTION:
+        SAVE_EVERY = 40 # in epochs 
     else:
         SAVE_EVERY = 25000 # in epochs # 25000 orig in steps
     if UPF:
         BATCH_SIZE = 10
     else:
         BATCH_SIZE = 8 # 10 upf decoder-only,  20 esmuc orignal 
+
  
 if LIGHT_DATASET:
     DATA_SIZE = 1 # 1%
@@ -68,11 +83,12 @@ else: # on macbook pro
 if TESTING:
     BATCH_SIZE = 1
     SEQ_LEN = 16 
+    USE_LOGS = True
 
 VALIDATE_EVERY  = 500
 GENERATE_EVERY  = 10000
 GENERATE_LENGTH = 512
-PRINT_STATS_EVERY = 50
+PRINT_STATS_EVERY = VALIDATE_EVERY
 
 NUM_EPOCHS = 6000
 
@@ -82,9 +98,10 @@ GRAD_CLIP = 1.5
 LOSS_MARGIN_MULTIPLIER:Final[float] = 0.01 #0.01 # 
 LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.01 # 0.01
 LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.01 # 0.1, but 0.01 original
-LOSS_BUTTON_HELD_MULTIPLIER:Final[float] = 0.01 #0.01 #
-LOSS_NORM_POS_MULTIPLIER:Final[float] = 0.01 #0.01 #
-LOSS_PITCH_BUTTON_MULTIPLIER:Final[float] = 0.01 #0.01 # Multiplier for pitch-button correlation loss
+LOSS_BUTTON_HELD_MULTIPLIER:Final[float] = 0.0 #0.01 #
+LOSS_NORM_POS_MULTIPLIER:Final[float] = 0.0 #0.01 #
+LOSS_PITCH_BUTTON_MULTIPLIER:Final[float] = 0.0 #0.01 # Multiplier for pitch-button correlation loss
+LOSS_BUTTON_CONCENTRATION_MULTIPLIER:Final[float] = 0.0 #0.01 # Multiplier for button concentration loss
 
 # % of every component in loss contour
 LOSS_CONTOUR_PERC:Final[float] = 0. # 0.4, original
@@ -100,7 +117,8 @@ VOCAB_SIZE_PITCH:Final[int] = 128
 SOS:Final[int] = 127
 PAD_IDX = 128 
 
-NUM_BUTTONS:Final[int] = 19 # 19 buttons (0-18) with central button at 9 # 12 original
+NUM_BUTTONS:Final[int] = 12 # 19 buttons (0-18) with central button at 9 # 12 original
+BUTTON_CONCENTRATION_WINDOW_SIZE:Final[int] = 12
 SOS_BUTTONS:Final[int] = NUM_BUTTONS
 VOCAB_SIZE_BUTTONS:Final[int] = NUM_BUTTONS + 1
 
