@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_from_disk
 from TMIDIX import tegridy_tokens_to_dict
-
+from model_loader import load_model
 from x_transformer_1_23_2 import *
 
 torch.set_float32_matmul_precision('high')
@@ -24,6 +24,20 @@ torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_cudnn_sdp(False)
 
+
+#==========================================================================
+
+''' DEVICE '''
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device_type='cuda' if torch.cuda.is_available() else 'cpu'
+
+#==========================================================================
+
+''' MODEL & HYPERPARAMETERS '''
+model = load_model(model_name='no_dtime_good_reference', set_only=True)  
+model.to(device)
+#print(model)
+load_hyperparameters(model_name='no_dtime_good_reference')
 
 #==========================================================================
 
@@ -47,12 +61,6 @@ if(USE_LOGS):
         "description": DESCRIPTION
     }
     wandb.init(project="monsterGenie", config=config)
-
-#==========================================================================
-
-''' DEVICE '''
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device_type='cuda' if torch.cuda.is_available() else 'cpu'
 
 #==========================================================================
 
@@ -114,7 +122,7 @@ monster_piano = load_from_disk(local_dataset_path)
 
 # If you need specific splits, you can select them after loading
 train_dataset = monster_piano['train']
-if TESTING or LIGHT_DATASET:
+if TESTING:
     monster_piano_train = train_dataset.select(range(int(len(train_dataset) * 0.01)))  # 1% for training
     monster_piano_val = train_dataset.select(range(int(len(train_dataset) * 0.99), len(train_dataset)))  # Last 1% for validation
 else:
@@ -129,89 +137,9 @@ val_data = MusicSamplerDataset(monster_piano_val, SEQ_LEN, is_eval=True)
 train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
 
+
 #==========================================================================
 
-''' MODEL '''
-
-'''
-model = AutoregressiveAutoencoder(
-    ignore_index = PAD_IDX, 
-    #pad_value=PAD_IDX,
-    decoder = Decoder(
-        num_tokens = PAD_IDX+1,
-        max_seq_len = SEQ_LEN,
-        dim = EMB_DIM,
-        depth = NUM_LAYERS,
-        heads = NUM_HEADS,
-        rotary_pos_emb = True,
-        attn_flash = True
-        ),
-    encoder = Encoder(
-        num_tokens = PAD_IDX+1,
-        max_seq_len = SEQ_LEN,
-        dim = EMB_DIM,
-        depth = NUM_LAYERS,
-        heads = NUM_HEADS,
-        rotary_pos_emb = True,
-        attn_flash = True
-        )
-    )
-
-
-model = AutoregressiveAutoencoder_no_dtime(
-        ignore_index = PAD_IDX, 
-        #pad_value=PAD_IDX,
-        decoder = Decoder_no_dtime(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            ),
-        encoder = Encoder_no_dtime(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            )
-        )
-'''
-model = EncoderOnly(
-    ignore_index = PAD_IDX, 
-    #pad_value=PAD_IDX,
-    encoder = Encoder(
-        num_tokens = PAD_IDX+1,
-        max_seq_len = SEQ_LEN,
-        dim = EMB_DIM,
-        depth = NUM_LAYERS,
-        heads = NUM_HEADS,
-        rotary_pos_emb = True,
-        attn_flash = True
-        )
-    )
-'''
-model = DecoderOnly(
-    ignore_index = PAD_IDX, 
-    #pad_value=PAD_IDX,
-    decoder = DecoderSimple(
-        num_tokens = PAD_IDX+1,
-        max_seq_len = SEQ_LEN,
-        dim = EMB_DIM,
-        depth = NUM_LAYERS,
-        heads = NUM_HEADS,
-        rotary_pos_emb = True,
-        attn_flash = True
-        )
-    )'''
-
-model.to(device)
-
-#print(model)
 
 ''' PRECISION/OPTIMIZER/SCALER '''
 
@@ -272,7 +200,8 @@ for ep in range(NUM_EPOCHS):
         scaler.update()
 
  
-        if (i % VALIDATE_EVERY == 0) or TESTING:
+    for i, x in enumerate(tqdm.tqdm(train_loader, desc='Training')):
+       if (i % VALIDATE_EVERY == 0) or TESTING:
             try:
                 x = next(iter(val_loader)) # extract batches from test dataloader
             except StopIteration:
@@ -310,9 +239,9 @@ for ep in range(NUM_EPOCHS):
                     '''
 
 
-            model.train()
+    model.train()
 
  
-        if i % SAVE_EVERY == 0:
+    if i % SAVE_EVERY == 0:
             fname = './save_models/' + MODEL_NAME + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
             torch.save(model.state_dict(), fname)

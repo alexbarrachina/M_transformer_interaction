@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_dataset, load_from_disk
 from TMIDIX import tegridy_tokens_to_dict, Tegridy_Any_Pickle_File_Reader
-
+from model_loader import load_model
 from x_transformer_1_23_2 import *
 
 class MusicSamplerDataset(Dataset):
@@ -217,14 +217,23 @@ def main():
 
     #==========================================================================
 
+
+    ''' MODEL & HYPERPARAMETERS '''
+    model = load_model(model_name='no_dtime_good_reference', set_only=True)  
+    model.to(device)
+    #print(model)
+    load_hyperparameters(model_name='no_dtime_good_reference')
+
+    #==========================================================================
+
     ''' DATA '''
 
     """ LOAD TRAINING DATA """
 
     # Loading dataset from a pickle in ./Training-Data
-    train_data = Tegridy_Any_Pickle_File_Reader('./Training-Data/giantMIDI_sel')   
+    train_data = Tegridy_Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
     data_train = torch.Tensor(train_data)
-    eval_data = Tegridy_Any_Pickle_File_Reader('./Training-Data/giantMIDI_test')   
+    eval_data = Tegridy_Any_Pickle_File_Reader(DATASET_VAL_PATH)   
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
@@ -237,34 +246,7 @@ def main():
     val_loader  = DataLoader(val_dataset, batch_size = BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=False)
 
     #==========================================================================
-
-    ''' MODEL '''
-
-    model = AutoregressiveAutoencoder_no_dtime(
-        ignore_index = PAD_IDX, 
-        #pad_value=PAD_IDX,
-        decoder = Decoder_no_dtime(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            ),
-        encoder = Encoder_no_dtime(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            )
-        )
-
-    model.to(device)
-
+ 
     ''' PRECISION/OPTIMIZER/SCALER '''
 
     dtype = torch.bfloat16

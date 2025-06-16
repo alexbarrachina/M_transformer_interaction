@@ -21,6 +21,8 @@ from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset, load_from_disk
 from TMIDIX import tegridy_tokens_to_dict, Tegridy_Any_Pickle_File_Reader
 
+from model_loader import load_model
+
 from x_transformer_1_23_2 import *
 
 class MusicSamplerDataset(Dataset):
@@ -124,6 +126,20 @@ def main():
 
     #==========================================================================
 
+    ''' DEVICE '''
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device_type='cuda' if torch.cuda.is_available() else 'cpu'
+
+    #==========================================================================
+
+    ''' MODEL & HYPERPARAMETERS '''
+    model = load_model(model_name='no_dtime_good_reference', set_only=True)  
+    model.to(device)
+    #print(model)
+    load_hyperparameters(model_name='no_dtime_good_reference')
+
+    #==========================================================================
+
     ''' WANDB '''
     if(USE_LOGS):
         #tensorboard_summary = SummaryWriter()
@@ -145,11 +161,6 @@ def main():
         }
         wandb.init(project="monsterGenie", config=config)
 
-    #==========================================================================
-
-    ''' DEVICE '''
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    device_type='cuda' if torch.cuda.is_available() else 'cpu'
 
     #==========================================================================
 
@@ -158,9 +169,9 @@ def main():
     """ LOAD TRAINING DATA """
 
     # Loading dataset from a pickle in ./Training-Data
-    train_data = Tegridy_Any_Pickle_File_Reader('./Training-Data/giantMIDI_sel')   
+    train_data = Tegridy_Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
     data_train = torch.Tensor(train_data)
-    eval_data = Tegridy_Any_Pickle_File_Reader('./Training-Data/giantMIDI_test')   
+    eval_data = Tegridy_Any_Pickle_File_Reader(DATASET_VAL_PATH)   
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
@@ -172,95 +183,16 @@ def main():
     val_dataset = MusicSamplerDataset(data_eval, SEQ_LEN, is_eval=True) # train in chunks of SEQ_LEN
     val_loader  = DataLoader(val_dataset, batch_size = BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=False)
 
+    # Right after val_loader is created and before model definition, add a reusable iterator for streaming validation
+    val_iter = iter(val_loader)  # will be cycled through inside training loop
+
     #==========================================================================
-
-    ''' MODEL '''
-
-    '''
-    model = AutoregressiveAutoencoder(
-        ignore_index = PAD_IDX, 
-        #pad_value=PAD_IDX,
-        decoder = Decoder(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            ),
-        encoder = Encoder(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            )
-        )'''
-
-
-    model = AutoregressiveAutoencoder_no_dtime(
-        ignore_index = PAD_IDX, 
-        #pad_value=PAD_IDX,
-        decoder = Decoder_no_dtime(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            ),
-        encoder = Encoder_no_dtime(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            )
-        )
-    '''
-    model = EncoderOnly(
-        ignore_index = PAD_IDX, 
-        #pad_value=PAD_IDX,
-        encoder = Encoder(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            )
-        )
-
-    model = DecoderOnly(
-        ignore_index = PAD_IDX, 
-        #pad_value=PAD_IDX,
-        decoder = DecoderSimple(
-            num_tokens = PAD_IDX+1,
-            max_seq_len = SEQ_LEN,
-            dim = EMB_DIM,
-            depth = NUM_LAYERS,
-            heads = NUM_HEADS,
-            rotary_pos_emb = True,
-            attn_flash = True
-            )
-        )'''
-
-    model.to(device)
-
-    #print(model)
 
     ''' PRECISION/OPTIMIZER/SCALER '''
 
     dtype = torch.bfloat16
 
-    ctx = torch.amp.autocast(device_type=device_type, dtype=dtype)
+    #ctx = torch.amp.autocast(device_type=device_type, dtype=dtype)
 
     optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
@@ -285,7 +217,7 @@ def main():
                     'pitch': batch['pitch'].to(device)
                 }
 
-                with ctx:
+                with torch.amp.autocast(device_type=device_type, dtype=dtype):
                     loss, acc = model(x)  # Update your model to accept target separately
                 scaler.scale(loss['loss_total']).backward()
                 
@@ -293,7 +225,7 @@ def main():
                     if(USE_LOGS):                
                         wandb.log({"train_loss": loss['loss_total'].item()}, step=nsteps)
                         wandb.log({"train_acc": acc.item()}, step=nsteps)
-                        ''' if LOSS_NORM_POS_MULTIPLIER>0:
+                        if LOSS_NORM_POS_MULTIPLIER>0:
                             wandb.log({"train_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*loss['loss_norm_pos'].item()}, step=nsteps)
                         if LOSS_DEVIATE_MULTIPLIER>0:
                             wandb.log({"train_loss_deviate": LOSS_DEVIATE_MULTIPLIER*loss['loss_deviate'].item()}, step=nsteps)
@@ -309,7 +241,7 @@ def main():
                             wandb.log({"train_loss_button_held": LOSS_BUTTON_HELD_MULTIPLIER*loss['loss_button_held'].item()}, step=nsteps)
                         if LOSS_NORM_POS_MULTIPLIER>0:
                             wandb.log({"train_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*loss['loss_norm_pos'].item()}, step=nsteps)
-                        '''
+                        
                         nsteps += 1
 
 
@@ -324,44 +256,28 @@ def main():
 
                 if (i % VALIDATE_EVERY == 0) or TESTING:
                     try:
-                        x = next(iter(val_loader)) # extract batches from test dataloader
+                        val_batch = next(val_iter) # extract batches from test dataloader
                     except StopIteration:
-                        val_loader_iter = iter(val_loader)
-                        batch = next(iter(val_loader_iter)) # extract batches from test dataloader           
+                        val_iter = iter(val_loader)
+                        val_batch = next(val_iter) # extract batches from test dataloader           
                     model.eval()
                     with torch.no_grad():
-                        with ctx:
+                        with torch.amp.autocast(device_type=device_type, dtype=dtype):
                             # move to device
-                            x = {
-                                'dtime': batch['dtime'].to(device),
-                                'dur': batch['dur'].to(device),
-                                'pitch': batch['pitch'].to(device)
+                            vx = {
+                                'dtime': val_batch['dtime'].to(device),
+                                'dur': val_batch['dur'].to(device),
+                                'pitch': val_batch['pitch'].to(device)
                             }
                             # run the model
-                            val_loss, val_acc = model(x)  # Update your model to accept target separately
+                            val_loss, val_acc = model(vx)  # Update your model to accept target separately
 
                         if(USE_LOGS):                
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
                             wandb.log({"val_acc": val_acc.item()}, step=nsteps)
-                            '''if LOSS_NORM_POS_MULTIPLIER>0:
-                                wandb.log({"val_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*val_loss['loss_norm_pos'].item()}, step=nsteps)
-                            if LOSS_DEVIATE_MULTIPLIER>0:
-                                wandb.log({"val_loss_deviate": LOSS_DEVIATE_MULTIPLIER*val_loss['loss_deviate'].item()}, step=nsteps)
-                            if LOSS_CONTOUR_MULTIPLIER>0:
-                                wandb.log({"val_loss_contour": LOSS_CONTOUR_MULTIPLIER*LOSS_MULTI_STEP_PERC*val_loss['loss_contour'].item()}, step=nsteps)
-                            if LOSS_MULTI_STEP_PERC>0:
-                                wandb.log({"val_loss_multi_step": LOSS_CONTOUR_MULTIPLIER*LOSS_MULTI_STEP_PERC*val_loss['loss_multi_step'].item()}, step=nsteps)
-                            if LOSS_INTERVAL_PERC>0:
-                                wandb.log({"val_loss_interval": LOSS_CONTOUR_MULTIPLIER*LOSS_INTERVAL_PERC*val_loss['loss_interval'].item()}, step=nsteps)
-                            if LOSS_SHAPE_PERC>0:
-                                wandb.log({"val_loss_shape": LOSS_CONTOUR_MULTIPLIER*LOSS_SHAPE_PERC*val_loss['loss_shape'].item()}, step=nsteps)
-                            if LOSS_BUTTON_HELD_MULTIPLIER>0: 
-                                wandb.log({"val_loss_button_held": LOSS_BUTTON_HELD_MULTIPLIER*val_loss['loss_button_held'].item()}, step=nsteps)
-                            if LOSS_NORM_POS_MULTIPLIER>0:
-                                wandb.log({"val_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*val_loss['loss_norm_pos'].item()}, step=nsteps)
-                            '''
-
                     model.train()
+                    del val_batch, vx
+                    torch.cuda.empty_cache()
 
         
         if ep % SAVE_EVERY == 0:

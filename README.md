@@ -12,19 +12,16 @@ Python 3.9.19
 torch
 tqdm 
 datasets
-tensorboard
 einops
 wandb
 matplotlib
 python-rtmidi
 pyfluidsynth
-keyboard
-pythonosc
 ```
 
 Install with:
 ```bash
-pip install torch tqdm datasets tensorboard einops wandb matplotlib python-rtmidi pyfluidsynth keyboard python-osc
+pip install torch tqdm datasets einops wandb matplotlib python-rtmidi pyfluidsynth
 ```
 
 ## Project Structure
@@ -40,9 +37,6 @@ monster_genie/
 ├── model_loader.py        # Model loading utilities
 ├── midi_processors.py     # MIDI processing functions
 ├── inference_continuator.py # Offline MIDI continuation
-├── interaction_midi.py    # Real-time MIDI keyboard interaction
-├── interaction_osc.py     # OSC-based interaction
-├── interaction_kbrd.py    # Computer keyboard interaction
 ├── visualizer.py          # Real-time visualization
 ├── Training-Data/         # Training datasets
 ├── save_models/           # Saved model checkpoints
@@ -56,23 +50,27 @@ monster_genie/
 Place your training data in the `Training-Data/` directory:
 
 - `giantMIDI_sel.pickle` - training dataset (train_selection.py)
-- `giantMIDI_test.pickle` - Validation dataset (train.selection)
+- `giantMIDI_sel_test.pickle` - Validation dataset (train.selection)
 - `asigalov_train.pickle` - Alternative big training dataset (train.py)
 - `asigalov_val.pickle` - Alternative big validation dataset (train.py)
-
-### 2. Configuration
-
-Edit `params.py` to configure training parameters:
 
 
 ### 3. Training Commands
 
 #### Train with GIANTsel dataset:
+Edit `train_selection.py` to choose a model (models in `models.py`) in load_model() and load_hyperparameters()
+By default, model_name='no_dtime_good_reference'
+
+Then, execute:
 ```bash
 python train_selection.py
 ```
 
 #### Resume training from checkpoint:
+Edit `train_resume.py` to choose a model (models in `models.py`) in load_model() and load_hyperparameters()
+By default, model_name='no_dtime_good_reference'
+
+Then, execute:
 ```bash
 python train_resume.py
 ```
@@ -88,14 +86,14 @@ sbatch train_genie.sh
 ### 1. Inference Continuators 
 
 Automatic inferences, from 9 MIDI files as context, 
-guided with buttons extracted from the same MIDI file 
+guided with buttons extracted from the original MIDI files 
 By default, the context len is fixed to 120 notes. Once reached 120 notes, the first ones are discarded.
 
 from all 9 tests
 ```bash
 python inference_continuator_all.py
 ```
-1 test
+1 test only
 ```bash
 python inference_continuator.py
 ```
@@ -111,7 +109,7 @@ Interaction, generating buttons from MIDI keyboard,
 starting with a context extracted from a MIDI file
 
 ```bash
-python interaction_continuator.py
+python interaction_dtime_only.py
 ```
 
 Interaction from osc messages
@@ -132,6 +130,8 @@ Default OSC settings:
 
 
 ### 2. Model loaders
+
+Use `no_dtime_good_reference` model by default
 
 Available model types:
 - `autoencoder` - Standard encoder-decoder

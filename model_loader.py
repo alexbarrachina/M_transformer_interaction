@@ -22,9 +22,8 @@ from x_transformer_1_23_2 import AutoregressiveAutoencoder, Decoder, Encoder, En
 #===================================================================================================
 
 def load_model(model_name='default',
-               device='cuda',
                compile_mode='max-autotune',
-               verbose=False
+               set_only=False,
                ):
     """
     Load and initialize Giant Music Transformer model with specified parameters.
@@ -64,35 +63,6 @@ def load_model(model_name='default',
         model_type = 'autoencoder'
 
     print(model_type)
-    if verbose:
-        os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '0'
-        
-        print('=' * 70)
-        print('Selected model:', model_name.title(), '/', MODELS_PARAMETERS[model_name]['params'], 'M params')
-        print('=' * 70)
-        print('Model info:')
-        print('-' * 70)
-        print(MODELS_INFO[model_name])
-
-        print('=' * 70)
-        print('Downloading model...')
-
-    else:
-        os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
-
-    model_path = MODELS_FILE_NAMES[model_name]
-
-    if verbose:
-        print('Done!')
-        print('=' * 70)
-        
-        print('Instantiating model...')
-        # Check if CUDA is available
-    
-    if not torch.cuda.is_available():
-        map_location = torch.device('cpu')
-    else:
-        map_location = None
     
     if model_type == 'autoencoder':
         mpt_model = AutoregressiveAutoencoder(
@@ -205,24 +175,20 @@ def load_model(model_name='default',
             attn_flash = True
             )
         )
-    if verbose:
-        print('Done!')
-        print('=' * 70)
-        
-        print('Loading model...')
-    
-    mpt_model.load_state_dict(torch.load(model_path, map_location=map_location)) # weights_only=True not compatible cpu
 
-    if verbose:
-        print('Done!')
-        print('=' * 70)
-    
-        print('Compiling model...')
+    if set_only == False:
+        model_path = MODELS_FILE_NAMES[model_name]
 
-    mpt_model = torch.compile(mpt_model, mode=compile_mode)
+        if not torch.cuda.is_available():
+            map_location = torch.device('cpu')
+        else:
+            map_location = None
 
-    mpt_model.to(device)
-    mpt_model.eval()  
+        mpt_model.load_state_dict(torch.load(model_path, map_location=map_location)) # weights_only=True not compatible cpu
+
+        if compile_mode != 'none':
+            mpt_model = torch.compile(mpt_model, mode=compile_mode)
+
 
     return mpt_model
 

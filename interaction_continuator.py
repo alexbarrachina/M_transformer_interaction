@@ -22,7 +22,7 @@ from midi_processors import midi_to_tokens, tokens_to_midi
 #from monsterpianotransformer import generate
 import torch
 import TMIDIX
-from params import NUM_BUTTONS
+from params import load_hyperparameters
 
 TRACES = False
 
@@ -31,9 +31,10 @@ TRACES = False
 device = torch.device('mps') 
 
 ''' MODEL '''
-model = load_model(model_name='ultra_full', device='cpu')
+model = load_model(model_name='no_dtime_good_reference')
 model.to(device)
 model.eval()
+load_hyperparameters(model_name='no_dtime_good_reference')
 
 ''' PARAMS '''
 # Get sample seed MIDI path

@@ -1,4 +1,4 @@
-''' Automatic inference, from a MIDI file as context, 
+''' Automatic inferences, from 9 MIDI files as context, 
 guided with buttons extracted from the same MIDI file 
 By default, the context len is fixed to 120 notes. Once reached 120 notes, the first ones are discarded.
 '''
@@ -11,6 +11,7 @@ from midi_processors import midi_to_tokens, tokens_to_midi
 #from monsterpianotransformer import generate
 import torch
 import TMIDIX
+from params import load_hyperparameters
 
 ''' DEVICE '''
 #device = torch.device('cpu')
@@ -18,9 +19,10 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model = load_model(model_name='full_apr24_hi_losses', device='cpu', model_type='autoencoder_w_encoder_antic')
+model = load_model(model_name='no_dtime_good_reference')
 model.to(device)
 model.eval()
+load_hyperparameters(model_name='no_dtime_good_reference')
 
 #print(model)
 
@@ -31,8 +33,7 @@ sample_midi_path = './samples/test'
 output_midi_name = './out/continuator_test'
 output_butt_midi_name = './out/continuator_test_b'
 output_e_midi_name = './out/continuator_test_e'
-CTX_LEN = 120 # num notes in context. 
-TOTAL_GEN_LEN = 500 # num notes to generate
+CTX_LEN = 512 # num notes in context. 
 
 for j in range(1, 8):  # generate 10 continuation files
 
@@ -44,7 +45,8 @@ for j in range(1, 8):  # generate 10 continuation files
 
   dict_input_tokens, num_notes = TMIDIX.midi_tokens_to_dict(input_tokens) # vel already filtered out
   dict_output_tokens, num_notes = TMIDIX.midi_tokens_to_dict(output_tokens) # vel already filtered out
-  CTX_LEN = num_notes 
+  TOTAL_GEN_LEN = num_notes
+
   print("num_notes",num_notes)
   
   # Build context tokens
@@ -60,7 +62,7 @@ for j in range(1, 8):  # generate 10 continuation files
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     e = e.squeeze(0)
 
-  timeStart = time.perf_counter()
+  #timeStart = time.perf_counter()
   # generate pitches
   for i in range(0, TOTAL_GEN_LEN-1-CTX_LEN):
     
@@ -78,8 +80,8 @@ for j in range(1, 8):  # generate 10 continuation files
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
     print(new_pitch_token)
 
-  timeEnd = time.perf_counter()
-  print("t=", (timeEnd-timeStart) * 1000 / i, "ms") # in miliseconds, promig
+  #timeEnd = time.perf_counter()
+  #print("t=", (timeEnd-timeStart) * 1000 / (TOTAL_GEN_LEN-CTX_LEN), "ms") # in miliseconds, mean time per note
 
   context = {
       'dtime': dict_output_tokens['dtime'][:TOTAL_GEN_LEN],
