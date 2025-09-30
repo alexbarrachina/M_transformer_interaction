@@ -28,12 +28,12 @@ pip install torch tqdm datasets einops wandb matplotlib python-rtmidi pyfluidsyn
 
 ```
 monster_genie/
-├── train_selection.py      # Training with GIANTsel dataset
-├── train_resume.py         # Resume training from checkpoint
+├── train_selection.py     # Training with GIANTsel dataset
+├── train_resume.py        # Resume training from checkpoint
 ├── train.py               # Standard training script
 ├── params.py              # Configuration parameters
 ├── models.py              # Model definitions
-├── x_transformer_1_23_2.py # Transformer implementation
+├── x_transformer.py       # Transformer implementation
 ├── model_loader.py        # Model loading utilities
 ├── midi_processors.py     # MIDI processing functions
 ├── inference_continuator.py # Offline MIDI continuation
@@ -137,8 +137,8 @@ Available model types:
 - `autoencoder` - Standard encoder-decoder
 - `autoencoder_no_dtime` - Without delta-time tokens
 - `autoencoder_w_encoder_antic` - With dtime in the encoder
-- `decoder_only` - Decoder-only model
-- `encoder_only` - Encoder-only model
+- `decoder_only` - Decoder-only model (decorder tester)
+- `encoder_only` - Encoder-only model (button-compression tester)
 
 ## Visualization
 
@@ -152,7 +152,7 @@ Real-time visualization is available during interactive modes:
 Generated files are saved in the `out/` directory:
 - `*.mid` - Generated MIDI files
 - `*_buttons.mid` - Button sequences as MIDI
-- `*_e.mid` - Encoder outputs as MIDI
+- `*_e.mid` - continuous-value Encoder outputs as MIDI
 
 
 

@@ -1,7 +1,28 @@
+#===================================================================================================
+# Monster Genie params.py Python module
+# Global parameters 
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
+
 from typing import Final
 import torch
 
 from models import *
+
 ########################################################
 
 ''' TESTING '''
@@ -125,7 +146,7 @@ VOCAB_SIZE_PITCH:Final[int] = 128
 SOS:Final[int] = 127
 PAD_IDX = 128 
 
-NUM_BUTTONS:Final[int] = 8 # 19 buttons (0-18) with central button at 9 # 12 original
+NUM_BUTTONS:Final[int] = 12 # 19 buttons (0-18) with central button at 9 # 12 original
 BUTTON_CONCENTRATION_WINDOW_SIZE:Final[int] = 12
 SOS_BUTTONS:Final[int] = NUM_BUTTONS
 VOCAB_SIZE_BUTTONS:Final[int] = NUM_BUTTONS + 1
@@ -279,4 +300,14 @@ def load_hyperparameters(model_name='default',
     if 'num_heads' in MODELS_PARAMETERS[model_name]:
         NUM_HEADS = MODELS_PARAMETERS[model_name]['num_heads']
         
+    if 'dataset' in MODELS_PARAMETERS[model_name]: # dataset used
+        if 'giantmidi_full' in MODELS_PARAMETERS[model_name]['dataset']:
+            DATASET_TRAIN_PATH = './Training-Data/giantMIDI' 
+            DATASET_VAL_PATH = './Training-Data/giantMIDI_test'
+        elif 'giantmidi_sel' in MODELS_PARAMETERS[model_name]['dataset']:
+            DATASET_TRAIN_PATH = './Training-Data/giantMIDI_sel' 
+            DATASET_VAL_PATH = './Training-Data/giantMIDI_sel_test'
+        elif 'asigalov' in MODELS_PARAMETERS[model_name]['dataset']:
+            DATASET_TRAIN_PATH = './Training-Data/asigalov_train'
+            DATASET_VAL_PATH = './Training-Data/asigalov_val'
         

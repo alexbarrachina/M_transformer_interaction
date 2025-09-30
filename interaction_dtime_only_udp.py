@@ -1,6 +1,6 @@
 #===================================================================================================
-# Monster Genie interaction_dtime_only.py Python module
-# Interaction, generating buttons from MIDI keyboard,
+# Monster Genie interaction_dtime_only_udp.py Python module
+# Interaction, generating buttons from MPR121 capacitive sensors via UDP,
 # starting with a context extracted from a MIDI file
 # 
 # Copyright 2025 Alex Barrachina
@@ -25,10 +25,8 @@ import fluidsynth
 import os 
 # pip install pyfluidsynth
 from typing import Optional, List
-from rtmidi.midiconstants import NOTE_ON, NOTE_OFF
-from rtmidi.midiutil import open_midiinput
-import rtmidi
-# pip install python-rtmidi
+import socket
+# UDP imports for MPR121
 from threading import Lock
 
 import torch
@@ -39,6 +37,10 @@ from params import load_hyperparameters
 from visualizer import Visualizer
 
 TRACES = False
+
+''' UDP CONFIGURATION '''
+UDP_IP = ""  # Listen on all interfaces
+UDP_PORT = 3000
 
 ''' DEVICE '''
 #device = torch.device('cpu')
@@ -65,36 +67,126 @@ TOTAL_GEN_LEN = 1024 # num notes to generate
 buffer_lock = Lock()
 save_lock = Lock()
 
+''' UDP PARSING FUNCTIONS '''
+def parse_message(message):
+    """Parse incoming UDP message and return structured data"""
+    try:
+        parts = message.decode('utf-8').strip().split()
+        if len(parts) < 2:
+            return None
+        
+        if parts[0] == 'sw' and len(parts) == 3:
+            # Switch message: "sw 1 1" or "sw 1 0"
+            return {
+                'type': 'switch',
+                'number': int(parts[1]),
+                'state': int(parts[2]),
+                'raw': message.decode('utf-8').strip()
+            }
+        elif parts[0] in ['x1', 'x2'] and len(parts) == 3:
+            # Capacitive sensor message: "x1 0 1" or "x2 5 0"
+            pin = -1
+            if parts[0]=='x2' and parts[1]== '5':
+                pin = 0
+            if parts[0]=='x2' and parts[1]== '6':
+                pin = 1
+            if parts[0]=='x2' and parts[1]== '7':
+                pin = 2
+            if parts[0]=='x2' and parts[1]== '8':
+                pin = 3
+            if parts[0]=='x2' and parts[1]== '9':
+                pin = 4
+            if parts[0]=='x2' and parts[1]== 'a':
+                pin = 5
+            if parts[0]=='x2' and parts[1]== 'b':
+                pin = 6
+            if parts[0]=='x1' and parts[1]== '1':
+                pin = 7
+            if parts[0]=='x1' and parts[1]== '0':
+                pin = 8
+            if parts[0]=='x1' and parts[1]== '3':
+                pin = 9
+            if parts[0]=='x1' and parts[1]== '4':
+                pin = 10
+            if parts[0]=='x1' and parts[1]== '5':
+                pin = 11
+            if parts[0]=='x1' and parts[1]== 'a':
+                reset_context()
+                pin = 0
+
+            return {
+                'type': 'capacitive',
+                'sensor': parts[0],
+                'pin': pin,  # Convert hex to int
+                'state': int(parts[2]),
+                'raw': message.decode('utf-8').strip()
+            }
+        else:
+            return {
+                'type': 'unknown',
+                'raw': message.decode('utf-8').strip()
+            }
+    except Exception as e:
+        return {
+            'type': 'error',
+            'raw': message.decode('utf-8', errors='ignore'),
+            'error': str(e)
+        }
+
 '''VISUALIZER'''
 visualizer = Visualizer()
 
-'''MIDI IN CALLBACK'''
-def midiin_callback(event, data=None):
-    message, deltatime = event
+''' MPR121 TO BUTTON MAPPING '''
+def mpr121_to_button(sensor, pin):
+    """Map MPR121 capacitive sensor data to button number (0-11)"""
+    # Map sensor and pin combination to button number
+    # Assuming x1 has pins 0-11 and x2 has pins 0-11 for a total of 24 buttons
+    # But we only need 12 buttons (0-11) for the model
+    if sensor == 'x1':
+        return pin % 12  # Map x1 pins 0-11 to buttons 0-11
+    elif sensor == 'x2':
+        return pin % 12  # Map x2 pins 0-11 to buttons 0-11
+    else:
+        return 0  # Default to button 0
 
-    if message[0] & 0xF0 == NOTE_ON:
-        status, note, velocity = message
-        #channel = (status & 0xF) + 1
-        with buffer_lock: # lock to avoid race condition
-            manageNote(note, velocity)
-
-    if message[0] & 0xF0 == NOTE_OFF: 
-        status, note, velocity = message
-        #with buffer_lock: # lock to avoid race condition, temporary disabled for debugging
-        manageNote(note, 0)
+''' UDP MESSAGE HANDLER '''
+def handle_udp_message(data):
+    """Handle incoming UDP message from MPR121"""
+    parsed = parse_message(data)
+    if not parsed:
+        return
     
-    if message[0] & 0xF0 == 176:  # 176 is the status for control change
+    if parsed['type'] == 'capacitive':
+        # Map sensor data to button
+        #button = mpr121_to_button(parsed['sensor'], parsed['pin'])
+        button = parsed['pin']
 
-        if message[1] == 18 and message[2] > 0: # Using REC button as a trigger to save performance
-          with save_lock:
-            print("saving performance")
-            save_performance()
-            os._exit(1)
-
-        if message[1] == 17 and message[2] > 0: # Using PLAY button as a trigger to reset the context
-          with save_lock:
-            print("resetting context")
-            reset_context()
+        velocity = 100 if parsed['state'] else 0  # Convert state to velocity
+        
+        if TRACES:
+            print(f"MPR121: {parsed['sensor']} pin {parsed['pin']} -> button {button}, state {parsed['state']}")
+        
+        with buffer_lock:  # lock to avoid race condition
+            manageNote(button, velocity)  # Use button as "note" for manageNote function
+    
+    elif parsed['type'] == 'switch':
+        # Handle switch messages for special functions
+        if parsed['number'] == 1 and parsed['state']:  # Switch 1 for save
+            with save_lock:
+                print("saving performance")
+                save_performance()
+                os._exit(1)
+        elif parsed['number'] == 2 and parsed['state']:  # Switch 2 for reset
+            with save_lock:
+                print("resetting context")
+                reset_context()
+    
+    elif parsed['type'] == 'error':
+        print(f"UDP parsing error: {parsed['error']}")
+    
+    elif parsed['type'] == 'unknown':
+        if TRACES:
+            print(f"Unknown UDP message: {parsed['raw']}")
 
 
 def key_to_button(key):
@@ -183,7 +275,7 @@ with torch.inference_mode():
 
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN ], b[:CTX_LEN])
 
-def manageNote(note, velocity): 
+def manageNote(button, velocity): 
   global context  # Access the global context
   global timeLast # time of last note, global variable
   global b # button array
@@ -194,11 +286,11 @@ def manageNote(note, velocity):
   global visualizer
   
   if TRACES:
-    print("key", note)
+    print("button", button)
 
   timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_tokens()
 
-  if velocity > 0: # noteOn
+  if velocity > 0: # button pressed
     # Update position token
     dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
     if first_note:
@@ -207,10 +299,10 @@ def manageNote(note, velocity):
 
     timeLast = timeNew
     dict_output_tokens['dtime'][i+CTX_LEN] = dtime
-    # MIDI note to button
+    # Use button directly (no conversion needed)
     try:
-        but = key_to_button(note)
-        #b[i+CTX_LEN] = but
+        but = button  # button is already the correct value
+        b[i+CTX_LEN] = but
     except:
         print("ERROR", b[i+CTX_LEN])
     context = {
@@ -235,10 +327,10 @@ def manageNote(note, velocity):
     noteOn_dict[but] = (new_pitch_token, timeNew)
     i += 1
 
-  else: # noteOff
+  else: # button released
     if TRACES:
-        print("noteOff", note)
-    but = key_to_button(note)
+        print("buttonOff", button)
+    but = button  # button is already the correct value
     #print("but", but)
     if but in noteOn_dict:
       if TRACES:
@@ -251,37 +343,54 @@ def manageNote(note, velocity):
       #visualizer.update(noteOn_time)
 
 
-"""# MIDI IN """
+"""# UDP RECEIVER """
 
 try:
-   # Create MIDI input object
-    if torch.backends.mps.is_available(): 
-        midiin = rtmidi.MidiIn(rtmidi.API_MACOSX_CORE)  #  for Mac
-        MIDI_PORT = 0 #  Axiom 0 for Mac
-    else:
-        midiin = rtmidi.MidiIn(rtmidi.API_LINUX_ALSA)  #  for Linux
-        MIDI_PORT = 1 # minicontrol32 in linux
-
+    # Create UDP socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
-    # List available ports
-    available_ports = midiin.get_ports()
+    # Bind to all interfaces on the specified port
+    sock.bind((UDP_IP, UDP_PORT))
+    sock.settimeout(0.001)  # 1ms timeout for responsive visualizer
     
-    if available_ports:
-        print("Available MIDI input ports:")
-        for i, port in enumerate(available_ports):
-            print(f"[{i}] {port}")
-        # Open first available port
-        midiin.open_port(MIDI_PORT) 
-      
-        print(f"Using MIDI input port: {available_ports[MIDI_PORT]}")
-
-    midiin.set_callback(midiin_callback)
-
+    print(f"MPR121 UDP Receiver starting...")
+    print(f"Listening on port {UDP_PORT}")
+    print(f"Waiting for data from MPR121...")
+    print("-" * 50)
+    print("✓ Receiver ready and listening!")
+    print("Press Ctrl+C to stop")
+    print("-" * 50)
+    
+    message_count = 0
+    
     while True:
-      time.sleep(0.0001)
-      #visualizer.get_note(60, 100)
-      #visualizer.get_button(0, 100)
-      visualizer.draw()
-except (EOFError, KeyboardInterrupt):
-    print("Bye.")
+        try:
+            # Receive data
+            data, addr = sock.recvfrom(1024)
+            message_count += 1
+            
+            # Handle the message
+            handle_udp_message(data)
+            
+            # Show sender info periodically
+            if message_count % 100 == 0:
+                print(f"Received {message_count} messages from {addr[0]}")
+                
+        except socket.timeout:
+            # Timeout occurred, continue with visualizer update
+            pass
+        
+        # Update visualizer
+        visualizer.draw()
+        
+except KeyboardInterrupt:
+    print(f"\nStopping receiver...")
+    print(f"Total messages received: {message_count}")
+    
+except Exception as e:
+    print(f"Error: {e}")
+    
+finally:
+    sock.close()
+    print("Receiver stopped.")
 

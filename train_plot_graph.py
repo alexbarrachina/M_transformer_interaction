@@ -1,6 +1,15 @@
+#===================================================================================================
+# Monster Genie train_plot_graph.py Python module
+# Plot graph of training and validation losses
+# 
+# Alex Barrachina 2025
+#===================================================================================================
+# License: Apache 2.0
+#===================================================================================================
+
 import matplotlib.pyplot as plt
 import numpy as np
-from TMIDIX import Tegridy_Any_Pickle_File_Reader
+from midiUtils import Any_Pickle_File_Reader
 
 # Define a function for moving average
 def moving_average(data, window_size):
@@ -11,7 +20,7 @@ def moving_average(data, window_size):
 # Choose window size (adjust as needed)
 window_size = 100  # Averages over 10 epochs
 
-data = Tegridy_Any_Pickle_File_Reader(input_file_name='./save_models/big_mar28_decoder_only.pickle')
+data = Any_Pickle_File_Reader(input_file_name='./save_models/big_mar28_decoder_only.pickle')
 
 train_losses = np.array(data[0])
 train_accs = np.array(data[1])

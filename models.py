@@ -1,10 +1,23 @@
 #===================================================================================================
-# Monster Piano Transformer models Python module
-#===================================================================================================
-# Project Los Angeles
-# Tegridy Code 2025
-#===================================================================================================
-# License: Apache 2.0
+# Monster Genie models Python module
+# info about models available 
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
 #===================================================================================================
 
 MODELS_HF_REPO_LINK = 'asigalov61/Monster-Piano-Transformer'
@@ -351,7 +364,19 @@ MODELS_PARAMETERS = {
         'loss_contour': 0.1,
         'loss_deviate': 0.1,
         'dataset': 'full'
-    }
+    },   
+    'decoder_only_2_buttons': {
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'giantmidi_full',
+        'num_buttons': 2
+        },    
 }
 
 
@@ -382,6 +407,7 @@ MODELS_TYPES = {'tester': 'autoencoder_w_encoder_antic',
                 'no_dtime_19_buttons': 'autoencoder_no_dtime',
                 'encoder_only_antic': 'encoder_only_antic',
                 'mai27_big_m_5buttons_original_loss': 'autoencoder_no_dtime',
+                'decoder_only_2_buttons': 'decoder_only_2_buttons',
             }  
 #===================================================================================================
 

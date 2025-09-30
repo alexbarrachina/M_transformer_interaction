@@ -1,5 +1,23 @@
-''' Interaction, generating buttons from MIDI keyboard, 
-starting with a context extracted from a MIDI file '''
+#===================================================================================================
+# Monster Genie interaction_continuator.py Python module
+# Interaction, generating buttons from MIDI keyboard,
+# starting with a context extracted from a MIDI file
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
 
 import time
 import sys
@@ -14,14 +32,11 @@ import rtmidi
 import threading
 from threading import Lock
 
-from visualizer import Visualizer
-
-# Import Monster Piano Transformer as mpt
-from model_loader import load_model
-from midi_processors import midi_to_tokens, tokens_to_midi
-#from monsterpianotransformer import generate
 import torch
-import TMIDIX
+
+from model_loader import load_model
+from visualizer import Visualizer
+from midiUtils import midi_to_tokens, midi_tokens_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from params import load_hyperparameters
 
 TRACES = False
@@ -117,9 +132,9 @@ def save_performance():
     print("dtime_save", dict_output_tokens['dtime'][i:i+CTX_LEN+1])
 
   # generate a midi file from generated pitches
-  song_d = TMIDIX.dict_to_song(context)
+  song_d = dict_to_song(context)
 
-  detailed_stats = TMIDIX.Tegridy_ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,
+  detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,
                                                             timings_multiplier=2
                                                             )
   print("saved performance")
@@ -149,8 +164,8 @@ output_tokens = input_tokens.copy()
 
 output_tokens_extended = output_tokens * 10
 
-dict_input_tokens, num_notes = TMIDIX.midi_tokens_to_dict(input_tokens) # vel already filtered out
-dict_output_tokens, num_notes = TMIDIX.midi_tokens_to_dict(output_tokens) # vel already filtered out
+dict_input_tokens, num_notes = midi_tokens_to_dict(input_tokens) # vel already filtered out
+dict_output_tokens, num_notes = midi_tokens_to_dict(output_tokens) # vel already filtered out
 
 # Build context tokens
 context = {
@@ -158,7 +173,7 @@ context = {
     'pitch': torch.tensor(dict_input_tokens['pitch'], dtype=torch.long).unsqueeze(0),
     'dur': torch.tensor(dict_input_tokens['dur'], dtype=torch.long).unsqueeze(0)
     }
-context = TMIDIX.to_device(context, device)
+context = to_device(context, device)
   
 with torch.inference_mode():
     e = model.encoder(context) # encoder output (batch, seq_len)
@@ -211,7 +226,7 @@ def manageNote(note, velocity):
       'dur': torch.tensor(dict_output_tokens['dur'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
       'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
     }
-    context = TMIDIX.to_device(context, device)
+    context = to_device(context, device)
  
     if TRACES:
         print("pass context")

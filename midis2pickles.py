@@ -1,8 +1,31 @@
+#===================================================================================================
+# Monster Genie midis2pickles.py Python module
+# Converts MIDI files into a pickle file
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
+
 import random
 import os
 from tqdm import tqdm
 
-from TMIDIX import midi2ms_score, Tegridy_Any_Pickle_File_Writer#, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
+from midiUtils import midi2ms_score, Any_Pickle_File_Writer #, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
 
 # Offsets create non-overlapping ranges for each token type
 # DTIME 0-127
@@ -118,7 +141,7 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
         continue
 
 print('=' * 70)
-Tegridy_Any_Pickle_File_Writer(train_data1, './Training-Data/processedMIDIs')        
+Any_Pickle_File_Writer(train_data1, './Training-Data/processedMIDIs')        
 print('Done!')   
 print(str(len(train_data1)) + ' tokens')
 print('=' * 70)

@@ -1,23 +1,33 @@
 #===================================================================================================
-# Monster Piano Transformer model_loader Python module
+# Monster Genie model_loader Python module
+# Loads the model
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
 #===================================================================================================
-# Project Los Angeles
-# Tegridy Code 2025
-#===================================================================================================
-# License: Apache 2.0
-#===================================================================================================
+
 
 import os
-
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
-
-#===================================================================================================
-
-from models import *
 
 import torch
 
-from x_transformer_1_23_2 import AutoregressiveAutoencoder, Decoder, Encoder, EncoderOnly, DecoderOnly, DecoderSimple, DecoderSimple_continuous_dtime, Decoder_no_dtime, Encoder_no_dtime, AutoregressiveAutoencoder_no_dtime, Encoder_antic
+from models import *
+from x_transformer import *
 
 #===================================================================================================
 
@@ -26,7 +36,7 @@ def load_model(model_name='default',
                set_only=False,
                ):
     """
-    Load and initialize Giant Music Transformer model with specified parameters.
+    Load and initialize Monster Piano Transformer model with specified parameters.
 
     Parameters:
     model_name (str): The name of the model to load from MODELS_INFO dictionary. Default and the best model is 'without velocity - 7 epochs'.
@@ -39,7 +49,7 @@ def load_model(model_name='default',
 
     Example use:
     
-    import monsterpianotransformer as mpt
+    import x_transformer as mpt
     
     mpt_model = mpt.load_model('models')
     """
@@ -175,7 +185,20 @@ def load_model(model_name='default',
             attn_flash = True
             )
         )
-
+    elif model_type == 'decoder_only_2_buttons':
+        mpt_model = Decoder_only_2_buttons(
+            ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
+            # Use Decoder instead of DecoderSimple to match the saved model architecture
+            decoder = Decoder_no_dtime(
+            num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
+            max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
+            dim = MODELS_PARAMETERS[model_name]['emb_dim'],
+            depth = MODELS_PARAMETERS[model_name]['num_layers'],
+            heads = MODELS_PARAMETERS[model_name]['heads'],
+            rotary_pos_emb = True,
+            attn_flash = True
+            )
+        )
     if set_only == False:
         model_path = MODELS_FILE_NAMES[model_name]
 

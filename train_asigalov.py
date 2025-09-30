@@ -1,22 +1,46 @@
+#===================================================================================================
+# Monster Genie train_asigalov.py Python module
+# Training with Asigalov dataset
+# Resume training from checkpoint
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
 import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 import tqdm
-#from torch.utils.tensorboard import SummaryWriter
-from params import *
 
 #!set USE_FLASH_ATTENTION=1
 os.environ['USE_FLASH_ATTENTION'] = '1'
 
 import torch
 import torch.optim as optim
-
 from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_from_disk
-from TMIDIX import tegridy_tokens_to_dict
+
+from midiUtils import tokens_to_dict
 from model_loader import load_model
-from x_transformer_1_23_2 import *
+from x_transformer import *
+from params import *
+
+#==========================================================================
 
 torch.set_float32_matmul_precision('high')
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
@@ -75,7 +99,7 @@ class MusicSamplerDataset(Dataset):
         self.is_eval = is_eval
         self.indices = []
 
-        self.feature_data, self.num_notes = tegridy_tokens_to_dict(data)
+        self.feature_data, self.num_notes = tokens_to_dict(data)
 
         if self.is_eval:
             max_indices = self.num_notes - (self.seq_len+1)

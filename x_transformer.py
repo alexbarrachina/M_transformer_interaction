@@ -1,18 +1,29 @@
-#===================================================================================================================
-#
-# X Trasformer Module
-#
+#===================================================================================================
+# Monster Genie  X Trasformer Module Python module
 # Partial x-transformers code With useful modifications
+# 
+# Copyright 2025 Alex Barrachina
 #
-# Version 1.0
-#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
 # Original source code courtesy of lucidrains
 # https://github.com/lucidrains/x-transformers
 #
-# Original source code retrieved on 10/10/2023
+# Original source code retrieved on 10/10/2023# Licensed under the Apache License, Version 2.0 (the "License");
 #
-# Project Los Angeles
-# Tegridy Code 2023
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
 
 #===================================================================================================================
 
@@ -43,7 +54,6 @@ from functools import wraps
 from dataclasses import dataclass
 
 from einops import rearrange, repeat,  pack, unpack
-
 from math import ceil, log
 
 from params import *
@@ -83,7 +93,6 @@ def top_k(logits, frac_num_tokens = 0.1, k = None):
     probs = torch.full_like(logits, float('-inf'))
     probs.scatter_(1, ind, val)
     return probs
-
 
 
 # constants
@@ -1654,16 +1663,16 @@ class AutoregressiveAutoencoder(Module):
             # Identifies when consecutive notes are different (pitch change)
             # Penalizes same button values when consecutive notes are different
             # Helps maintain consistency in the mapping
-            notes_diff = (note_tokens['pitch'][:, 1:] != note_tokens['pitch'][:, :-1]).float()    
+            notes_diff = (note_tokens['pitch'][:, 1:] != note_tokens['pitch'][:, :-1]).float()  # 1 when pitch changes, 0 when pitch is the same
             
             # Get discretized button values for comparison
             buttons = self.real_to_discrete(e)
             # Compare consecutive discretized buttons
-            button_diff = (buttons[:, 1:] != buttons[:, :-1]).float()
+            button_diff = (buttons[:, 1:] != buttons[:, :-1]).float() # 1 when button changes, 0 when button is the same
             
             # Penalize when discretized buttons are the same for different notes
             loss_button_held = torch.square(
-                (1 - button_diff) * notes_diff # 1 when buttons are same, 0 when different
+                (1 - button_diff) * notes_diff # 1 when buttons are same, 0 when different, penalizes same buttons & different pitches
             ).mean()
 
         # Calculate normalized position loss
@@ -3253,6 +3262,197 @@ class AutoregressiveAutoencoder_no_dtime(Module):
 
         acc = num_right / len(labels) 
         return acc
+    
+
+class Decoder_only_2_buttons(Module):
+    def __init__(
+        self,
+        decoder,
+        ignore_index = -100,
+    ):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+        #seq, ignore_index = x.shape[1], self.ignore_index
+
+        pitch_diff = torch.diff(note_tokens['pitch'][:,:], dim=1)
+        b = (pitch_diff >= 0).to(torch.long)  # 1 for non-negative diff, 0 for negative diff
+
+        # Create decoder context
+        decoder_context = {
+            #'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, :-1], # no current pitch 
+            #'dur': note_tokens['dur'][:, :-1], # no current dur
+            'button': b[:, :] # b.shape = (B, T) # includes current button
+        } # (B, T)
+
+        logits = self.decoder(decoder_context) # (B, T (seq_len), VOCAB_SIZE_PITCH) (2, 1024, 128)
+
+        # Target should be the pitch at the current (last) position
+        target = note_tokens['pitch'][:,1:]
+
+        # Compute reconstruction loss (cross entropy between predicted and true pitches)
+        #loss_recons = loss.forward(y, tgt)
+        # Compute losses and update params
+        # loss_recons = cross entropy loss between predicted pitch sample list and true pitch sample list
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index = self.ignore_index # 128 vocab_pitch_size
+        )
+        
+        #loss_total = loss_recons
+        acc = self.compute_accuracy(logits, target)
+        
+        loss = {
+            'loss_total': loss_recons,
+        }
+        return loss, acc
+
+        #return loss_total, acc
+ 
+    @torch.inference_mode()
+    def gen_pitch_token(self, 
+            note_tokens: Dict[str, Tensor],
+            temperature = 1.0
+            ):
+
+        device = note_tokens['pitch'].device
+        b = note_tokens['button'].long()
+
+        # B = batch size = 1
+        # note_tokens suposed on gpu
+        # Create encoder context (excluding the first position)
+        # as note_tokens['dtime'] (B, T+1)
+
+        # Create decoder context
+        # note_tokens['dtime'][:,-1] is the current dtime
+        # b[:,-1] is the current button 
+        decoder_context = {
+            #'dtime': note_tokens['dtime'][:, 1:],
+            'pitch': note_tokens['pitch'][:, :-1],
+            #'dur': note_tokens['dur'][:, :-1],
+            'button': b[:, 1:]
+        } # (B, T)
+
+        logits, _ = self.decoder(
+                decoder_context,
+                return_intermediates = True,
+                cache = None,
+                seq_start_pos = None
+        )
+
+        logits = logits[:, -1]  # [B, 1, vocab_size]
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        prompts,
+        seq_len,
+        temperature = 1.,
+        filter_logits_fn: Callable = top_k,
+        restrict_to_max_seq_len = True,
+        filter_kwargs: dict = dict(),
+        cache_kv = True,
+        verbose=True,
+        return_prime=False
+    ):
+        max_seq_len = self.max_seq_len
+
+        prompts, ps = pack([prompts], '* n')
+
+        b, t = prompts.shape
+
+        # handle variable lengthed prompts (prefixes)
+        seq_start_pos = None
+
+        # output from which sampled tokens appended to
+        out = prompts
+
+        if verbose:
+          print("Generating sequence of max length:", seq_len)
+
+        # kv caches
+
+        cache = None 
+
+        # sampling up to seq_len
+
+        for sl in range(seq_len):
+
+            if restrict_to_max_seq_len:
+                x = out[:, -max_seq_len:]
+
+                if exists(cache): # starts as None but will get updated with the output of the model
+                    for inter in cache.attn_intermediates:
+                        inter.cached_kv = [t[..., -(max_seq_len - 1):, :] for t in inter.cached_kv]
+
+            logits, new_cache = self.decoder(
+                x,
+                return_intermediates = True,
+                cache = cache,
+                seq_start_pos = seq_start_pos # None
+            )
+
+            if cache_kv and self.decoder.can_cache_kv:
+                cache = new_cache
+
+            logits = logits[:, -1]
+
+            # filter by top_k, top_p (nucleus), top_a, or custom
+
+            filtered_logits = filter_logits_fn(logits, **filter_kwargs)
+
+            probs = F.softmax(filtered_logits / temperature, dim=-1)
+
+            sample = torch.multinomial(probs, 1)
+
+            out = torch.cat((out, sample), dim=-1)
+
+            if verbose:
+              if sl % 32 == 0:
+                print(sl, '/', seq_len)
+
+
+        if return_prime:
+          return out[:, :]
+        
+        else:
+          return out[:, t:]
+
+        # out, = unpack(out, ps, '* n')
+
+        # return out
+
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
+
+        acc = num_right / len(labels) 
+        return acc
+
 
 class Encoder_antic(nn.Module):
     def __init__(
@@ -3569,53 +3769,6 @@ def normalized_position_loss(pitches, buttons, window_size=5):
     return position_diff.mean()
 
 
-def normalized_position_loss(pitches, buttons, window_size=40):
-    """
-    Calculates loss between normalized positions of pitches and buttons.
-    
-    Args:
-        pitches: Tensor of shape [batch, seq_len] containing pitch values
-        buttons: Tensor of shape [batch, seq_len] containing button values
-        window_size: Size of window to calculate local min/max for pitches
-    
-    Returns:
-        A differentiable loss tensor
-    """
-    batch_size, seq_len = pitches.shape
-    
-    # Convert to float for calculations
-    pitches = pitches.float()
-    buttons = buttons.float()
-    
-    # Calculate normalized button positions (0 to 1)
-    norm_buttons = buttons / (NUM_BUTTONS - 1)
-    
-    # Calculate normalized pitch positions using sliding window
-    norm_pitches = torch.zeros_like(pitches)
-    
-    # For each position in the sequence
-    for i in range(seq_len):
-        # Calculate window boundaries
-        start = max(0, i - window_size // 2)
-        end = min(seq_len, i + window_size // 2 + 1)
-        
-        # Get local window
-        window = pitches[:, start:end]
-        
-        # Calculate local min and max
-        local_min = window.min(dim=1, keepdim=True)[0]
-        local_max = window.max(dim=1, keepdim=True)[0]
-        
-        # Avoid division by zero
-        range_size = (local_max - local_min).clamp(min=1e-6)
-        
-        # Normalize current pitch position
-        norm_pitches[:, i:i+1] = (pitches[:, i:i+1] - local_min) / range_size
-    
-    # Calculate quadratic difference between normalized positions
-    position_diff = torch.square(norm_pitches - norm_buttons)
-    
-    return position_diff.mean()
 
 def pitch_button_correlation_loss(pitches, e, window_size=15, tendency_distance=40):
     """

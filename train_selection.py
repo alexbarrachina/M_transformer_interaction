@@ -1,3 +1,26 @@
+#===================================================================================================
+# Monster Genie train_selection.py Python module
+# Training with GIANTsel dataset
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
+
 import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -6,24 +29,22 @@ mp.set_start_method('spawn', force=True)
 
 import time
 import tqdm
-#from torch.utils.tensorboard import SummaryWriter
 from params import *
 
-#!set USE_FLASH_ATTENTION=1
 os.environ['USE_FLASH_ATTENTION'] = '1'
 
 from random import randint, random
 import torch
 import torch.optim as optim
-
 from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_dataset, load_from_disk
-from TMIDIX import tegridy_tokens_to_dict, Tegridy_Any_Pickle_File_Reader
 
+from midiUtils import tokens_to_dict, Any_Pickle_File_Reader
 from model_loader import load_model
+from x_transformer import *
 
-from x_transformer_1_23_2 import *
+#==========================================================================
 
 class MusicSamplerDataset(Dataset):
     def __init__(self, data, seq_len, is_eval=False):
@@ -133,10 +154,10 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    model = load_model(model_name='no_dtime_good_reference', set_only=True)  
+    model = load_model(model_name='decoder_only_2_buttons', set_only=True)  
     model.to(device)
     #print(model)
-    load_hyperparameters(model_name='no_dtime_good_reference')
+    load_hyperparameters(model_name='decoder_only_2_buttons')
 
     #==========================================================================
 
@@ -169,9 +190,9 @@ def main():
     """ LOAD TRAINING DATA """
 
     # Loading dataset from a pickle in ./Training-Data
-    train_data = Tegridy_Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
+    train_data = Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
     data_train = torch.Tensor(train_data)
-    eval_data = Tegridy_Any_Pickle_File_Reader(DATASET_VAL_PATH)   
+    eval_data = Any_Pickle_File_Reader(DATASET_VAL_PATH)   
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
@@ -225,22 +246,20 @@ def main():
                     if(USE_LOGS):                
                         wandb.log({"train_loss": loss['loss_total'].item()}, step=nsteps)
                         wandb.log({"train_acc": acc.item()}, step=nsteps)
-                        if LOSS_NORM_POS_MULTIPLIER>0:
+                        if LOSS_NORM_POS_MULTIPLIER>0 and 'loss_norm_pos' in loss:
                             wandb.log({"train_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*loss['loss_norm_pos'].item()}, step=nsteps)
-                        if LOSS_DEVIATE_MULTIPLIER>0:
+                        if LOSS_DEVIATE_MULTIPLIER>0 and 'loss_deviate' in loss:
                             wandb.log({"train_loss_deviate": LOSS_DEVIATE_MULTIPLIER*loss['loss_deviate'].item()}, step=nsteps)
-                        if LOSS_CONTOUR_MULTIPLIER>0:
+                        if LOSS_CONTOUR_MULTIPLIER>0 and 'loss_contour' in loss:
                             wandb.log({"train_loss_contour": LOSS_CONTOUR_MULTIPLIER*LOSS_CONTOUR_MULTIPLIER*loss['loss_contour'].item()}, step=nsteps)
-                        if LOSS_MULTI_STEP_PERC>0:
+                        if LOSS_MULTI_STEP_PERC>0 and 'loss_multi_step' in loss:
                             wandb.log({"train_loss_multi_step": LOSS_CONTOUR_MULTIPLIER*LOSS_MULTI_STEP_PERC*loss['loss_multi_step'].item()}, step=nsteps)
-                        if LOSS_INTERVAL_PERC>0:
+                        if LOSS_INTERVAL_PERC>0 and 'loss_interval' in loss:
                             wandb.log({"train_loss_interval": LOSS_CONTOUR_MULTIPLIER*LOSS_INTERVAL_PERC*loss['loss_interval'].item()}, step=nsteps)
-                        if LOSS_SHAPE_PERC>0:
+                        if LOSS_SHAPE_PERC>0 and 'loss_shape' in loss:
                             wandb.log({"train_loss_shape": LOSS_CONTOUR_MULTIPLIER*LOSS_SHAPE_PERC*loss['loss_shape'].item()}, step=nsteps)
-                        if LOSS_BUTTON_HELD_MULTIPLIER>0: 
+                        if LOSS_BUTTON_HELD_MULTIPLIER>0 and 'loss_button_held' in loss: 
                             wandb.log({"train_loss_button_held": LOSS_BUTTON_HELD_MULTIPLIER*loss['loss_button_held'].item()}, step=nsteps)
-                        if LOSS_NORM_POS_MULTIPLIER>0:
-                            wandb.log({"train_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*loss['loss_norm_pos'].item()}, step=nsteps)
                         
                         nsteps += 1
 

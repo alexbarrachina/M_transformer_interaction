@@ -1,3 +1,26 @@
+#===================================================================================================
+# Monster Genie train_resume.py Python module
+# Resume training from checkpointt
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
+
 import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -17,13 +40,15 @@ os.environ['USE_FLASH_ATTENTION'] = '1'
 from random import randint, random
 import torch
 import torch.optim as optim
-
 from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_dataset, load_from_disk
-from TMIDIX import tegridy_tokens_to_dict, Tegridy_Any_Pickle_File_Reader
+
+from midiUtils import tokens_to_dict, Any_Pickle_File_Reader
 from model_loader import load_model
-from x_transformer_1_23_2 import *
+from x_transformer import *
+
+#==========================================================================
 
 class MusicSamplerDataset(Dataset):
     def __init__(self, data, seq_len, is_eval=False):
@@ -231,9 +256,9 @@ def main():
     """ LOAD TRAINING DATA """
 
     # Loading dataset from a pickle in ./Training-Data
-    train_data = Tegridy_Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
+    train_data = Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
     data_train = torch.Tensor(train_data)
-    eval_data = Tegridy_Any_Pickle_File_Reader(DATASET_VAL_PATH)   
+    eval_data = Any_Pickle_File_Reader(DATASET_VAL_PATH)   
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
