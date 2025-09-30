@@ -81,6 +81,13 @@ This automatically finds the latest checkpoint in `save_models/` and resumes tra
 sbatch train_genie.sh
 ```
 
+### Checkpoints
+
+To use the default `no_dtime_good_reference` model
+1. download the checkpoint file:
+https://drive.google.com/file/d/1CR90pEQwYupaEnG91ZI7Rd9iKVzbiXG8/view?usp=drive_link
+2. put the file in the ./save_models folder
+
 ## Inference 
 
 ### 1. Inference Continuators 
