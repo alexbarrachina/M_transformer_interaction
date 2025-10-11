@@ -34,10 +34,12 @@ from threading import Lock
 
 import torch
 
+from params import *
 from model_loader import load_model
+from models import get_model_hparams
 from visualizer import Visualizer
 from midiUtils import midi_to_tokens, midi_tokens_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
-from params import load_hyperparameters
+#import params
 
 TRACES = False
 
@@ -46,10 +48,12 @@ TRACES = False
 device = torch.device('mps') 
 
 ''' MODEL '''
-model = load_model(model_name='no_dtime_good_reference')
+model_name = 'no_dtime_good_reference'
+cfg = get_model_hparams(model_name)
+model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
 model.eval()
-load_hyperparameters(model_name='no_dtime_good_reference')
+#load_hyperparameters(model_name='no_dtime_good_reference')
 
 ''' PARAMS '''
 # Get sample seed MIDI path

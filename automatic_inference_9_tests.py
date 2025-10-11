@@ -1,9 +1,8 @@
-#==================================================================================================
-# Monster Genie inference_continuator.py Python module
-# Automatic inference, from a MIDI file as context,
-# guided with buttons extracted from the same MIDI file
-# By default, the context len is fixed to 120 notes. Once reached 120 notes, the first ones are discarded.
-#  
+#===================================================================================================
+# Monster Genie inference_continuator_all.py Python module
+# Automatic inferences, from 9 MIDI files as context,
+# Useful for comparing compressed button structures
+# 
 # Copyright 2025 Alex Barrachina
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,11 +21,10 @@
 import time
 import torch
 
+from params import *
 from model_loader import load_model
+from models import get_model_hparams
 from midiUtils import midi_to_tokens, midi_tokens_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
-from params import load_hyperparameters
-
-temperature = 1.0
 
 ''' DEVICE '''
 #device = torch.device('cpu')
@@ -34,37 +32,37 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model = load_model(model_name='no_dtime_good_reference')
+model_name = 'loss_norm_pos'
+cfg = get_model_hparams(model_name)
+model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
 model.eval()
-load_hyperparameters(model_name='no_dtime_good_reference')
+#load_hyperparameters(model_name='no_dtime_good_reference')
+
 #print(model)
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-sample_midi_path = './samples/clairTester_to_end_monophonic.midi'
-output_midi_name = './out/continuator_clairTester_to_end'
-output_butt_midi_name = './out/continuator_clairTester_to_end_buttons'
-output_e_midi_name = './out/continuator_clairTester_to_end_e'
-CTX_LEN = 218 # num notes in context. 
-#TOTAL_GEN_LEN = 500 # num notes to generate
+#sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
+sample_midi_path = './samples/test_mono'
+output_midi_name = './out/test_mono'
+output_butt_midi_name = './out/test_b'
+output_e_midi_name = './out/test_e'
+CTX_LEN = 512 # num notes in context. 
 
+for j in range(1, 9):  # generate 10 continuation files
 
-''' BUILD CTX '''
-# Load seed MIDI
-input_tokens = midi_to_tokens(sample_midi_path) # tokens, without vel
+  ''' BUILD CTX '''
+  # Load seed MIDI
+  input_tokens = midi_to_tokens(sample_midi_path+str(j)+'.midi') # tokens, without vel
 
-output_tokens = input_tokens.copy()
+  output_tokens = input_tokens.copy()
 
-dict_input_tokens, num_notes = midi_tokens_to_dict(input_tokens) # vel already filtered out
-dict_output_tokens, num_notes = midi_tokens_to_dict(output_tokens) # vel already filtered out
+  dict_input_tokens, num_notes = midi_tokens_to_dict(input_tokens) # vel already filtered out
+  dict_output_tokens, num_notes = midi_tokens_to_dict(output_tokens) # vel already filtered out
 
-TOTAL_GEN_LEN = num_notes
-print("num_notes",num_notes)
-
-''' GENERATE 10 files'''
-
-for j in range(0, 10):  # generate 10 continuation files
+  print("num_notes",num_notes)
+  
   # Build context tokens
   context = {
     'dtime': torch.tensor(dict_input_tokens['dtime'], dtype=torch.long).unsqueeze(0),
@@ -78,9 +76,9 @@ for j in range(0, 10):  # generate 10 continuation files
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     e = e.squeeze(0)
 
-  timeStart = time.perf_counter()
+  #timeStart = time.perf_counter()
   # generate pitches
-  for i in range(0, TOTAL_GEN_LEN-1-CTX_LEN):
+  for i in range(0, num_notes-1-CTX_LEN):
     
     context = {
       'dtime': torch.tensor(dict_input_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
@@ -92,20 +90,17 @@ for j in range(0, 10):  # generate 10 continuation files
     context = to_device(context, device)
   
     with torch.inference_mode():
-        new_pitch_token = model.gen_pitch_token(context, temperature=temperature)
-    # update output tokens generated pitch, original dtime, original dur
-    dict_output_tokens['pitch'][i] = new_pitch_token
-    dict_output_tokens['dtime'][i] = dict_input_tokens['dtime'][i+CTX_LEN+1]
-    dict_output_tokens['dur'][i] = dict_input_tokens['dur'][i+CTX_LEN+1]
+        new_pitch_token = model.gen_pitch_token(context)
+    dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
     print(new_pitch_token)
 
   #timeEnd = time.perf_counter()
-  #print("t=", (timeEnd-timeStart) * 1000 / i, "ms") # in miliseconds, promig
+  #print("t=", (timeEnd-timeStart) * 1000 / (TOTAL_GEN_LEN-CTX_LEN), "ms") # in miliseconds, mean time per note
 
   context = {
-      'dtime': dict_output_tokens['dtime'][:TOTAL_GEN_LEN-CTX_LEN],
-      'pitch': dict_output_tokens['pitch'][:TOTAL_GEN_LEN-CTX_LEN],
-      'dur': dict_output_tokens['dur'][:TOTAL_GEN_LEN-CTX_LEN],
+      'dtime': dict_output_tokens['dtime'][:num_notes],
+      'pitch': dict_output_tokens['pitch'][:num_notes],
+      'dur': dict_output_tokens['dur'][:num_notes],
     }
 
   # generate a midi file from generated pitches
@@ -114,19 +109,16 @@ for j in range(0, 10):  # generate 10 continuation files
                                                             timings_multiplier=2
                                                             )
 
-  
   # Convert buttons to values similar to pitch, just to represent the melodic contour
   b = torch.add(b, 60)
 
-  context['pitch'] = b[:TOTAL_GEN_LEN-CTX_LEN].tolist()
+  context['pitch'] = b[:num_notes].tolist()
   song_d = dict_to_song(context)
 
   detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_butt_midi_name+str(j),
                                                             timings_multiplier=2
                                                             )
-  '''
-
-  re_int = e[:TOTAL_GEN_LEN-CTX_LEN]
+  re_int = e[:num_notes]
   re_int = torch.add(re_int, 1) # shift to [0, 2]
   re_int = torch.mul(re_int, 0.5) #  to [0, 1]
   re_int = torch.mul(re_int, 12) #  to [0, 12]
@@ -137,4 +129,3 @@ for j in range(0, 10):  # generate 10 continuation files
   detailed_stats = ms_SONG_to_MIDI_Converter(song_d,output_file_name = output_e_midi_name+str(j),  
                                                               timings_multiplier=2
                                                             )
-  '''

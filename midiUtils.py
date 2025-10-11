@@ -46,6 +46,10 @@ import statistics
 import math
 import matplotlib.pyplot as plt
 
+from params import OFFSET_DUR, OFFSET_PITCH, OFFSET_VEL
+
+import torch
+
 _previous_warning = ''  # 5.4
 _previous_times = 0     # 5.4
 _no_warning = False
@@ -2003,18 +2007,23 @@ def solo_piano_escore_notes(escore_notes,
                             keep_drums=False,
                             ):
 
+  ''' Solo piano notes are the ones in the first channel (channel 0). 
+  Filtered out drums (channel 10).
+  Force notes to be in the first channel (channel 0).
+  Force patches to be 0.
+  '''
   cscore = chordify_score([1000, escore_notes])
 
   sp_escore_notes = []
 
-  for c in cscore:
+  for c in cscore: # chords in the score
 
     seen = []
     chord = []
 
-    for cc in c:
+    for cc in c: # cc=notes in the chord
 
-      if cc[channels_index] != 9:
+      if cc[channels_index] != 9: # channel 10 drums are excluded
         if cc[pitches_index] not in seen:
             
             cc[channels_index] = 0
@@ -2065,7 +2074,6 @@ SEMITONES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 ###################################################################################
 
-from params import OFFSET_DUR, OFFSET_PITCH
 
 def tokens_to_dict(data):
         
@@ -2076,18 +2084,18 @@ def tokens_to_dict(data):
 
             i = 0
             while i < len(score):
-                if score[i] < 384:  # Process valid tokens (dtime, pitch, dur)
+                if score[i] < OFFSET_VEL:  # Process valid tokens (dtime, pitch, dur)
                     # If we're missing notes in a triplet (chord case), add dtime=0
-                    if score[i] > 127 and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
+                    if score[i] > OFFSET_DUR and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
                         filtered_score.append(0)  # Insert dtime=0 for chord notes
                     
                     # range checker. We don't need it for now.
                     if len(filtered_score) % 3 == 0:
-                        assert(score[i] < 128), "not a valid dtime"
+                        assert(score[i] < OFFSET_DUR), "not a valid dtime"
                     if len(filtered_score) % 3 == 1:
-                        assert(127 < score[i] < 256), "not a valid dur"
+                        assert(127 < score[i] < OFFSET_PITCH), "not a valid dur"
                     if len(filtered_score) % 3 == 2:
-                        assert (255 < score[i] < 384), "not a valid pitch"
+                        assert (255 < score[i] < OFFSET_VEL), "not a valid pitch"
 
                     # revert offsets to homogenize the data for the purpose of aggregating embbedings
                     offset = 0
@@ -2118,18 +2126,18 @@ def midi_tokens_to_dict(score):
 
             i = 0
             while i < len(score):
-                if score[i] < 384:  # Process valid tokens (dtime, pitch, dur)
+                if score[i] < OFFSET_VEL:  # Process valid tokens (dtime, pitch, dur)
                     # If we're missing notes in a triplet (chord case), add dtime=0
-                    if score[i] > 127 and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
+                    if score[i] > OFFSET_DUR and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
                         filtered_score.append(0)  # Insert dtime=0 for chord notes
                     
                     # range checker. We don't need it for now.
                     if len(filtered_score) % 3 == 0:
-                        assert(score[i] < 128), "not a valid dtime"
+                        assert(score[i] < OFFSET_DUR), "not a valid dtime"
                     if len(filtered_score) % 3 == 1:
-                        assert(127 < score[i] < 256), "not a valid dur"
+                        assert(127 < score[i] < OFFSET_PITCH), "not a valid dur"
                     if len(filtered_score) % 3 == 2:
-                        assert (255 < score[i] < 384), "not a valid pitch"
+                        assert (255 < score[i] < OFFSET_VEL), "not a valid pitch"
 
                     # revert offsets to homogenize the data for the purpose of aggregating embbedings
                     offset = 0
@@ -2153,21 +2161,32 @@ def midi_tokens_to_dict(score):
 
             return feature_data, num_notes
 
-def dict_to_song(dict_data, add_vel=True):
+def dict_to_song(dict_data, force_vel=True, force_chan=True):
     song_d = []
     time = 0
-    if add_vel:
+    if force_vel:
         vel = 90
-        for i in range(len(dict_data['dtime'])):
-            time += dict_data['dtime'][i] * 32
-            song_d.append(['note', time, dict_data['dur'][i]*32, 0, dict_data['pitch'][i], vel, 0])
+        if force_chan:
+            chan = 0
+            for i in range(len(dict_data['dtime'])):
+                time += dict_data['dtime'][i] * 32
+                song_d.append(['note', time, dict_data['dur'][i]*32, chan, dict_data['pitch'][i], vel, 0])
+        else:
+            for i in range(len(dict_data['dtime'])):
+                time += dict_data['dtime'][i] * 32
+                song_d.append(['note', time, dict_data['dur'][i]*32, dict_data['chan'][i], dict_data['pitch'][i], vel, 0])
     else:
-        for i in range(len(dict_data['dtime'])):
-            time += dict_data['dtime'][i] * 32
-            song_d.append(['note', time, dict_data['dur'][i]*32, 0, dict_data['pitch'][i], dict_data['vel'][i], 0])
+        if force_chan:
+            chan = 0
+            for i in range(len(dict_data['dtime'])):
+                time += dict_data['dtime'][i] * 32
+                song_d.append(['note', time, dict_data['dur'][i]*32, chan, dict_data['pitch'][i], dict_data['vel'][i], 0])
+        else:
+            for i in range(len(dict_data['dtime'])):
+                time += dict_data['dtime'][i] * 32
+                song_d.append(['note', time, dict_data['dur'][i]*32, dict_data['chan'][i], dict_data['pitch'][i], dict_data['vel'][i], 0])
     return song_d
 
-import torch
 # Helper function to safely move tensors to MPS
 def to_device(tensor_or_dict, device):
     if isinstance(tensor_or_dict, dict):
@@ -2183,38 +2202,54 @@ def to_device(tensor_or_dict, device):
 
 def midi_to_tokens(input_midi,
                    encode_velocity=False,
+                   encode_channel=False,
                    verbose=False
                    ):
+    '''
+    Encode MIDI to tokens
+    input_midi: MIDI file path
+    encode_velocity: bool, whether to encode velocity
+    encode_channel: bool, whether to encode channel
+    verbose: bool, whether to print verbose output
+    Eliminate redundant dtimes in chords.
+    output: dtime, dur, pitch, (vel), (channel)
+    '''
 
     if verbose:
         print('=' * 70)
         print('Encoding MIDI...')
 
-    raw_score = midi2single_track_ms_score(input_midi)
+    raw_score = midi2single_track_ms_score(input_midi) # time, dur, channel, pitch, vel
     
     escore_notes = advanced_score_processor(raw_score, return_enhanced_score_notes=True)[0]
-    escore_notes = augment_enhanced_score_notes(escore_notes, timings_divider=32)
+    escore_notes = augment_enhanced_score_notes(escore_notes, timings_divider=32) # time re-ordered
     
-    sp_escore_notes = solo_piano_escore_notes(escore_notes, keep_drums=False)
-    zscore = recalculate_score_timings(sp_escore_notes)
+    # sp_escore_notes = solo_piano_escore_notes(escore_notes, keep_drums=False)
+    zscore = recalculate_score_timings(escore_notes)
     
     cscore = chordify_score([1000, zscore])
     
     score = []
     
-    pc = cscore[0]
+    pc = cscore[0] # previous chord, first chord, time=0
     
     notes_counter = 0
     
     for i, c in enumerate(cscore): # c[0][1] absolute time in miliseconds /32 -> dtime 0-127
         score.append(max(0, min(127, c[0][1]-pc[0][1]))) # calculate dtime: the time difference between the current chord and the previous note
     
-        for n in c: # tokens in note event
-            if encode_velocity:
-                score.extend([max(1, min(127, n[2]))+128, max(1, min(127, n[4]))+256, max(1, min(127, n[5]))+384])
+        for n in c: # notes in chord event
+            if encode_velocity: # add dur+pitch+vel
+                if encode_channel: # add dur+pitch+vel+channel
+                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH, max(1, min(127, n[5]))+OFFSET_VEL, n[3]])
+                else: # add dur+pitch+vel
+                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH, max(1, min(127, n[5]))+OFFSET_VEL])
 
-            else:
-                score.extend([max(1, min(127, n[2]))+128, max(1, min(127, n[4]))+256])
+            else: # add dur+pitch
+                if encode_channel: # add dur+pitch+channel
+                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH, n[3]])
+                else: # add dur+pitch
+                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH])
                 
             notes_counter += 1
     
@@ -2241,9 +2276,9 @@ def tokens_to_midi(tokens,
                    custom_channel=-1,
                    custom_velocity=-1,
                    custom_patch=-1,
-                   output_signature = 'Monster Piano Transformer',
-                   track_name='Project Los Angeles',
-                   output_midi_name='Monster-Piano-Transformer-Composition',
+                   output_signature = 'Monster genie',
+                   track_name='monster genie',
+                   output_midi_name='Monster-genie',
                    return_ms_score=False,
                    verbose=False
                    ):
@@ -2252,7 +2287,7 @@ def tokens_to_midi(tokens,
         print('=' * 70)
         print('Decoding tokens...')
     
-    if [t for t in tokens if 384 < t < 512]:
+    if [t for t in tokens if OFFSET_VEL < t < OFFSET_END]: # vel in tokens 384-511
         model_with_velocity = True
         
     else:
@@ -2279,14 +2314,14 @@ def tokens_to_midi(tokens,
 
     for m in song:
 
-        if 0 <= m < 128:
+        if 0 <= m < OFFSET_DUR: # dtime 0-127
             time += m * 32
 
-        elif 128 < m < 256:
-            dur = (m-128) * 32
+        elif OFFSET_DUR < m < OFFSET_PITCH: # dur 128-255
+            dur = (m-OFFSET_DUR) * 32
 
-        elif 256 < m < 384:
-            pitch = (m-256)
+        elif OFFSET_PITCH < m < OFFSET_VEL: # pitch 256-383
+            pitch = (m-OFFSET_PITCH)
             
             if not model_with_velocity:
                 
@@ -2299,8 +2334,8 @@ def tokens_to_midi(tokens,
                 
                 song_f.append(['note', time, dur, channel, pitch, vel, patch])
 
-        elif 384 < m < 512:
-            vel = (m-384)
+        elif OFFSET_VEL < m < OFFSET_END:
+            vel = (m-OFFSET_VEL)
 
             if model_with_velocity:
                 
@@ -2331,3 +2366,304 @@ def tokens_to_midi(tokens,
         return detailed_stats
 
 #===================================================================================================
+
+
+def midi_to_dict(input_midi,
+                   encode_velocity=False,
+                   encode_channel=False,
+                   verbose=False
+                   ):
+    '''
+    Encode MIDI to dict
+    input_midi: MIDI file path
+    output: dictionary with keys: dtime, dur, pitch, vel, chan
+    '''
+
+    if verbose:
+        print('=' * 70)
+        print('Encoding MIDI to dict...')
+
+    raw_score = midi2single_track_ms_score(input_midi) # time, dur, channel, pitch, vel
+    
+    escore_notes = advanced_score_processor(raw_score, return_enhanced_score_notes=True)[0]
+    escore_notes = augment_enhanced_score_notes(escore_notes, timings_divider=32) # time re-ordered
+    
+    # sp_escore_notes = solo_piano_escore_notes(escore_notes, keep_drums=False)
+    cscore = recalculate_score_timings(escore_notes)
+    
+    #cscore = chordify_score([1000, zscore])
+    
+    # notes to tokens sequence
+    score = [] # sequence of tokens: dtime, dur, pitch, (vel), (channel)
+    ptime = cscore[0][1] if cscore else 0 # time of the first note
+    notes_counter = 0
+    
+    for i, n in enumerate(cscore): # n[1] absolute time in miliseconds /32 -> dtime 0-127
+        score.append(max(0, min(127, n[1]-ptime))) # calculate dtime: the time difference between the current chord and the previous note
+        score.append(max(1, min(127, n[2]))) # append dur
+        score.append(max(1, min(127, n[4]))) # append pitch
+        score.append(max(1, min(127, n[5]))) # append vel
+        score.append(n[3]) # append channel                           
+        notes_counter += 1
+        ptime = n[1]
+        
+    if verbose:
+        print('Done!')
+        print('=' * 70)
+        
+        print('Source MIDI composition has', len(cscore), 'notes')
+        print('-' * 70)
+        print('Encoded sequence has', notes_counter, 'pitches')
+        print('-' * 70)
+        print('Final encoded sequence has', len(score), 'tokens')
+        print('=' * 70)
+
+
+    feature_data = {
+      'dtime': score[0::5],  # Every 5th  token starting at index 0. observed min = 0, max = 70
+      'dur': score[1::5],  # Every 5th token starting at index 1. observed min = 1, max = 74
+      'pitch': score[2::5],     # Every 5th token starting at index 2. observed min = 30, max = 88
+      'vel': score[3::5],     # Every 5th token starting at index 3. 
+      'chan': score[4::5]     # Every 5th token starting at index 4. 
+    }
+
+    return feature_data, notes_counter
+
+
+
+def re_order_chord_notes(features):
+    '''
+    Re-order chord notes from lower to higher pitch
+    Chord notes are identified by dtime=0 (same time as previous note)
+    features: dictionary with keys: dtime, dur, pitch, vel, chan (all tensors)
+    output: dictionary with keys: dtime, dur, pitch, vel, chan (all tensors)
+    '''
+    
+    # Work directly with tensors
+    dtime_tensor = features['dtime']
+    dur_tensor = features['dur']
+    pitch_tensor = features['pitch']
+    vel_tensor = features['vel']
+    chan_tensor = features['chan']
+    
+    # Find chord boundaries: notes with dtime > 0 start new chords
+    # Notes with dtime = 0 belong to the same chord as the previous note
+    chord_starts = torch.cat([torch.tensor([0]), torch.where(dtime_tensor > 0)[0]])
+    chord_ends = torch.cat([chord_starts[1:], torch.tensor([len(dtime_tensor)])])
+    
+    # List to store reordered indices
+    reordered_indices = []
+    
+    # Process each chord
+    for start, end in zip(chord_starts, chord_ends):
+        chord_indices = torch.arange(start, end)
+        
+        if len(chord_indices) > 1:
+            # Multiple notes in chord - sort by pitch
+            chord_pitches = pitch_tensor[chord_indices]
+            sorted_pitch_indices = torch.argsort(chord_pitches)
+            sorted_chord_indices = chord_indices[sorted_pitch_indices]
+        else:
+            # Single note
+            sorted_chord_indices = chord_indices
+        
+        reordered_indices.extend(sorted_chord_indices.tolist())
+    
+    # Convert to tensor for indexing
+    reordered_indices = torch.tensor(reordered_indices, dtype=torch.long)
+    
+    # Reorder all features using the sorted indices
+    new_features = {
+        'dtime': dtime_tensor,
+        'dur': dur_tensor[reordered_indices],
+        'pitch': pitch_tensor[reordered_indices],
+        'vel': vel_tensor[reordered_indices],
+        'chan': chan_tensor[reordered_indices]
+    }
+    
+    return new_features
+
+def monophonic_melody_mask(features, channel=None, dtime_threshold=0):
+    '''
+    Create boolean masks for monophonic melody selection and chord identification
+    Chord notes are identified by dtime=0 (same time as previous note) across ALL channels
+    notes of the same chord are reduced to 1:
+    -  will pick the closest to the previous note and discard the rest. if the previous note is not in a chord
+    - If the previous note is in a chord, will pick the note with same order in the chord. 
+      (if the 3rd note of a chord is selected, consecutive chords will select the 3rd note of each chord)
+    features: dictionary with keys: dtime, dur, pitch, vel, chan (all tensors)
+    channel: int or None. If not None, only notes from this channel will be considered for selection
+    dtime_threshold: int, notes with dtime <= threshold are considered part of the same chord
+    output: tuple of two boolean tensor masks:
+        - melody_mask: True for selected monophonic melody notes, False otherwise
+        - chord_mask: True for notes that are part of multi-note chords (>1 note), False for isolated notes
+                     (only considers notes from the selected channel)
+    '''
+    
+    # Work directly with tensors
+    dtime_tensor = features['dtime']
+    pitch_tensor = features['pitch']
+    chan_tensor = features['chan']
+    
+    # Initialize masks - all False initially
+    melody_mask = torch.zeros(len(dtime_tensor), dtype=torch.bool)
+    chord_mask = torch.zeros(len(dtime_tensor), dtype=torch.bool)
+    
+    # Apply channel filter if specified
+    if channel is not None:
+        channel_mask = (chan_tensor == channel)
+        # If no notes in the specified channel, return all False masks
+        if not channel_mask.any():
+            return melody_mask, chord_mask
+    else:
+        channel_mask = torch.ones(len(dtime_tensor), dtype=torch.bool)
+    
+    # Find chord boundaries across ALL channels first
+    # This gives us the true chord structure regardless of channel filtering
+    if len(dtime_tensor) == 0:
+        return melody_mask, chord_mask
+    
+    # More sophisticated chord boundary detection
+    chord_starts = [0]  # First note always starts a chord
+    cumulative_time = 0
+    
+    for i in range(1, len(dtime_tensor)):
+        current_dtime = dtime_tensor[i].item()
+        
+        if current_dtime == 0:
+            # dtime=0 means part of current chord (unless it's the first note or all other notes are different channels)
+            continue
+        elif current_dtime > dtime_threshold:
+            # Large dtime definitely starts a new chord
+            chord_starts.append(i)
+            cumulative_time = 0
+        else:
+            # Small but non-zero dtime: check cumulative time from chord start
+            cumulative_time += current_dtime
+            if cumulative_time > dtime_threshold:
+                # Cumulative time exceeds threshold, start new chord
+                chord_starts.append(i)
+                cumulative_time = 0
+            # else: still part of current chord
+    
+    chord_starts = torch.tensor(chord_starts, dtype=torch.long)
+    chord_ends = torch.cat([chord_starts[1:], torch.tensor([len(dtime_tensor)])])
+    
+    # Lists to store selected indices for monophonic melody
+    selected_original_indices = []
+    selected_pitches = []  # Track pitches for tendency calculation
+    
+    previous_pitch = None
+    previous_chord_position = None
+    previous_chord_num_notes = None
+    
+    # Process each chord (defined across all channels)
+    for start, end in zip(chord_starts, chord_ends):
+        # Get all notes in this chord (across all channels)
+        chord_indices = torch.arange(start, end)
+        
+        # Filter to only notes in the target channel within this chord
+        chord_channel_mask = channel_mask[chord_indices]
+        target_channel_indices_in_chord = chord_indices[chord_channel_mask]
+        
+        if len(target_channel_indices_in_chord) == 0:
+            # No notes from target channel in this chord, skip
+            continue
+        elif len(target_channel_indices_in_chord) == 1:
+            # Single note from target channel - use it
+            selected_original_idx = target_channel_indices_in_chord[0]
+            selected_original_indices.append(selected_original_idx.item())
+            current_pitch = pitch_tensor[selected_original_idx].item()
+            selected_pitches.append(current_pitch)
+            previous_pitch = current_pitch
+            previous_chord_position = 0  # Single note is at position 0
+            chord_size_in_target_channel = 1
+            # This is an isolated note (not part of multi-note chord), chord_mask stays False
+        else:
+            # Multiple notes from target channel in this chord - sort by pitch to determine positions
+            chord_pitches = pitch_tensor[target_channel_indices_in_chord]
+            
+            # Sort chord notes by pitch to establish consistent ordering
+            sorted_pitch_indices = torch.argsort(chord_pitches)
+            sorted_chord_pitches = chord_pitches[sorted_pitch_indices]
+            sorted_chord_original_indices = target_channel_indices_in_chord[sorted_pitch_indices]
+            
+            if previous_chord_num_notes == 1:  # previous note was a single note chord
+                # Calculate melodic tendency from last 4 selected notes (same as for chord case)
+                if len(selected_pitches) >= 4:
+                    # Calculate mean pitch difference over last 4 notes
+                    recent_pitches = selected_pitches[-4:]
+                    pitch_diffs = []
+                    for i in range(1, len(recent_pitches)):
+                        pitch_diffs.append(recent_pitches[i] - recent_pitches[i-1])
+                    
+                    # Calculate mean tendency (average pitch change per step)
+                    mean_tendency = sum(pitch_diffs) / len(pitch_diffs)
+                    
+                    # Predict expected pitch based on tendency
+                    expected_pitch = previous_pitch + mean_tendency
+                    
+                    # Find closest pitch to expected pitch (considering tendency)
+                    pitch_distances = torch.abs(sorted_chord_pitches - expected_pitch)
+                    closest_idx = torch.argmin(pitch_distances)
+                    selected_original_idx = sorted_chord_original_indices[closest_idx]
+                    previous_chord_position = closest_idx.item()
+                else:
+                    # Not enough history, find closest pitch to previous note
+                    pitch_distances = torch.abs(sorted_chord_pitches - previous_pitch)
+                    closest_idx = torch.argmin(pitch_distances)
+                    selected_original_idx = sorted_chord_original_indices[closest_idx]
+                    previous_chord_position = closest_idx.item()
+            elif previous_chord_num_notes is not None and previous_chord_num_notes > 1:  # previous note was a chord
+                # Calculate melodic tendency from last 4 selected notes
+                if len(selected_pitches) >= 4:
+                    # Calculate mean pitch difference over last 4 notes
+                    recent_pitches = selected_pitches[-4:]
+                    pitch_diffs = []
+                    for i in range(1, len(recent_pitches)):
+                        pitch_diffs.append(recent_pitches[i] - recent_pitches[i-1])
+                    
+                    # Calculate mean tendency (average pitch change per step)
+                    mean_tendency = sum(pitch_diffs) / len(pitch_diffs)
+                    
+                    # Predict expected pitch based on tendency
+                    expected_pitch = previous_pitch + mean_tendency
+                    
+                    # Find closest pitch to expected pitch (considering tendency)
+                    pitch_distances = torch.abs(sorted_chord_pitches - expected_pitch)
+                    closest_idx = torch.argmin(pitch_distances)
+                    selected_original_idx = sorted_chord_original_indices[closest_idx]
+                    previous_chord_position = closest_idx.item()
+                else:
+                    # Not enough history, use the same position as previous chord
+                    if previous_chord_position >= len(sorted_chord_pitches):
+                        # If previous position doesn't exist, use the highest note
+                        selected_original_idx = sorted_chord_original_indices[-1]
+                        previous_chord_position = len(sorted_chord_pitches) - 1
+                    else:
+                        selected_original_idx = sorted_chord_original_indices[previous_chord_position]
+            else:      
+                # No previous note, use the first note (lowest pitch)
+                selected_original_idx = sorted_chord_original_indices[0]
+                previous_chord_position = 0
+            
+            selected_original_indices.append(selected_original_idx.item())
+            # Get the pitch of the selected note for next iteration
+            selected_pos_in_sorted = previous_chord_position
+            current_pitch = sorted_chord_pitches[selected_pos_in_sorted].item()
+            selected_pitches.append(current_pitch)
+            previous_pitch = current_pitch
+            chord_size_in_target_channel = len(target_channel_indices_in_chord)
+            
+            # Mark all notes in this multi-note chord in the chord_mask
+            for idx in target_channel_indices_in_chord:
+                chord_mask[idx.item()] = True
+        
+        previous_chord_num_notes = chord_size_in_target_channel
+    
+    # Set melody_mask to True for selected positions (using original indices)
+    for original_idx in selected_original_indices:
+        melody_mask[original_idx] = True
+    
+    return melody_mask, chord_mask
+

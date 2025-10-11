@@ -26,12 +26,14 @@ os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
 
 import torch
 
-from models import *
+#from models import *
+from models import get_model_hparams
 from x_transformer import *
 
 #===================================================================================================
 
 def load_model(model_name='default',
+               cfg=None,
                compile_mode='max-autotune',
                set_only=False,
                ):
@@ -54,153 +56,116 @@ def load_model(model_name='default',
     mpt_model = mpt.load_model('models')
     """
     
-    if model_name not in MODELS_PARAMETERS:
-        print('=' * 70)
-        print('Available models:')
+    if cfg is None:
+        cfg = get_model_hparams(model_name)
         
-        for n, d in MODELS_INFO.items():
-            print('=' * 70)
-            print('MODEL NAME:', n)
-            print('-' * 70)
-            print('MODEL INFO:', d)
-
+    if cfg is None:
+        print('=' * 70)
+        print('Available models in models.py')
         print('=' * 70)
         return []
 
-    if model_name in MODELS_TYPES:
-       model_type = MODELS_TYPES[model_name]
-    else:
-        model_type = 'autoencoder'
-
-    print(model_type)
+    print(cfg['model_type'])
     
-    if model_type == 'autoencoder':
+    if cfg['model_type'] == 'autoencoder':
         mpt_model = AutoregressiveAutoencoder(
-        ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
-        #pad_value=MODELS_PARAMETERS[model_name]['pad_idx'],
-        decoder = Decoder(
-        num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-        max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-        dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-        depth = MODELS_PARAMETERS[model_name]['num_layers'],
-        heads = MODELS_PARAMETERS[model_name]['heads'],
-        rotary_pos_emb = True,
-        attn_flash = True
+           cfg = cfg,
+           decoder = Decoder(
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
         ),
         encoder = Encoder(
-        num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-        max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-        dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-        depth = MODELS_PARAMETERS[model_name]['num_layers'],
-        heads = MODELS_PARAMETERS[model_name]['heads'],
-        rotary_pos_emb = True,
-        attn_flash = True
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
         )
         )
-    elif model_type == 'autoencoder_no_dtime':
+    elif cfg['model_type'] == 'autoencoder_no_dtime':
         mpt_model = AutoregressiveAutoencoder_no_dtime(
-        ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
-        #pad_value=MODELS_PARAMETERS[model_name]['pad_idx'],
+           cfg = cfg,
         decoder = Decoder_no_dtime(
-        num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-        max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-        dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-        depth = MODELS_PARAMETERS[model_name]['num_layers'],
-        heads = MODELS_PARAMETERS[model_name]['heads'],
-        rotary_pos_emb = True,
-        attn_flash = True
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
         ),
         encoder = Encoder_no_dtime(
-        num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-        max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-        dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-        depth = MODELS_PARAMETERS[model_name]['num_layers'],
-        heads = MODELS_PARAMETERS[model_name]['heads'],
-        rotary_pos_emb = True,
-        attn_flash = True
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
         )
         )  
-    elif model_type == 'autoencoder_w_encoder_antic':
+    elif cfg['model_type'] == 'autoencoder_w_encoder_antic':
         mpt_model = AutoregressiveAutoencoder(
-        ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
-        #pad_value=MODELS_PARAMETERS[model_name]['pad_idx'],
-        decoder = Decoder(
-        num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-        max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-        dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-        depth = MODELS_PARAMETERS[model_name]['num_layers'],
-        heads = MODELS_PARAMETERS[model_name]['heads'],
-        rotary_pos_emb = True,
-        attn_flash = True
+           cfg = cfg,
+           decoder = Decoder(
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
         ),
         encoder = Encoder_antic(
-        num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-        max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-        dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-        depth = MODELS_PARAMETERS[model_name]['num_layers'],
-        heads = MODELS_PARAMETERS[model_name]['heads'],
-        rotary_pos_emb = True,
-        attn_flash = True
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
         )
         )  
-    elif model_type == 'decoder_only':
+    elif cfg['model_type'] == 'decoder_only':
         mpt_model = DecoderOnly(
-            ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
+            cfg = cfg,
             # Use Decoder instead of DecoderSimple to match the saved model architecture
             decoder = DecoderSimple(
-            num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-            max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-            dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-            depth = MODELS_PARAMETERS[model_name]['num_layers'],
-            heads = MODELS_PARAMETERS[model_name]['heads'],
-            rotary_pos_emb = True,
-            attn_flash = True
+               max_seq_len = cfg['seq_len'],
+               dim = cfg['emb_dim'],
+               depth = cfg['num_layers'],
+               heads = cfg['heads'],
+               rotary_pos_emb = True,
+               attn_flash = True
             )
         )
-    elif model_type == 'encoder_only':
+    elif cfg['model_type'] == 'encoder_only':
         mpt_model = EncoderOnly(
-            ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
-            #pad_value=MODELS_PARAMETERS[model_name]['pad_idx'],
+            cfg = cfg,
             encoder = Encoder(
-            num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-            max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-            dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-            depth = MODELS_PARAMETERS[model_name]['num_layers'],
-            heads = MODELS_PARAMETERS[model_name]['heads'],
-            rotary_pos_emb = True,
-            attn_flash = True
+               max_seq_len = cfg['seq_len'],
+               dim = cfg['emb_dim'],
+               depth = cfg['num_layers'],
+               heads = cfg['heads'],
+               rotary_pos_emb = True,
+               attn_flash = True
             )
         )
-    elif model_type == 'encoder_only_antic':
+    elif cfg['model_type'] == 'encoder_only_antic':
         mpt_model = EncoderOnly(
-            ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
-            #pad_value=MODELS_PARAMETERS[model_name]['pad_idx'],
+            cfg = cfg,
             encoder = Encoder_antic(
-            num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-            max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-            dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-            depth = MODELS_PARAMETERS[model_name]['num_layers'],
-            heads = MODELS_PARAMETERS[model_name]['heads'],
-            rotary_pos_emb = True,
-            attn_flash = True
-            )
-        )
-    elif model_type == 'decoder_only_2_buttons':
-        mpt_model = Decoder_only_2_buttons(
-            ignore_index = MODELS_PARAMETERS[model_name]['pad_idx'], 
-            # Use Decoder instead of DecoderSimple to match the saved model architecture
-            decoder = Decoder_no_dtime(
-            num_tokens = MODELS_PARAMETERS[model_name]['pad_idx']+1,
-            max_seq_len = MODELS_PARAMETERS[model_name]['seq_len'],
-            dim = MODELS_PARAMETERS[model_name]['emb_dim'],
-            depth = MODELS_PARAMETERS[model_name]['num_layers'],
-            heads = MODELS_PARAMETERS[model_name]['heads'],
-            rotary_pos_emb = True,
-            attn_flash = True
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
             )
         )
     if set_only == False:
-        model_path = MODELS_FILE_NAMES[model_name]
+        model_path = cfg['ckpt_file_name']
 
         if not torch.cuda.is_available():
             map_location = torch.device('cpu')

@@ -26,14 +26,12 @@ import os
 from tqdm import tqdm
 
 from midiUtils import midi2ms_score, Any_Pickle_File_Writer #, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
+from params import *
 
 # Offsets create non-overlapping ranges for each token type
 # DTIME 0-127
-DUR_OFF = 128
 # DUR 128-255
-PITCH_OFF = 256
 # PITCH 256-383
-VEL_OFF = 384
 # VEL 384-511
 
 # Process MIDIs
@@ -115,7 +113,7 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
 
             # TODO comprovar l'ordre correcte
           #train_data1.extend([0+PITCH_OFF, 126+0, 126+DUR_OFF, 0+VEL_OFF]) # Intro/Zero seq
-          train_data1.extend([126+0, 126+DUR_OFF, 0+PITCH_OFF, 0+VEL_OFF]) # Intro/Zero seq
+          train_data1.extend([126+0, 126+OFFSET_DUR, 0+OFFSET_PITCH, 0+OFFSET_VEL]) # Intro/Zero seq
 
           pe = events_matrix[0]
           for e in events_matrix:
@@ -126,7 +124,7 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
               vel = max(1, min(126, e[5]))
 
               #train_data1.extend([ptc+PITCH_OFF, time+0, dur+DUR_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
-              train_data1.extend([time+0, dur+DUR_OFF, ptc+PITCH_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
+              train_data1.extend([time+0, dur+OFFSET_DUR, ptc+OFFSET_PITCH, vel+OFFSET_VEL]) # re-order to priorize pitch output first
 
               pe = e
 

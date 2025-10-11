@@ -29,7 +29,7 @@ mp.set_start_method('spawn', force=True)
 
 import time
 import tqdm
-from params import *
+#from params import *
 
 os.environ['USE_FLASH_ATTENTION'] = '1'
 
@@ -42,17 +42,20 @@ from datasets import load_dataset, load_from_disk
 
 from midiUtils import tokens_to_dict, Any_Pickle_File_Reader
 from model_loader import load_model
+from models import get_model_hparams
+from params import *
 from x_transformer import *
 
 #==========================================================================
 
 class MusicSamplerDataset(Dataset):
-    def __init__(self, data, seq_len, is_eval=False):
+    def __init__(self, data, seq_len, is_eval=False, cfg=None):
         super().__init__()
 
         self.data = data
         self.seq_len = seq_len
         self.seq_tot_tokens = self.seq_len * 4 + 4 # 4 tokens per note + 4 for the current note
+        self.cfg = cfg if cfg is not None else {}
 
 
     def __len__(self):
@@ -76,13 +79,13 @@ class MusicSamplerDataset(Dataset):
 
         # Data augmentation
         # Time stretching
-        stretch_factor = random() * DATA_AUGMENT_TIME_STRETCH_MAX * 2
-        stretch_factor += 1 - DATA_AUGMENT_TIME_STRETCH_MAX
+        stretch_factor = random() * self.cfg['data_augment_time_stretch_max'] * 2
+        stretch_factor += 1 - self.cfg['data_augment_time_stretch_max']
         dtimes = (dtimes.float() * stretch_factor).long()
         dtimes = torch.clamp(dtimes, min=0, max=RANGE_DTIME_SHIFT)
   
-        stretch_factor = random() * DATA_AUGMENT_TIME_STRETCH_MAX * 2
-        stretch_factor += 1 - DATA_AUGMENT_TIME_STRETCH_MAX
+        stretch_factor = random() * self.cfg['data_augment_time_stretch_max'] * 2
+        stretch_factor += 1 - self.cfg['data_augment_time_stretch_max']
         durs = (durs.float() * stretch_factor).long()
         durs = torch.clamp(durs, min=0, max=RANGE_DUR_SHIFT)
 
@@ -95,7 +98,7 @@ class MusicSamplerDataset(Dataset):
         current_chord = [0]  # Start with first note
         
         for i in range(1, len(abs_times)):
-            if abs_times[i] - abs_times[i-1] <= AUGMENT_CHORD_THRESHOLD:
+            if abs_times[i] - abs_times[i-1] <= self.cfg['data_augment_chord_threshold']:
                 current_chord.append(i)
             else:
                 if len(current_chord) > 1:  # Only process if it's actually a chord
@@ -123,7 +126,7 @@ class MusicSamplerDataset(Dataset):
 
         # Transposition
         transposition_factor = randint(
-            -DATA_AUGMENT_TRANSPOSE_MAX, DATA_AUGMENT_TRANSPOSE_MAX
+            -self.cfg['data_augment_transpose_max'], self.cfg['data_augment_transpose_max']
         )
         # Apply transposition and ensure pitches stay within valid range (0-127)
         # TODO: Clamp isn't a good idea as we alter the interval relationships. But we hope transposing +-6 we don't clamp
@@ -154,33 +157,20 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    model = load_model(model_name='decoder_only_2_buttons', set_only=True)  
+    project_name = 'monsterGenie'
+    model_name = 'loss_norm_pos'
+    cfg = get_model_hparams(model_name)
+    model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
     #print(model)
-    load_hyperparameters(model_name='decoder_only_2_buttons')
-
+    
     #==========================================================================
 
     ''' WANDB '''
-    if(USE_LOGS):
-        #tensorboard_summary = SummaryWriter()
+    if(cfg['use_logs']):
         import wandb
         wandb.login()
-        config = {
-            "learning_rate": LEARNING_RATE,
-            "batch_size": BATCH_SIZE,
-            "epochs": NUM_EPOCHS,
-            "seq_len": SEQ_LEN,
-            "emb_dim": EMB_DIM,
-            "num_layers": NUM_LAYERS,
-            "loss_margin": LOSS_MARGIN_MULTIPLIER,
-            "loss_contour": LOSS_CONTOUR_MULTIPLIER,
-            "loss_deviate": LOSS_DEVIATE_MULTIPLIER,
-            "data%": DATA_SIZE,
-            "model": MODEL_NAME,
-            "description": DESCRIPTION
-        }
-        wandb.init(project="monsterGenie", config=config)
+        wandb.init(project=project_name, name=model_name, config=cfg)
 
 
     #==========================================================================
@@ -190,19 +180,19 @@ def main():
     """ LOAD TRAINING DATA """
 
     # Loading dataset from a pickle in ./Training-Data
-    train_data = Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
+    train_data = Any_Pickle_File_Reader(cfg['dataset_train_path'])   
     data_train = torch.Tensor(train_data)
-    eval_data = Any_Pickle_File_Reader(DATASET_VAL_PATH)   
+    eval_data = Any_Pickle_File_Reader(cfg['dataset_val_path'])   
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
-    train_dataset = MusicSamplerDataset(data_train, SEQ_LEN) # train in chunks of SEQ_LEN
-    print(f"BATCH_SIZE: {BATCH_SIZE}")
+    train_dataset = MusicSamplerDataset(data_train, cfg['seq_len'], cfg=cfg) # train in chunks of SEQ_LEN
+    print(f"BATCH_SIZE: {cfg['batch_size']}")
     print(f"Dataset size: {len(train_dataset)}")
-    train_loader  = DataLoader(train_dataset, batch_size = BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=True)
+    train_loader  = DataLoader(train_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=True)
     print(f"Number of batches: {len(train_loader)}")
-    val_dataset = MusicSamplerDataset(data_eval, SEQ_LEN, is_eval=True) # train in chunks of SEQ_LEN
-    val_loader  = DataLoader(val_dataset, batch_size = BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=False)
+    val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True, cfg=cfg) # train in chunks of SEQ_LEN
+    val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False)
 
     # Right after val_loader is created and before model definition, add a reusable iterator for streaming validation
     val_iter = iter(val_loader)  # will be cycled through inside training loop
@@ -215,7 +205,7 @@ def main():
 
     #ctx = torch.amp.autocast(device_type=device_type, dtype=dtype)
 
-    optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optim = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'])
 
     scaler = torch.amp.GradScaler(device_type)
 
@@ -223,7 +213,7 @@ def main():
 
     nsteps = 0
 
-    for ep in range(NUM_EPOCHS):
+    for ep in range(cfg['epochs']):
         print('Epoch #', ep)
         
         model.train()
@@ -242,30 +232,45 @@ def main():
                     loss, acc = model(x)  # Update your model to accept target separately
                 scaler.scale(loss['loss_total']).backward()
                 
-                if (i % PRINT_STATS_EVERY == 0) or TESTING:
-                    if(USE_LOGS):                
-                        wandb.log({"train_loss": loss['loss_total'].item()}, step=nsteps)
+                if (i % cfg['print_stats_every'] == 0) or TESTING:
+                    if( cfg['use_logs']):                
+                        wandb.log({"loss_total": loss['loss_total'].item()}, step=nsteps)
                         wandb.log({"train_acc": acc.item()}, step=nsteps)
-                        if LOSS_NORM_POS_MULTIPLIER>0 and 'loss_norm_pos' in loss:
-                            wandb.log({"train_loss_norm_pos": LOSS_NORM_POS_MULTIPLIER*loss['loss_norm_pos'].item()}, step=nsteps)
-                        if LOSS_DEVIATE_MULTIPLIER>0 and 'loss_deviate' in loss:
-                            wandb.log({"train_loss_deviate": LOSS_DEVIATE_MULTIPLIER*loss['loss_deviate'].item()}, step=nsteps)
-                        if LOSS_CONTOUR_MULTIPLIER>0 and 'loss_contour' in loss:
-                            wandb.log({"train_loss_contour": LOSS_CONTOUR_MULTIPLIER*LOSS_CONTOUR_MULTIPLIER*loss['loss_contour'].item()}, step=nsteps)
-                        if LOSS_MULTI_STEP_PERC>0 and 'loss_multi_step' in loss:
-                            wandb.log({"train_loss_multi_step": LOSS_CONTOUR_MULTIPLIER*LOSS_MULTI_STEP_PERC*loss['loss_multi_step'].item()}, step=nsteps)
-                        if LOSS_INTERVAL_PERC>0 and 'loss_interval' in loss:
-                            wandb.log({"train_loss_interval": LOSS_CONTOUR_MULTIPLIER*LOSS_INTERVAL_PERC*loss['loss_interval'].item()}, step=nsteps)
-                        if LOSS_SHAPE_PERC>0 and 'loss_shape' in loss:
-                            wandb.log({"train_loss_shape": LOSS_CONTOUR_MULTIPLIER*LOSS_SHAPE_PERC*loss['loss_shape'].item()}, step=nsteps)
-                        if LOSS_BUTTON_HELD_MULTIPLIER>0 and 'loss_button_held' in loss: 
-                            wandb.log({"train_loss_button_held": LOSS_BUTTON_HELD_MULTIPLIER*loss['loss_button_held'].item()}, step=nsteps)
+                        if cfg['loss_norm_pos']>0 and 'loss_norm_pos' in loss:
+                            wandb.log({"loss_norm_pos": cfg['loss_norm_pos']*loss['loss_norm_pos'].item()}, step=nsteps)
+                        if cfg['loss_deviate']>0 and 'loss_deviate' in loss:
+                            wandb.log({"loss_deviate": cfg['loss_deviate']*loss['loss_deviate'].item()}, step=nsteps)
+                        if cfg['loss_margin']>0 and 'loss_margin' in loss:
+                            wandb.log({"loss_margin": cfg['loss_margin']*loss['loss_margin'].item()}, step=nsteps)
+                        if cfg['loss_pitch_button']>0 and 'loss_pitch_button' in loss:
+                            wandb.log({"loss_pitch_button": cfg['loss_pitch_button']*loss['loss_pitch_button'].item()}, step=nsteps)
+                        if cfg['loss_button_concentration']>0 and 'loss_button_concentration' in loss:
+                            wandb.log({"loss_button_concentration": cfg['loss_button_concentration']*loss['loss_button_concentration'].item()}, step=nsteps)
+                        if cfg['loss_window_corr']>0 and 'loss_window_corr' in loss:
+                            wandb.log({"loss_window_corr": cfg['loss_window_corr']*loss['loss_window_corr'].item()}, step=nsteps)
+
+                        if cfg['loss_contour']>0 and 'loss_contour' in loss:
+                            wandb.log({"loss_contour_all": cfg['loss_contour']*loss['loss_contour'].item()}, step=nsteps)
+                        
+                            if cfg['loss_contour_perc']>0 and 'loss_contour_perc' in loss:
+                                wandb.log({"loss_contour_perc": cfg['loss_contour']*cfg['loss_contour_perc']*loss['loss_contour_perc'].item()}, step=nsteps)
+                            if cfg['loss_multi_step_perc']>0 and 'loss_multi_step_perc' in loss:
+                                wandb.log({"loss_multi_step": cfg['loss_contour']*cfg['loss_multi_step_perc']*loss['loss_multi_step_perc'].item()}, step=nsteps)
+                            if cfg['loss_interval_perc']>0 and 'loss_interval' in loss:
+                                wandb.log({"loss_interval": cfg['loss_contour']*cfg['loss_interval_perc']*loss['loss_interval_perc'].item()}, step=nsteps)
+                            if cfg['loss_shape_perc']>0 and 'loss_shape_perc' in loss:
+                                wandb.log({"loss_shape": cfg['loss_contour']*cfg['loss_shape_perc']*loss['loss_shape_perc'].item()}, step=nsteps)
+                        
+                        if cfg['loss_button_held']>0 and 'loss_button_held' in loss: 
+                            wandb.log({"loss_button_held": cfg['loss_button_held']*loss['loss_button_held'].item()}, step=nsteps)
+                        if cfg['loss_recons']>0 and 'loss_recons' in loss: 
+                            wandb.log({"loss_recons": cfg['loss_recons']*loss['loss_recons'].item()}, step=nsteps)
                         
                         nsteps += 1
 
 
                 scaler.unscale_(optim)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['grad_clip'])
                 scaler.step(optim)
                 scaler.update()
 
@@ -273,7 +278,7 @@ def main():
                 bar_train.set_description(f'Epoch: {ep} Loss: {float(loss["loss_total"]):.4}')# LR: {float(lr):.8}')
                 bar_train.update(1)
 
-                if (i % VALIDATE_EVERY == 0) or TESTING:
+                if (i % cfg['validate_every'] == 0) or TESTING:
                     try:
                         val_batch = next(val_iter) # extract batches from test dataloader
                     except StopIteration:
@@ -291,7 +296,7 @@ def main():
                             # run the model
                             val_loss, val_acc = model(vx)  # Update your model to accept target separately
 
-                        if(USE_LOGS):                
+                        if(cfg['use_logs']):                
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
                             wandb.log({"val_acc": val_acc.item()}, step=nsteps)
                     model.train()
@@ -299,8 +304,8 @@ def main():
                     torch.cuda.empty_cache()
 
         
-        if ep % SAVE_EVERY == 0:
-            fname = './save_models/' + MODEL_NAME + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
+        if ep % cfg['save_every'] == 0:
+            fname = './save_models/' + cfg['model_name'] + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
             torch.save(model.state_dict(), fname)
 
 

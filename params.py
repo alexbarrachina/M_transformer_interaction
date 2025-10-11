@@ -17,139 +17,83 @@
 # limitations under the License.'''
 #===================================================================================================
 
-
-from typing import Final
 import torch
-
-from models import *
+from typing import Final
 
 ########################################################
 
-''' TESTING '''
-#MODEL_TYPE = 'light' # 'light', 'big' or 'super'
-#LIGHT_DATASET = False
-TRAIN_SELECTION = True
-TESTING = False
-UPF = False
+''' TRAINING/TESTING FLAGS '''
 
-if torch.cuda.is_available(): 
-    USE_LOGS = True
-else:
-    USE_LOGS = False
-
-USE_TOPK = False
+TESTING = False # minimal configuration, just for fast testing
+UPF = False # setting for UPF cluster
+USE_TOPK = False # setting for topk sampling
 
 ''' DEFAULT MODEL PARAMETERS '''
 
-MODEL_NAME = 'no_name'
-DESCRIPTION = 'no description'
-EMB_DIM = 2048
-NUM_LAYERS = 4
-NUM_HEADS = 32
-SEQ_LEN = 2048
-BATCH_SIZE = 20
-SAVE_EVERY = 25000
-DATA_SIZE = 20
+DEFAULT_HPARAMS = {
+    # specific model parameters
+    "model_name": 'no_name',
+    "description": 'no description',
+    "seq_len": 2048,
+    "emb_dim": 2048,
+    "num_layers": 4,
+    "heads": 4,
 
+    # loss components
+    "loss_recons": 1., # 1., original # Reconstruction loss
 
-# constants
-'''if MODEL_TYPE == 'light':
-    SEQ_LEN = 256 # orig 2048
-    NUM_LAYERS = 4
-    EMB_DIM = 512 # 2048
-    NUM_HEADS = 32
-    if TRAIN_SELECTION:
-        SAVE_EVERY = 20 # in epochs 
-    else:
-        SAVE_EVERY = 25000 # 25000 orig in steps
-    if UPF:
-        BATCH_SIZE = 10 # 10 upf decoder-only, 
-    else:
-        BATCH_SIZE = 240 # 20 esmuc orignal decoder_only
-    
-elif MODEL_TYPE == 'big':
-    SEQ_LEN = 1024 # orig 2048
-    NUM_LAYERS = 4 # orig 4
-    EMB_DIM = 2048 # 2048
-    NUM_HEADS = 32
-    if TRAIN_SELECTION:
-        SAVE_EVERY = 1 # in epochs 
-    else:
-        SAVE_EVERY = 25000 #  25000 orig in steps
-    if UPF:
-        BATCH_SIZE = 10
-    else:
-        BATCH_SIZE = 20 # 10 upf decoder-only,  20 esmuc orignal 
+    "loss_margin": 0.01, #0.01 # encourage values to be closer to [-1, 1] range
+    "loss_deviate": 0.01, # 0.01 # enalize button changes when notes are held (same notes)
+    "loss_contour": 0.1, # 0.1, but 0.01 # melody shape, in direction (-1,+1)
+    "loss_button_held": 0., #0.01 # # Penalizes same button values when consecutive notes are different
+    "loss_norm_pos": 0.0, #0.01 #  between normalized positions of pitches and buttons.
+    "loss_pitch_button": 0.0, #0.01 #  correlates pitch tendencies with button concentrations
+    "loss_button_concentration": 0.0, #0.01 # Multiplier for button concentration loss
+    "loss_window_corr": 0.0, # weight for windowed Pearson correlation loss (1-corr)
+    # % of every component in loss contour
+    "loss_contour_perc": 0., # 0.4, original genie # encourage button intervals to match piano note intervals (in direction, not magnitude, -1,+1)
+    "loss_multi_step_perc": 1., # 0.3, original # considers relationships between the current note and multiple previous notes (in directions, not magnitude, -1,+1)
+    "loss_interval_perc": 0., # 0.2, original # Encourages the relative magnitudes of intervals to be preserved between pitches and buttons
+    "loss_shape_perc": 0., # 0.1, original # Preserves the overall shape of melodic phrases by comparing the pattern of ups and downs within sliding windows.
 
-elif MODEL_TYPE == 'super':
-    SEQ_LEN = 1024 # orig 2048
-    NUM_LAYERS = 6 # orig 4
-    EMB_DIM = 2048 # 2048
-    NUM_HEADS = 32
-    if TRAIN_SELECTION:
-        SAVE_EVERY = 40 # in epochs 
-    else:
-        SAVE_EVERY = 25000 # in epochs # 25000 orig in steps
-    if UPF:
-        BATCH_SIZE = 10
-    else:
-        BATCH_SIZE = 8 # 10 upf decoder-only,  20 esmuc orignal 
-'''
+    # training parameters
+    'learning_rate': 1e-4,
+    'grad_clip': 1.5,
+    'num_workers': 10,
+    'num_val_batches_per_step': 1,
+    "batch_size": 20,
+    "epochs": 6000,
 
+    # output parameters
+    "save_every": 25000,
+    "validate_every": 500,
+    "generate_every": 10000,
+    "generate_length": 512,
+    "print_stats_every": 500,
 
-''' TRAINING '''
-# Taken from the paper
-if torch.cuda.is_available(): 
-    NUM_WORKERS = 10
-    #print("using CUDA")
-else: # on macbook pro  
-    NUM_WORKERS = 1
-    print("using CPU/MPS")
+    # dataset parameters
+    "data%": 20, # % of dataset to use
+    "data_augment_time_stretch_max": 0.05, # Max time stretch for data augmentation (+- 5%)
+    "data_augment_transpose_max": 6, # Max transpose for data augmentation (+- 6 semitones, tritone)
+    "data_augment_chord_threshold": 2, # Define chord threshold (e.g., notes within 2 time units are considered part of same chord)
+    'dataset': 'giantmidi_full',
+    "dataset_train_path": "./Training-Data/giantMIDI_sel", # './Training-Data/asigalov_train'
+    "dataset_val_path": "./Training-Data/giantMIDI_sel_test", # './Training-Data/asigalov_val'
 
-if TESTING:
-    BATCH_SIZE = 1
-    SEQ_LEN = 16 
-    USE_LOGS = True
-    DATA_SIZE = 1
+    # output parameters
+    "save_dir": "./saved_checkpoints",
 
-VALIDATE_EVERY  = 500
-GENERATE_EVERY  = 10000
-GENERATE_LENGTH = 512
-PRINT_STATS_EVERY = VALIDATE_EVERY
+    # vocabulary parameters
+    "num_buttons": 12,
 
-NUM_EPOCHS = 6000
-
-LEARNING_RATE = 1e-4
-GRAD_CLIP = 1.5
-
-NUM_VAL_BATCHES_PER_STEP = 1 # 8 validation batches per step
-
-LOSS_MARGIN_MULTIPLIER:Final[float] = 0.01 #0.01 # 
-LOSS_DEVIATE_MULTIPLIER:Final[float] = 0.0 # 0.01
-LOSS_CONTOUR_MULTIPLIER:Final[float] = 0.01 # 0.1, but 0.01 original
-LOSS_BUTTON_HELD_MULTIPLIER:Final[float] = 0.0 #0.01 #
-LOSS_NORM_POS_MULTIPLIER:Final[float] = 0.0 #0.01 #
-LOSS_PITCH_BUTTON_MULTIPLIER:Final[float] = 0.0 #0.01 # Multiplier for pitch-button correlation loss
-LOSS_BUTTON_CONCENTRATION_MULTIPLIER:Final[float] = 0.0 #0.01 # Multiplier for button concentration loss
-
-# % of every component in loss contour
-LOSS_CONTOUR_PERC:Final[float] = 1. # 0.4, original
-LOSS_MULTI_STEP_PERC:Final[float] = 0. # 0.3, original
-LOSS_INTERVAL_PERC:Final[float] = 0. # 0.2, original
-LOSS_SHAPE_PERC:Final[float] = 0. # 0.1, original
+    # Activation flags 
+    "use_logs": False,
+    "use_topk": False,
+}
 
 ''' VOCABULARY '''
-
-#PIANO_NUM_KEYS:Final[int] = 88 
 VOCAB_SIZE_PITCH:Final[int] = 128
-#PIANO_LOWEST_KEY_MIDI_PITCH:Final[int] = 21
-SOS:Final[int] = 127
-PAD_IDX = 128 
-
-NUM_BUTTONS:Final[int] = 12 # 19 buttons (0-18) with central button at 9 # 12 original
-BUTTON_CONCENTRATION_WINDOW_SIZE:Final[int] = 12
-SOS_BUTTONS:Final[int] = NUM_BUTTONS
-VOCAB_SIZE_BUTTONS:Final[int] = NUM_BUTTONS + 1
+PAD_IDX:Final[int] = 128
 
 RANGE_DTIME_SHIFT:Final[int] = 127
 VOCAB_SIZE_DTIME:Final[int] = RANGE_DTIME_SHIFT + 1
@@ -157,157 +101,41 @@ VOCAB_SIZE_DTIME:Final[int] = RANGE_DTIME_SHIFT + 1
 RANGE_DUR_SHIFT:Final[int] = 127
 VOCAB_SIZE_DUR:Final[int] = RANGE_DUR_SHIFT + 1
 
-RANGE_VEL:Final[int] = 127 
-VOCAB_SIZE_VEL:Final[int] = RANGE_VEL + 1
+RANGE_VEL_SHIFT:Final[int] = 127 
+VOCAB_SIZE_VEL:Final[int] = RANGE_VEL_SHIFT + 1
 
 OFFSET_DTIME:Final[int] = 0
 OFFSET_DUR:Final[int] = 128
 OFFSET_PITCH:Final[int] = 256
 OFFSET_VEL:Final[int] = 384
 
-# Max time stretch for data augmentation (+- 5%)
-DATA_AUGMENT_TIME_STRETCH_MAX:Final[float] = 0.05
-# Max transpose for data augmentation (+- 6 semitones, tritone)
-DATA_AUGMENT_TRANSPOSE_MAX:Final[int] = 6
-# Define chord threshold (e.g., notes within 2 time units are considered part of same chord)
-AUGMENT_CHORD_THRESHOLD:Final[int] = 2
+
+
+''' TRAINING '''
+# Taken from the paper
+if torch.cuda.is_available(): 
+    DEFAULT_HPARAMS['num_workers'] = 10
+    DEFAULT_HPARAMS['use_logs'] = True
+    #print("using CUDA")
+else: # on macbook pro  
+    DEFAULT_HPARAMS['num_workers'] = 1
+    print("using CPU/MPS")
+    DEFAULT_HPARAMS['use_logs'] = False
+
+if TESTING:
+    DEFAULT_HPARAMS['batch_size'] = 1
+    DEFAULT_HPARAMS['seq_len'] = 16 
+    DEFAULT_HPARAMS['use_logs'] = True
+    DEFAULT_HPARAMS['data%'] = 1
+
+
   
 ''' DATASET '''
-# if using pickle files
-if TRAIN_SELECTION:
-    DATASET_TRAIN_PATH = './Training-Data/giantMIDI_sel' 
-    DATASET_VAL_PATH = './Training-Data/giantMIDI_sel_test'
-    #DATASET_TRAIN_PATH = './Training-Data/asigalov_train'
-    #DATASET_VAL_PATH = './Training-Data/asigalov_val'
 
 # ASIGALOV DATASET path
 if torch.cuda.is_available(): 
     # Path to your locally saved dataset
-    local_dataset_path = "../Datasets/asigalov61___monster-piano"
+    DEFAULT_HPARAMS['local_dataset_path'] = "../Datasets/asigalov61___monster-piano"
 else:
-    local_dataset_path = "../../../Datasets/MIDI/asigalov61___monster-piano"
+    DEFAULT_HPARAMS['local_dataset_path'] = "../../../Datasets/MIDI/asigalov61___monster-piano"
 
-
-def load_hyperparameters(model_name='default',
-               ):
-    """
-    Set hyperparameters for specific models in models.py.
-
-    Parameters:
-    model_name (str): The name of the model to load from MODELS_INFO dictionary. 
-    Only modifies hyperparameters if model_name is in MODELS_PARAMETERS.
-    """
-    
-    if model_name not in MODELS_PARAMETERS:
-        print('=' * 70)
-        print('Available models:')
-        
-        for n, d in MODELS_INFO.items():
-            print('=' * 70)
-            print('MODEL NAME:', n)
-            print('-' * 70)
-            print('MODEL INFO:', d)
-
-        print('=' * 70)
-        return []
-
-    if model_name not in MODELS_PARAMETERS:
-        MODEL_DESCRIPTION = MODELS_INFO[model_name]
-
-    MODEL_NAME = model_name
-
-    if 'num_buttons' in MODELS_PARAMETERS[model_name]:
-        NUM_BUTTONS = MODELS_PARAMETERS[model_name]['num_buttons']
-
-    if 'batch_size' in MODELS_PARAMETERS[model_name]:
-        BATCH_SIZE = MODELS_PARAMETERS[model_name]['batch_size']
-
-    if 'learning_rate' in MODELS_PARAMETERS[model_name]:
-        LEARNING_RATE = MODELS_PARAMETERS[model_name]['learning_rate']
-
-    if 'grad_clip' in MODELS_PARAMETERS[model_name]:
-        GRAD_CLIP = MODELS_PARAMETERS[model_name]['grad_clip']
-        
-    if 'num_workers' in MODELS_PARAMETERS[model_name]:
-        NUM_WORKERS = MODELS_PARAMETERS[model_name]['num_workers']
-
-    if 'num_val_batches_per_step' in MODELS_PARAMETERS[model_name]:
-        NUM_VAL_BATCHES_PER_STEP = MODELS_PARAMETERS[model_name]['num_val_batches_per_step']
-
-    if 'loss_margin_multiplier' in MODELS_PARAMETERS[model_name]:
-        LOSS_MARGIN_MULTIPLIER = MODELS_PARAMETERS[model_name]['loss_margin_multiplier']
-
-    if 'loss_deviate_multiplier' in MODELS_PARAMETERS[model_name]:
-        LOSS_DEVIATE_MULTIPLIER = MODELS_PARAMETERS[model_name]['loss_deviate_multiplier']
-
-    if 'loss_contour_multiplier' in MODELS_PARAMETERS[model_name]:
-        LOSS_CONTOUR_MULTIPLIER = MODELS_PARAMETERS[model_name]['loss_contour_multiplier']
-
-    if 'loss_button_held_multiplier' in MODELS_PARAMETERS[model_name]:
-        LOSS_BUTTON_HELD_MULTIPLIER = MODELS_PARAMETERS[model_name]['loss_button_held_multiplier']
-
-    if 'loss_norm_pos_multiplier' in MODELS_PARAMETERS[model_name]:
-        LOSS_NORM_POS_MULTIPLIER = MODELS_PARAMETERS[model_name]['loss_norm_pos_multiplier']
-
-    if 'loss_pitch_button_multiplier' in MODELS_PARAMETERS[model_name]:
-        LOSS_PITCH_BUTTON_MULTIPLIER = MODELS_PARAMETERS[model_name]['loss_pitch_button_multiplier']
-
-    if 'loss_button_concentration_multiplier' in MODELS_PARAMETERS[model_name]:
-        LOSS_BUTTON_CONCENTRATION_MULTIPLIER = MODELS_PARAMETERS[model_name]['loss_button_concentration_multiplier']
-        
-    if 'loss_contour_perc' in MODELS_PARAMETERS[model_name]:
-        LOSS_CONTOUR_PERC = MODELS_PARAMETERS[model_name]['loss_contour_perc']
-
-    if 'loss_multi_step_perc' in MODELS_PARAMETERS[model_name]:
-        LOSS_MULTI_STEP_PERC = MODELS_PARAMETERS[model_name]['loss_multi_step_perc']
-
-    if 'loss_interval_perc' in MODELS_PARAMETERS[model_name]:
-        LOSS_INTERVAL_PERC = MODELS_PARAMETERS[model_name]['loss_interval_perc']
-        
-    if 'loss_shape_perc' in MODELS_PARAMETERS[model_name]:
-        LOSS_SHAPE_PERC = MODELS_PARAMETERS[model_name]['loss_shape_perc']
-
-    if 'loss_contour_perc' in MODELS_PARAMETERS[model_name]:
-        LOSS_CONTOUR_PERC = MODELS_PARAMETERS[model_name]['loss_contour_perc']
-
-    if 'loss_multi_step_perc' in MODELS_PARAMETERS[model_name]:
-        LOSS_MULTI_STEP_PERC = MODELS_PARAMETERS[model_name]['loss_multi_step_perc']
-    
-    if 'save_every' in MODELS_PARAMETERS[model_name]:
-        SAVE_EVERY = MODELS_PARAMETERS[model_name]['save_every']
-
-    if 'data_size' in MODELS_PARAMETERS[model_name]: # % of dataset to use
-        DATA_SIZE = MODELS_PARAMETERS[model_name]['data_size']
-        
-    if 'chord_threshold' in MODELS_PARAMETERS[model_name]:
-        AUGMENT_CHORD_THRESHOLD = MODELS_PARAMETERS[model_name]['chord_threshold']
-
-    if 'data_augment_time_stretch_max' in MODELS_PARAMETERS[model_name]:
-        DATA_AUGMENT_TIME_STRETCH_MAX = MODELS_PARAMETERS[model_name]['data_augment_time_stretch_max']
-
-    if 'data_augment_transpose_max' in MODELS_PARAMETERS[model_name]:
-        DATA_AUGMENT_TRANSPOSE_MAX = MODELS_PARAMETERS[model_name]['data_augment_transpose_max']
-        
-    if 'num_epochs' in MODELS_PARAMETERS[model_name]:
-        NUM_EPOCHS = MODELS_PARAMETERS[model_name]['num_epochs']
-
-    if 'emb_dim' in MODELS_PARAMETERS[model_name]:
-        EMB_DIM = MODELS_PARAMETERS[model_name]['emb_dim']
-
-    if 'num_layers' in MODELS_PARAMETERS[model_name]:
-        NUM_LAYERS = MODELS_PARAMETERS[model_name]['num_layers']
-
-    if 'num_heads' in MODELS_PARAMETERS[model_name]:
-        NUM_HEADS = MODELS_PARAMETERS[model_name]['num_heads']
-        
-    if 'dataset' in MODELS_PARAMETERS[model_name]: # dataset used
-        if 'giantmidi_full' in MODELS_PARAMETERS[model_name]['dataset']:
-            DATASET_TRAIN_PATH = './Training-Data/giantMIDI' 
-            DATASET_VAL_PATH = './Training-Data/giantMIDI_test'
-        elif 'giantmidi_sel' in MODELS_PARAMETERS[model_name]['dataset']:
-            DATASET_TRAIN_PATH = './Training-Data/giantMIDI_sel' 
-            DATASET_VAL_PATH = './Training-Data/giantMIDI_sel_test'
-        elif 'asigalov' in MODELS_PARAMETERS[model_name]['dataset']:
-            DATASET_TRAIN_PATH = './Training-Data/asigalov_train'
-            DATASET_VAL_PATH = './Training-Data/asigalov_val'
-        

@@ -32,7 +32,6 @@ import tqdm
 import glob
 import re
 #from torch.utils.tensorboard import SummaryWriter
-from params import *
 
 #!set USE_FLASH_ATTENTION=1
 os.environ['USE_FLASH_ATTENTION'] = '1'
@@ -44,6 +43,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_dataset, load_from_disk
 
+from params import *
 from midiUtils import tokens_to_dict, Any_Pickle_File_Reader
 from model_loader import load_model
 from x_transformer import *
@@ -80,13 +80,13 @@ class MusicSamplerDataset(Dataset):
 
         # Data augmentation
         # Time stretching
-        stretch_factor = random() * DATA_AUGMENT_TIME_STRETCH_MAX * 2
-        stretch_factor += 1 - DATA_AUGMENT_TIME_STRETCH_MAX
+        stretch_factor = random() * self.cfg['data_augment_time_stretch_max'] * 2
+        stretch_factor += 1 - self.cfg['data_augment_time_stretch_max']
         dtimes = (dtimes.float() * stretch_factor).long()
         dtimes = torch.clamp(dtimes, min=0, max=RANGE_DTIME_SHIFT)
   
-        stretch_factor = random() * DATA_AUGMENT_TIME_STRETCH_MAX * 2
-        stretch_factor += 1 - DATA_AUGMENT_TIME_STRETCH_MAX
+        stretch_factor = random() * self.cfg['data_augment_time_stretch_max'] * 2
+        stretch_factor += 1 - self.cfg['data_augment_time_stretch_max']
         durs = (durs.float() * stretch_factor).long()
         durs = torch.clamp(durs, min=0, max=RANGE_DUR_SHIFT)
 
@@ -99,7 +99,7 @@ class MusicSamplerDataset(Dataset):
         current_chord = [0]  # Start with first note
         
         for i in range(1, len(abs_times)):
-            if abs_times[i] - abs_times[i-1] <= AUGMENT_CHORD_THRESHOLD:
+            if abs_times[i] - abs_times[i-1] <= self.cfg['data_augment_chord_threshold']:
                 current_chord.append(i)
             else:
                 if len(current_chord) > 1:  # Only process if it's actually a chord
@@ -127,7 +127,7 @@ class MusicSamplerDataset(Dataset):
 
         # Transposition
         transposition_factor = randint(
-            -DATA_AUGMENT_TRANSPOSE_MAX, DATA_AUGMENT_TRANSPOSE_MAX
+            -self.cfg['data_augment_transpose_max'], self.cfg['data_augment_transpose_max']
         )
         # Apply transposition and ensure pitches stay within valid range (0-127)
         # TODO: Clamp isn't a good idea as we alter the interval relationships. But we hope transposing +-6 we don't clamp
@@ -244,10 +244,21 @@ def main():
 
 
     ''' MODEL & HYPERPARAMETERS '''
-    model = load_model(model_name='no_dtime_good_reference', set_only=True)  
+    model_name = 'encoder_button_held'
+    cfg = get_model_hparams(model_name)
+    model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
     #print(model)
-    load_hyperparameters(model_name='no_dtime_good_reference')
+
+    #==========================================================================
+
+    ''' WANDB '''
+    if(cfg['use_logs']):
+        #tensorboard_summary = SummaryWriter()
+        import wandb
+        wandb.login()
+        wandb.init(project="monsterGenie", config=cfg)
+
 
     #==========================================================================
 
@@ -262,13 +273,13 @@ def main():
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
-    train_dataset = MusicSamplerDataset(data_train, SEQ_LEN) # train in chunks of SEQ_LEN
-    print(f"BATCH_SIZE: {BATCH_SIZE}")
+    train_dataset = MusicSamplerDataset(data_train, cfg['seq_len'], cfg=cfg) # train in chunks of SEQ_LEN
+    print(f"BATCH_SIZE: {cfg['batch_size']}")
     print(f"Dataset size: {len(train_dataset)}")
-    train_loader  = DataLoader(train_dataset, batch_size = BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=True)
+    train_loader  = DataLoader(train_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=True)
     print(f"Number of batches: {len(train_loader)}")
-    val_dataset = MusicSamplerDataset(data_eval, SEQ_LEN, is_eval=True) # train in chunks of SEQ_LEN
-    val_loader  = DataLoader(val_dataset, batch_size = BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=False)
+    val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True) # train in chunks of SEQ_LEN
+    val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False)
 
     #==========================================================================
  
@@ -300,25 +311,6 @@ def main():
 
     ''' WANDB '''
     if(USE_LOGS):
-        #tensorboard_summary = SummaryWriter()
-        import wandb
-        wandb.login()
-        config = {
-            "learning_rate": LEARNING_RATE,
-            "batch_size": BATCH_SIZE,
-            "epochs": NUM_EPOCHS,
-            "seq_len": SEQ_LEN,
-            "emb_dim": EMB_DIM,
-            "num_layers": NUM_LAYERS,
-            "loss_margin": LOSS_MARGIN_MULTIPLIER,
-            "loss_contour": LOSS_CONTOUR_MULTIPLIER,
-            "loss_deviate": LOSS_DEVIATE_MULTIPLIER,
-            "data%": DATA_SIZE,
-            "model": MODEL_NAME,
-            "description": DESCRIPTION,
-            "resume_from_epoch": start_epoch,
-            "resume_from_steps": start_steps
-        }
         # Resume wandb run if we have a checkpoint
         if checkpoint_path:
             wandb.init(project="monsterGenie", config=config, resume="allow")
@@ -350,21 +342,21 @@ def main():
                     loss, acc = model(x)  # Update your model to accept target separately
                 scaler.scale(loss['loss_total']).backward()
                 
-                if (i % VALIDATE_EVERY == 0) or TESTING:
-                    if(USE_LOGS):                
+                if (i % cfg['validate_every'] == 0) or TESTING:
+                    if(cfg['use_logs']):                
                         wandb.log({"train_loss": loss['loss_total'].item()}, step=nsteps)
                         wandb.log({"train_acc": acc.item()}, step=nsteps)
                         nsteps += 1
 
                 scaler.unscale_(optim)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['grad_clip'])
                 scaler.step(optim)
                 scaler.update()
 
                 bar_train.set_description(f'Epoch: {ep} Loss: {float(loss["loss_total"]):.4}')
                 bar_train.update(1)
 
-                if (i % PRINT_STATS_EVERY == 0) or TESTING:
+                if (i % cfg['print_stats_every'] == 0) or TESTING:
                     try:
                         x = next(iter(val_loader)) # extract batches from test dataloader
                     except StopIteration:
@@ -382,15 +374,15 @@ def main():
                             # run the model
                             val_loss, val_acc = model(x)  # Update your model to accept target separately
 
-                        if(USE_LOGS):                
+                        if(cfg['use_logs']):                
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
                             wandb.log({"val_acc": val_acc.item()}, step=nsteps)
 
                     model.train()
 
         
-        if ep % SAVE_EVERY == 0:
-            fname = './save_models/' + MODEL_NAME + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
+        if ep % cfg['save_every'] == 0:
+            fname = './save_models/' + cfg['model_name'] + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
             torch.save(model.state_dict(), fname)
 
 
