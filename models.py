@@ -425,7 +425,6 @@ MODELS_PARAMETERS = {
         'loss_button_held': 0.1,
         "loss_multi_step_perc": 0.,
         "loss_contour_perc": 1., # original genie contour loss
-        'dataset': 'giantmidi_full',
         "save_every": 15, # in epochs
         },  
 
@@ -447,8 +446,6 @@ MODELS_PARAMETERS = {
         "loss_contour_perc": 1., # original genie contour loss
         "loss_window_corr": 1.,
         "loss_recons": 0.5, # 1., original # Reconstruction loss
-
-        'dataset': 'giantmidi_full',
         "save_every": 15, # in epochs
         },   
 
@@ -470,8 +467,6 @@ MODELS_PARAMETERS = {
         "loss_contour_perc": 1., # original genie contour loss
         "loss_window_corr": 0.,
         "loss_recons": 0.5, # 1., original # Reconstruction loss
-
-        'dataset': 'giantmidi_full',
         "save_every": 15, # in epochs
         },  
     'original_genie+loss_button_held': {
@@ -492,8 +487,6 @@ MODELS_PARAMETERS = {
         "loss_contour_perc": 1., # original genie contour loss
         "loss_window_corr": 0.,
         "loss_recons": 0.5, # 1., original # Reconstruction loss
-
-        'dataset': 'giantmidi_full',
         "save_every": 15, # in epochs
         },  
     'original_genie+loss_norm_pos': {
@@ -515,15 +508,13 @@ MODELS_PARAMETERS = {
         "loss_window_corr": 0.,
         "loss_recons": 1., # 1., original # Reconstruction loss
         "loss_norm_pos": 1.0,
-
-        'dataset': 'giantmidi_full',
         "save_every": 15, # in epochs
         },  
-'loss_norm_pos': {
+    'loss_norm_pos_10x': {
         'model_type': 'autoencoder_no_dtime',
         'description': 'autoencoder, normalized position loss only',
         'train_log': 'not yet trained',
-        'ckpt_file_name': './save_models/loss_norm_pos_90_eps_182_steps_1.6465_loss_0.6195_acc.pth',
+        'ckpt_file_name': './save_models/loss_norm_pos_150_eps_302_steps_9.7449_loss_0.6945_acc.pth',
         'seq_len': 256,
         'pad_idx': 128,
         'emb_dim': 512,
@@ -538,10 +529,82 @@ MODELS_PARAMETERS = {
         "loss_window_corr": 0.,
         "loss_recons": 1., # 1., original # Reconstruction loss
         "loss_norm_pos": 10.0,
-
-        'dataset': 'giantmidi_full',
         "save_every": 15, # in epochs
-        },  }
+        },  
+    'test_w_dtime': {
+        'model_type': 'autoencoder',
+        'description': 'autoencoder, using dtime embedding, small model, original genie loss',
+        'train_log': 'not yet trained',
+        'ckpt_file_name': './save_models/test_w_dtime_390_eps_391_steps_0.6523_loss_0.7891_acc.pth',
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'loss_button_held': 0.1,
+        "loss_multi_step_perc": 0.,
+        "loss_contour_perc": 1., # original genie contour loss
+        "loss_window_corr": 0.,
+        "loss_recons": 1., # 1., original # Reconstruction loss
+        "save_every": 15, # in epochs
+        },
+    'contour+loss_norm_pos': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'autoencoder, normalized position loss only',
+        'train_log': 'not yet trained',
+        'ckpt_file_name': './save_models/contour+loss_norm_pos_585_eps_1172_steps_2.3291_loss_0.8602_acc.pth',
+        'seq_len': 256,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'loss_button_held': 0.1,
+        "loss_multi_step_perc": 0.,
+        "loss_contour_perc": 1., # original genie contour loss
+        "loss_window_corr": 0.,
+        "loss_recons": 1., # 1., original # Reconstruction loss
+        "loss_norm_pos": 5.0,
+        "save_every": 15, # in epochs
+        },
+    'no_dtime_2buttons': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'full model, autoencoder, only 2 buttons',
+        'train_log': '',
+        'ckpt_file_name': './save_models/no_dtime_2buttons_135_eps_136_steps_1.8422_loss_0.4674_acc.pth',
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'num_buttons': 2,
+        'save_every': 15, # in epochs
+        },
+    'melody_arrow_v1': {
+        'model_type': 'autoencoder_melody',
+        'description': 'Melody autoencoder with arrow guidance. Uses melody-only pickles (channel 0).',
+        'train_log': '',
+        'ckpt_file_name': './save_models/melody_arrow_v1.pth',
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_recons': 1.0,
+        "dataset_train_path": "./Training-Data/giantmidi_full_melody_train", # './Training-Data/asigalov_train'
+        "dataset_val_path": "./Training-Data/giantmidi_full_melody_test", # './Training-Data/asigalov_val'
+
+        "save_every": 15, # in epochs
+        },
+    }
 
 
 

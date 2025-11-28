@@ -35,7 +35,8 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model_name = 'no_dtime_good_reference'
+model_name = 'no_dtime_2buttons'
+#model_name = 'no_dtime_good_reference'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)

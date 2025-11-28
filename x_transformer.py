@@ -57,6 +57,7 @@ from einops import rearrange, repeat,  pack, unpack
 from math import ceil, log
 
 from params import *
+from loss_funcs import *
 
 # helpers
 
@@ -1261,7 +1262,7 @@ class Decoder(nn.Module):
         #logits_dim = default(logits_dim, num_tokens) # 385
         # Linear layer
         #self.to_logits = nn.Linear(dim, logits_dim) # if not tie_embedding else lambda t: t @ self.token_emb.emb.weight.t()
-        self.to_logits = nn.Linear(dim, vocab_size_pitch, bias=False)
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
         # whether can do cached kv decoding
         self.can_cache_kv = True
 
@@ -1549,7 +1550,7 @@ class AutoregressiveAutoencoder(Module):
         decoder_context = {
             'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
             'pitch': note_tokens['pitch'][:, :-1], # no current pitch 
-            'dur': note_tokens['dur'][:, :-1], # no current dur
+            #'dur': note_tokens['dur'][:, :-1], # no current dur
             'button': b[:, :] # b.shape = (B, T) # includes current button
         } # (B, T)
 
@@ -1589,28 +1590,19 @@ class AutoregressiveAutoencoder(Module):
         # Penalizes when the product/quotient is less than the margin
         loss_contour_perc = 0
         if self.cfg['loss_contour_perc'] > 0: 
-            pitch_diff = torch.diff(note_tokens['pitch'][:,1:], dim=1)
-            e_diff = torch.diff(e, dim=1) # [:, :-1]    
-            loss_contour_perc = torch.square(
-                torch.maximum(
-                    1 - pitch_diff.float() * e_diff,
-                        torch.zeros_like(pitch_diff, dtype=torch.float)
-                )
+            loss_contour_perc = simple_contour_loss(
+                note_tokens['pitch'],
+                e
             ).mean()
             
         loss_margin = 0
         if self.cfg['loss_margin'] > 0:
-            # Improved margin loss: encourage values to be closer to [-1, 1] range
-            # Instead of only penalizing values outside [-1, 1], also encourage 
-            # values to use the full range effectively
-            margin_penalty = torch.square(
-                torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
-            )
+            loss_margin = margin_loss( e)
             
             # Add a term to encourage using the full range (prevent collapse to center)
-            range_utilization = 1.0 - torch.var(e, dim=1).mean()  # Penalize low variance
+            #range_utilization = 1.0 - torch.var(e, dim=1).mean()  # Penalize low variance
             
-            loss_margin = margin_penalty.mean() + 0.1 * range_utilization
+            #loss_margin = margin_penalty.mean() + 0.1 * range_utilization
 
         loss_multi_step_perc = 0
         if self.cfg['loss_multi_step_perc'] > 0:
@@ -1640,19 +1632,10 @@ class AutoregressiveAutoencoder(Module):
         # Improved Deviate Penalty
         loss_deviate = 0
         if self.cfg['loss_deviate'] > 0:
-            # Identify held notes (where consecutive pitches are the same)
-
-            notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()
-            
-            # Only apply loss if there are actually held notes in the batch
-            if notes_held.sum() > 0:
-                # Penalize button changes when notes are held
-                button_changes = torch.diff(e, dim=1)
-                held_button_changes = button_changes * notes_held
-                loss_deviate = torch.square(held_button_changes).sum() / notes_held.sum().clamp(min=1e-6)
-            else:
-                # If no held notes, add small penalty to encourage stability
-                loss_deviate = 0.01 * torch.square(torch.diff(e, dim=1)).mean()
+             loss_deviate = deviate_loss(
+                note_tokens['pitch'],
+                e
+            ) 
 
         loss_button_held = 0
         if self.cfg['loss_button_held'] > 0:
@@ -1707,7 +1690,7 @@ class AutoregressiveAutoencoder(Module):
         if self.cfg['loss_contour'] > 0:
             loss_contour = self.cfg['loss_contour'] * (
                 self.cfg['loss_contour_perc'] * loss_contour_perc +
-                self.cfg['loss_multi_step_perc'] * loss_multi_step +
+                self.cfg['loss_multi_step_perc'] * loss_multi_step_perc +
                 self.cfg['loss_interval_perc'] * loss_interval_perc +
                 self.cfg['loss_shape_perc'] * loss_shape_perc    
             )
@@ -1786,7 +1769,7 @@ class AutoregressiveAutoencoder(Module):
         decoder_context = {
             'dtime': note_tokens['dtime'][:, 1:],
             'pitch': note_tokens['pitch'][:, :-1],
-            'dur': note_tokens['dur'][:, :-1],
+            #'dur': note_tokens['dur'][:, :-1],
             'button': b[:, 1:]
         } # (B, T)
 
@@ -1961,28 +1944,14 @@ class EncoderOnly(Module):
         # Penalizes when the product/quotient is less than the margin
         loss_contour_perc = 0
         if self.cfg['loss_contour_perc'] > 0: 
-            pitch_diff = torch.diff(note_tokens['pitch'][:,1:], dim=1)
-            e_diff = torch.diff(e, dim=1) # [:, :-1]    
-            loss_contour_perc = torch.square(
-                torch.maximum(
-                    1 - pitch_diff.float() * e_diff,
-                        torch.zeros_like(pitch_diff, dtype=torch.float)
-                )
+            loss_contour_perc = simple_contour_loss(
+                note_tokens['pitch'],
+                e
             ).mean()
         
         loss_margin = 0
         if self.cfg['loss_margin'] > 0:
-            # Improved margin loss: encourage values to be closer to [-1, 1] range
-            # Instead of only penalizing values outside [-1, 1], also encourage 
-            # values to use the full range effectively
-            margin_penalty = torch.square(
-                torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
-            )
-            
-            # Add a term to encourage using the full range (prevent collapse to center)
-            range_utilization = 1.0 - torch.var(e, dim=1).mean()  # Penalize low variance
-            
-            loss_margin = margin_penalty.mean() + 0.1 * range_utilization
+            loss_margin = margin_loss( e)
 
         loss_multi_step_perc = 0
         if self.cfg['loss_multi_step_perc'] > 0:
@@ -2012,18 +1981,10 @@ class EncoderOnly(Module):
         # Improved Deviate Penalty
         loss_deviate = 0
         if self.cfg['loss_deviate'] > 0:
-            # Identify held notes (where consecutive pitches are the same)
-            notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()
-            
-            # Only apply loss if there are actually held notes in the batch
-            if notes_held.sum() > 0:
-                # Penalize button changes when notes are held
-                button_changes = torch.diff(e, dim=1)
-                held_button_changes = button_changes * notes_held
-                loss_deviate = torch.square(held_button_changes).sum() / notes_held.sum().clamp(min=1e-6)
-            else:
-                # If no held notes, add small penalty to encourage stability
-                loss_deviate = 0.01 * torch.square(torch.diff(e, dim=1)).mean()
+             loss_deviate = deviate_loss(
+                note_tokens['pitch'],
+                e
+            ) 
 
         loss_button_held = 0
         if self.cfg['loss_button_held'] > 0:
@@ -2070,18 +2031,15 @@ class EncoderOnly(Module):
                 e
             )
 
-        # Combine losses with appropriate weights
-        loss_total = torch.zeros_like(loss_recons) 
-        
         loss_contour = 0
         if self.cfg['loss_contour'] > 0:
             loss_contour = self.cfg['loss_contour'] * (
                 self.cfg['loss_contour_perc'] * loss_contour_perc +
-                self.cfg['loss_multi_step_perc'] * loss_multi_step +
-                self.cfg['loss_interval_perc'] * loss_interval +
-                self.cfg['loss_shape_perc'] * loss_shape
+                self.cfg['loss_multi_step_perc'] * loss_multi_step_perc +
+                self.cfg['loss_interval_perc'] * loss_interval_perc +
+                self.cfg['loss_shape_perc'] * loss_shape_perc
             )
-        loss_total += loss_contour
+        loss_total = loss_contour
 
         if self.cfg['loss_margin'] > 0:
             loss_total += self.cfg['loss_margin'] * loss_margin
@@ -2108,11 +2066,9 @@ class EncoderOnly(Module):
         if self.cfg['loss_window_corr'] > 0:
             loss_total += self.cfg['loss_window_corr'] * loss_window_corr
 
-        acc = self.compute_accuracy(logits, target)
         
         loss = {
             'loss_total': loss_total,
-            'loss_recons': loss_recons,
 
             'loss_margin': loss_margin,
             'loss_deviate': loss_deviate,
@@ -2218,7 +2174,7 @@ class DecoderSimple(nn.Module):
         #logits_dim = default(logits_dim, num_tokens) # 385
         # Linear layer
         #self.to_logits = nn.Linear(dim, logits_dim) # if not tie_embedding else lambda t: t @ self.token_emb.emb.weight.t()
-        self.to_logits = nn.Linear(dim, vocab_size_pitch, bias=False)
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
         # whether can do cached kv decoding
         self.can_cache_kv = True
 
@@ -2322,7 +2278,7 @@ class DecoderSimple_continuous_dtime(nn.Module):
         # Embeddings
         # Token embeddings for each feature type
         #self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
-        self.pitch_emb = nn.Embedding(vocab_size_pitch, dim)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
         #self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
         #self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
 
@@ -2354,7 +2310,7 @@ class DecoderSimple_continuous_dtime(nn.Module):
         #logits_dim = default(logits_dim, num_tokens) # 385
         # Linear layer
         #self.to_logits = nn.Linear(dim, logits_dim) # if not tie_embedding else lambda t: t @ self.token_emb.emb.weight.t()
-        self.to_logits = nn.Linear(dim, vocab_size_pitch, bias=False)
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
         # whether can do cached kv decoding
         self.can_cache_kv = True
 
@@ -2987,29 +2943,14 @@ class AutoregressiveAutoencoder_no_dtime(Module):
         # Penalizes when the product/quotient is less than the margin
         loss_contour_perc = 0
         if self.cfg['loss_contour_perc'] > 0: 
-            pitch_diff = torch.diff(note_tokens['pitch'][:,1:], dim=1)
-            e_diff = torch.diff(e, dim=1) # [:, :-1]    
-            loss_contour_perc = torch.square(
-                torch.maximum(
-                    1 - pitch_diff.float() * e_diff,
-                        torch.zeros_like(pitch_diff, dtype=torch.float)
-                )
+            loss_contour_perc = simple_contour_loss(
+                note_tokens['pitch'],
+                e
             ).mean()
- 
+           
         loss_margin = 0
         if self.cfg['loss_margin'] > 0:
-            # Improved margin loss: encourage values to be closer to [-1, 1] range
-            # Instead of only penalizing values outside [-1, 1], also encourage 
-            # values to use the full range effectively
-            margin_penalty = torch.square(
-                torch.maximum(torch.abs(e) - 1, torch.zeros_like(e))
-            )
-            
-            # Add a term to encourage using the full range (prevent collapse to center)
-            range_utilization = 1.0 - torch.var(e, dim=1).mean()  # Penalize low variance
-            
-            loss_margin = margin_penalty.mean() + 0.1 * range_utilization
-
+            loss_margin = margin_loss( e)
 
         loss_multi_step_perc = 0
         if self.cfg['loss_multi_step_perc'] > 0:
@@ -3039,19 +2980,10 @@ class AutoregressiveAutoencoder_no_dtime(Module):
        # Improved Deviate Penalty
         loss_deviate = 0
         if self.cfg['loss_deviate'] > 0:
-            # Identify held notes (where consecutive pitches are the same)
-            notes_held = (note_tokens['pitch'][:, 1:-1] == note_tokens['pitch'][:, :-2]).float()
-            
-            # Only apply loss if there are actually held notes in the batch
-            if notes_held.sum() > 0:
-                # Penalize button changes when notes are held
-                button_changes = torch.diff(e, dim=1)
-                held_button_changes = button_changes * notes_held
-                loss_deviate = torch.square(held_button_changes).sum() / notes_held.sum().clamp(min=1e-6)
-            else:
-                # If no held notes, add small penalty to encourage stability
-                loss_deviate = 0.01 * torch.square(torch.diff(e, dim=1)).mean()
-
+             loss_deviate = deviate_loss(
+                note_tokens['pitch'],
+                e
+            )          
  
         loss_button_held = 0
         if self.cfg['loss_button_held'] > 0:
@@ -3457,370 +3389,445 @@ class Encoder_antic(nn.Module):
         return out.squeeze(-1) # (B, T (seq_len)) (20, 1024)
     
 
-''' LOSS FUNCTIONS '''
 
-def multi_step_contour_loss(pitches, buttons, max_steps=5):
+def pitch_to_arrow(pitch_seq: Tensor) -> Tensor:
     """
-    Computes a contour preservation loss that considers relationships
-    between the current note and multiple previous notes.
+    Convert pitch sequence to arrow sequence based on pitch differences.
+    Arrow mapping:
+        a=0: dPitch <= -8 (descending more than 7 semitones)
+        a=1: -7 <= dPitch <= -3 (descend between 3 and 7 semitones)
+        a=2: -2 <= dPitch <= -1 (descends 1 or 2 semitones)
+        a=3: dPitch = 0 (no change)
+        a=4: 1 <= dPitch <= 2 (increases 1 or 2 semitones)
+        a=5: 3 <= dPitch <= 7 (increases between 3 and 7 semitones)
+        a=6: dPitch >= 8 (increases more than 7 semitones)
     
     Args:
-        pitches: Tensor of shape [batch, seq_len] containing pitch values
-        buttons: Tensor of shape [batch, seq_len] containing button values (encoder output)
-        max_steps: Maximum number of steps back to consider
+        pitch_seq: Tensor of shape [B, T] containing pitch values
     
     Returns:
-        A differentiable loss tensor
+        arrows: Tensor of shape [B, T-1] containing arrow indices (0-6)
     """
-    batch_size, seq_len = pitches.shape
-    total_loss = torch.zeros(1, device=pitches.device)
+    # Calculate pitch differences: d[t] = pitch[t+1] - pitch[t]
+    d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T-1]
     
-    # Convert to float for calculations
-    pitches = pitches.float()
-    buttons = buttons.float()
+    # Initialize arrow tensor with zeros
+    arrows = torch.zeros_like(d, dtype=torch.long)
     
-    # For each step size (1 to max_steps)
-    for step in range(1, min(max_steps + 1, seq_len)):
-        # Calculate differences with notes 'step' positions back
-        pitch_diffs = pitches[:, step:] - pitches[:, :-step]  # [batch, seq_len-step]
-        button_diffs = buttons[:, step:] - buttons[:, :-step]  # [batch, seq_len-step]
+    # Apply mapping based on pitch difference ranges
+    # Note: conditions are mutually exclusive, applied in sequence
+    arrows = torch.where(d <= -8, torch.tensor(0, dtype=torch.long, device=d.device), arrows)
+    arrows = torch.where((d >= -7) & (d <= -3), torch.tensor(1, dtype=torch.long, device=d.device), arrows)
+    arrows = torch.where((d >= -2) & (d <= -1), torch.tensor(2, dtype=torch.long, device=d.device), arrows)
+    arrows = torch.where(d == 0, torch.tensor(3, dtype=torch.long, device=d.device), arrows)
+    arrows = torch.where((d >= 1) & (d <= 2), torch.tensor(4, dtype=torch.long, device=d.device), arrows)
+    arrows = torch.where((d >= 3) & (d <= 7), torch.tensor(5, dtype=torch.long, device=d.device), arrows)
+    arrows = torch.where(d >= 8, torch.tensor(6, dtype=torch.long, device=d.device), arrows)
+    
+    return arrows
+
+
+class Decoder_melody(nn.Module):
+    """
+    Decoder for melody generation using arrow guidance instead of learned buttons.
+    Accepts previous pitches and arrow directions to predict next pitch.
+    
+    Arrows are treated as continuous scalar values (like buttons in Decoder_no_dtime)
+    to preserve their ordinal relationship: 0 < 1 < 2 < 3 < 4 < 5 < 6
+    (from "large down" to "large up").
+    """
+    def __init__(
+        self,
+        *,
+        max_seq_len: int,  # SEQ_LEN
+        dim: int,
+        depth: int,
+        heads: int,
+        emb_dropout: float = 0.,
+        post_emb_norm: bool = False,
+        num_memory_tokens: Optional[int] = None,
+        memory_tokens_interspersed_every: Optional[int] = None,
+        rotary_pos_emb: bool = True,
+        attn_flash: bool = True,
+        logits_dim: Optional[int] = None,
+        causal: bool = True  # True for decoder
+    ):
+        super().__init__()
         
-        # Normalize the importance by step size (closer relationships matter more)
-        step_weight = 1.0 / step
+        self.emb_dim = dim # 2048
+        self.max_seq_len = max_seq_len
         
-        # Calculate directional agreement
-        # When pitch_diffs and button_diffs have the same sign, their product is positive
-        # When they have opposite signs, their product is negative
-        agreement = pitch_diffs * button_diffs
+        # Embedding for pitch only (arrows are treated as continuous scalars)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        # No arrow_emb - arrows are continuous scalars like buttons in original
         
-        # Penalize disagreements (when the product is <= 0)
-        # The penalty increases with the magnitude of the disagreement
-        disagreement_penalty = torch.square(
-            torch.maximum(
-                1 - agreement,  # 1 minus the agreement (higher for disagreements)
-                torch.zeros_like(agreement)  # Zero floor to avoid penalizing agreements
+        # Input projection for concatenated features
+        # pitch embedding (dim) + arrow scalar (1)
+        input_dim = dim + 1  # pitch_emb + arrow (continuous scalar)
+        self.input_proj = nn.Linear(input_dim, dim)
+        
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout)
+        
+        # Attention layers
+        self.attn_layers = AttentionLayers(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            rotary_pos_emb=rotary_pos_emb,
+            attn_flash=attn_flash,
+            causal=causal
+        )
+        
+        self.init_()
+        
+        # Output projection to pitch logits
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)        
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+    def init_(self):
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.input_proj.weight)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],  # Contains 'pitch' and 'arrow'
+        return_intermediates: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[Tensor] = None,
+        seq_start_pos: Optional[int] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        """
+        Full-sequence forward pass.
+        Returns logits of shape [B, T, VOCAB_SIZE_PITCH],
+        predicting the pitch at every time step.
+        
+        Args:
+            past_tokens: Dict with 'pitch' [B, T] and 'arrow' [B, T]
+                - pitch: integer tensor with MIDI pitch values (0-127)
+                - arrow: integer tensor with arrow indices (0-6), treated as continuous
+        """
+        # Embed pitch
+        pitch = self.pitch_emb(past_tokens['pitch'])  # [B, T, dim]
+        
+        # Treat arrow as continuous scalar (preserves ordinal relationship)
+        # This matches the original Decoder_no_dtime approach for buttons
+        arrow = past_tokens['arrow'].float().unsqueeze(-1)  # [B, T, 1]
+        
+        # Concatenate pitch embedding with arrow scalar
+        concat_inputs = torch.cat([pitch, arrow], dim=-1)  # [B, T, dim+1]
+        
+        # Project to model dimension
+        x = self.input_proj(concat_inputs)  # [B, T, dim]
+        
+        # Apply dropout
+        x = self.emb_dropout(x)
+        
+        # Pass through attention layers
+        x, intermediates = self.attn_layers(
+            x, 
+            mask=mask, 
+            mems=mems, 
+            cache=cache, 
+            return_hiddens=True, 
+            seq_start_pos=seq_start_pos, 
+            **kwargs
+        )
+        
+        # Project to pitch logits
+        logits = self.to_logits(x)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        if return_intermediates:
+            return logits, intermediates
+        
+        return logits
+
+
+class AutoregressiveAutoencoder_melody(Module):
+    """
+    Autoencoder for melody generation using deterministic arrow guidance.
+    Instead of learning a latent button space, arrows are directly extracted
+    from pitch differences and used to guide the decoder.
+    
+    Arrow mapping based on pitch differences (dPitch):
+        a=0: dPitch <= -8 (large descending jump)
+        a=1: -7 <= dPitch <= -3 (medium descending)
+        a=2: -2 <= dPitch <= -1 (small descending)
+        a=3: dPitch = 0 (stay)
+        a=4: 1 <= dPitch <= 2 (small ascending)
+        a=5: 3 <= dPitch <= 7 (medium ascending)
+        a=6: dPitch >= 8 (large ascending jump)
+    """
+    def __init__(
+        self,
+        decoder: Decoder_melody,
+        cfg: Optional[Dict] = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        # No encoder needed - arrows are deterministically extracted
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        """
+        Training forward pass.
+        
+        Args:
+            note_tokens: Dict with 'pitch' [B, T+1]
+        
+        Returns:
+            Dictionary with loss components
+        """
+        # Extract arrows from pitch differences
+        # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
+        arrows = pitch_to_arrow(note_tokens['pitch'])  # [B, T]
+        
+        # Create decoder context
+        # Decoder needs: previous pitches [B, T] and current arrows [B, T]
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1],  # Previous pitches [B, T]
+            'arrow': arrows  # Current arrows [B, T]
+        }
+        
+        # Get logits from decoder
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        # Target is the current pitch (shifted by 1)
+        target = note_tokens['pitch'][:, 1:]  # [B, T]
+        
+        # Compute reconstruction loss
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+        
+        # No contour/margin/button losses needed since arrows already encode contour deterministically
+        # All auxiliary losses that relied on encoder output 'e' are removed
+        
+        # Compute total loss (only reconstruction for now)
+        loss_total = loss_recons * self.cfg['loss_recons']
+        
+        # Compute accuracy
+        acc = self.compute_accuracy(logits, target)
+        
+        # Return loss dictionary (keeping structure for compatibility)
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            # All other losses set to 0 since we don't use them
+            'loss_margin': torch.tensor(0.0, device=loss_total.device),
+            'loss_deviate': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_held': torch.tensor(0.0, device=loss_total.device),
+            'loss_norm_pos': torch.tensor(0.0, device=loss_total.device),
+            'loss_pitch_button': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_concentration': torch.tensor(0.0, device=loss_total.device),
+            'loss_window_corr': torch.tensor(0.0, device=loss_total.device),
+            'loss_contour': torch.tensor(0.0, device=loss_total.device),
+            'loss_contour_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_interval_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_shape_perc': torch.tensor(0.0, device=loss_total.device),
+        }
+        return loss, acc
+ 
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self, 
+            note_tokens: Dict[str, Tensor],
+            temperature: float = 1.0
+    ) -> int:
+        """
+        Generate next pitch token given previous pitches and current arrow.
+        
+        Args:
+            note_tokens: Dict with 'pitch' [B, T] and 'arrow' [B, 1] (current arrow)
+            temperature: Sampling temperature
+        
+        Returns:
+            next_token: Integer pitch value (0-127)
+        """
+        device = note_tokens['pitch'].device
+        arrows = pitch_to_arrow(note_tokens['pitch'])  # [B, T]
+
+        # Create decoder context
+        # note_tokens['pitch'] contains previous pitches [B, T]
+        # note_tokens['arrow'] contains current arrow [B, 1] or [B, T]
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1],  # [B, T]
+            'arrow': arrows   # [B, T] (last one is current)
+        }
+
+        logits, _ = self.decoder(
+                decoder_context,
+            return_intermediates=True,
+            cache=None,
+            seq_start_pos=None
+        )
+        
+        logits = logits[:, -1]  # [B, vocab_size] - get last timestep
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
+
+    @torch.inference_mode()
+    def gen_arrows(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        """
+        Generate arrows from pitch sequence (deterministic extraction).
+        
+        Args:
+            note_tokens: Dict with 'pitch' [B, T]
+        
+        Returns:
+            arrows: Tensor [B, T-1] with arrow indices (0-6)
+        """
+        # B = batch size = 1
+        # note_tokens supposed on gpu
+        # Extract arrows deterministically from pitch differences
+        arrows = pitch_to_arrow(note_tokens['pitch'])  # [B, T-1]
+        
+        return arrows
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        prompts: Dict[str, Tensor],
+        seq_len: int,
+        arrow_sequence: Tensor,  # User-provided arrow sequence [B, seq_len]
+        temperature: float = 1.,
+        filter_logits_fn: Callable = top_k,
+        restrict_to_max_seq_len: bool = True,
+        filter_kwargs: dict = dict(),
+        cache_kv: bool = True,
+        verbose: bool = True,
+        return_prime: bool = False
+    ):
+        """
+        Generate pitch sequence guided by arrow sequence.
+        
+        Args:
+            prompts: Dict with 'pitch' [B, T_prompt] - initial pitch sequence
+            seq_len: Number of new tokens to generate
+            arrow_sequence: User-provided arrows [B, seq_len] to guide generation
+            temperature: Sampling temperature
+            filter_logits_fn: Logits filtering function (top_k, top_p, etc.)
+            restrict_to_max_seq_len: Whether to restrict context to max_seq_len
+            filter_kwargs: Additional arguments for filter function
+            cache_kv: Whether to use KV caching
+            verbose: Whether to print progress
+            return_prime: Whether to return prompt + generated sequence
+        
+        Returns:
+            Generated pitch sequence [B, seq_len] (or [B, T_prompt + seq_len] if return_prime=True)
+        """
+        max_seq_len = self.max_seq_len
+        
+        # Extract initial pitch sequence
+        out_pitch = prompts['pitch']  # [B, T_prompt]
+        b, t = out_pitch.shape
+
+        if verbose:
+            print(f"Generating sequence of length: {seq_len}")
+
+        # Verify arrow_sequence has correct length
+        assert arrow_sequence.shape[1] == seq_len, \
+            f"Arrow sequence length {arrow_sequence.shape[1]} must match seq_len {seq_len}"
+
+        # KV cache
+        cache = None 
+        seq_start_pos = None
+
+        # Generate seq_len new pitches
+        for sl in range(seq_len):
+            # Get current arrow for this step
+            current_arrow = arrow_sequence[:, sl:sl+1]  # [B, 1]
+
+            # Prepare context (restrict to max_seq_len if needed)
+            if restrict_to_max_seq_len:
+                context_pitch = out_pitch[:, -max_seq_len:]
+                # Create arrow context by extracting from pitch history
+                if context_pitch.shape[1] > 1:
+                    context_arrows = pitch_to_arrow(context_pitch)  # [B, T-1]
+                    # Append current arrow
+                    context_arrows = torch.cat([context_arrows, current_arrow], dim=1)  # [B, T]
+                else:
+                    # First step: only current arrow
+                    context_arrows = current_arrow  # [B, 1]
+                
+                # Pad pitch context to match arrow context length if needed
+                if context_arrows.shape[1] > context_pitch.shape[1]:
+                    # This shouldn't happen, but handle it gracefully
+                    context_pitch = context_pitch[:, -(context_arrows.shape[1]):]
+            else:
+                context_pitch = out_pitch
+                # Extract arrows from full history
+                if context_pitch.shape[1] > 1:
+                    context_arrows = pitch_to_arrow(context_pitch)
+                    context_arrows = torch.cat([context_arrows, current_arrow], dim=1)
+                else:
+                    context_arrows = current_arrow
+            
+            # Create decoder input
+            decoder_input = {
+                'pitch': context_pitch,
+                'arrow': context_arrows
+            }
+            
+            # Forward through decoder
+            logits, new_cache = self.decoder(
+                decoder_input,
+                return_intermediates=True,
+                cache=cache,
+                seq_start_pos=seq_start_pos
             )
-        )
-        
-        # Weight by step size and add to total loss
-        step_loss = step_weight * disagreement_penalty.mean()
-        total_loss += step_loss
-        
-    return total_loss
 
-def interval_preservation_loss(pitches, buttons, max_steps=5):
-    """
-    Encourages the relative magnitudes of intervals to be preserved
-    between pitches and buttons.
-    """
-    batch_size, seq_len = pitches.shape
-    total_loss = torch.zeros(1, device=pitches.device)
-    
-    # Normalize both to [0,1] range for fair comparison
-    pitch_range = (pitches.max(dim=1, keepdim=True)[0] - pitches.min(dim=1, keepdim=True)[0]).clamp(min=1e-5)
-    button_range = (buttons.max(dim=1, keepdim=True)[0] - buttons.min(dim=1, keepdim=True)[0]).clamp(min=1e-5)
-    
-    norm_pitches = (pitches - pitches.min(dim=1, keepdim=True)[0]) / pitch_range
-    norm_buttons = (buttons - buttons.min(dim=1, keepdim=True)[0]) / button_range
-    
-    for step in range(1, min(max_steps + 1, seq_len)):
-        # Calculate normalized intervals
-        pitch_intervals = torch.abs(norm_pitches[:, step:] - norm_pitches[:, :-step])
-        button_intervals = torch.abs(norm_buttons[:, step:] - norm_buttons[:, :-step])
-        
-        # Compute difference between normalized intervals
-        interval_diff = torch.abs(pitch_intervals - button_intervals)
-        
-        # Weight by step size (closer relationships matter more)
-        step_weight = 1.0 / step
-        step_loss = step_weight * interval_diff.mean()
-        
-        total_loss += step_loss
-        
-    return total_loss
+            if cache_kv and self.decoder.can_cache_kv:
+                cache = new_cache
 
-def melodic_shape_loss(pitches, buttons, window_size=5):
-    """
-    Preserves the overall shape of melodic phrases by comparing
-    the pattern of ups and downs within sliding windows.
-    Vectorized with unfold + broadcasting for better gradient flow and speed.
-    """
-    batch_size, seq_len = pitches.shape
-    if seq_len < window_size:
-        return torch.zeros(1, device=pitches.device)
+            # Get logits for last position
+            logits = logits[:, -1]  # [B, vocab_size]
 
-    pad = window_size // 2
-    # B x T -> B x (T) x W windows centered at each position
-    p_win = F.pad(pitches.float(), (pad, pad), mode='reflect').unfold(1, window_size, 1)
-    b_win = F.pad(buttons.float(), (pad, pad), mode='reflect').unfold(1, window_size, 1)
+            # Apply filtering (top_k, top_p, etc.)
+            filtered_logits = filter_logits_fn(logits, **filter_kwargs)
 
-    # Pairwise differences within each window: B x T x W x W
-    p_pairs = p_win.unsqueeze(-1) - p_win.unsqueeze(-2)
-    b_pairs = b_win.unsqueeze(-1) - b_win.unsqueeze(-2)
+            # Sample from distribution
+            probs = F.softmax(filtered_logits / temperature, dim=-1)
+            sample = torch.multinomial(probs, 1)  # [B, 1]
+            
+            # Append to output
+            out_pitch = torch.cat((out_pitch, sample), dim=-1)
+            
+            if verbose and sl % 32 == 0:
+                print(f"{sl} / {seq_len}")
 
-    # Soft sign to keep gradients
-    scale = 5.0
-    p_signs = torch.tanh(scale * p_pairs)
-    b_signs = torch.tanh(scale * b_pairs)
+        if return_prime:
+            return out_pitch  # [B, T_prompt + seq_len]
+        else:
+            return out_pitch[:, t:]  # [B, seq_len]
 
-    sign_agree = p_signs * b_signs  # 1 when same direction
-    disagreement = (1 - sign_agree).clamp_min(0.0)
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
 
-    # Mean over pairwise dims W x W, then over positions and batch
-    window_loss = disagreement.mean(dim=(-1, -2))  # B x T
-    return window_loss.mean()
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
 
-def normalized_position_loss(pitches, buttons, num_buttons, window_size=15):
-    """
-    Calculates loss between normalized positions of pitches and buttons.
-    
-    Args:
-        pitches: Tensor of shape [batch, seq_len] containing pitch values
-        buttons: Tensor of shape [batch, seq_len] containing button values
-        window_size: Size of window to calculate local min/max for pitches
-    
-    Returns:
-        A differentiable loss tensor
-    """
-    batch_size, seq_len = pitches.shape
-    
-    # Convert to float for calculations
-    pitches = pitches.float()
-    buttons = buttons.float()
-    
-    # Calculate normalized button positions (0 to 1)
-    # If 'buttons' is continuous encoder output e in [-1, 1], map to [0, 1].
-    # If it is discrete indices [0..num_buttons-1], scale accordingly.
-    norm_buttons = (buttons + 1.0) * 0.5
-    norm_buttons = norm_buttons.clamp(0.0, 1.0)
-    
-    # Calculate normalized pitch positions using sliding window (vectorized)
-    pad = window_size // 2
-    frames = F.pad(pitches, (pad, pad), mode='reflect').unfold(1, window_size, 1)  # B x T x W
-    local_min = frames.min(dim=2, keepdim=False)[0]
-    local_max = frames.max(dim=2, keepdim=False)[0]
-    range_size = (local_max - local_min).clamp(min=1e-6)
-    norm_pitches = (pitches - local_min) / range_size
-    
-    # Calculate quadratic difference between normalized positions
-    position_diff = torch.square(norm_pitches.clamp(0.0, 1.0) - norm_buttons)
-    
-    return position_diff.mean()
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
 
-
-
-def pitch_button_correlation_loss(pitches, e, window_size=15, tendency_distance=40):
-    """
-    Calculates loss that correlates pitch tendencies with button concentrations.
+        acc = num_right / len(labels) 
+        return acc
     
-    Args:
-        pitches: Tensor of shape [batch, seq_len] containing pitch values
-        e: Tensor of shape [batch, seq_len] containing encoder outputs in [-1,1] range
-        window_size: Size of window to calculate local pitch means
-        tendency_distance: Distance between tokens to calculate pitch tendency
-    
-    Returns:
-        A differentiable loss tensor
-    """
-    batch_size, seq_len = pitches.shape
-    
-    # Convert to float for calculations
-    pitches = pitches.float()
-    e = e.float()
-    
-    # Calculate pitch means for each position using sliding window
-    # Sliding window means via unfold (keeps gradients and is efficient)
-    pad = window_size // 2
-    padded = F.pad(pitches, (pad, pad), mode='reflect')
-    frames = padded.unfold(1, window_size, 1)
-    pitch_means = frames.mean(dim=2)
-    
-    # Calculate pitch tendencies by comparing current pitch_mean with earlier pitch_mean
-    pitch_tendencies = torch.zeros_like(pitches)
-    
-    for i in range(tendency_distance, seq_len):
-        # Compare current pitch_mean with pitch_mean from tendency_distance steps ago
-        current_pitch_mean = pitch_means[:, i:i+1]
-        earlier_pitch_mean = pitch_means[:, i-tendency_distance:i-tendency_distance+1]
-        pitch_tendencies[:, i:i+1] = current_pitch_mean - earlier_pitch_mean
-    
-    # Calculate button concentrations (mean of e values in sliding window)
-    # Button concentrations with unfold
-    padded_e = F.pad(e, (pad, pad), mode='reflect')
-    frames_e = padded_e.unfold(1, window_size, 1)
-    button_concentrations = frames_e.mean(dim=2)
-    
-    # Calculate correlation loss
-    # We want:
-    # - High pitch tendencies (positive) to correlate with high button concentrations (>0)
-    # - Low pitch tendencies (negative) to correlate with low button concentrations (<0)
-    # So their product should be positive in both cases
-    
-    # Only consider positions where we have valid pitch tendencies
-    valid_mask = torch.zeros_like(pitch_tendencies)
-    valid_mask[:, tendency_distance:] = 1.0
-    
-    # Calculate correlation only for valid positions
-    correlation = pitch_tendencies * button_concentrations * valid_mask
-    
-    # Penalize when correlation is negative (opposite tendencies)
-    loss = torch.square(
-        torch.maximum(
-            -correlation,  # Negative when tendencies are opposite
-            torch.zeros_like(correlation)
-        )
-    ).sum() / valid_mask.sum().clamp(min=1e-6)  # Average only over valid positions
-    
-    return loss
-
-def button_concentration_loss(e, note_tokens, num_buttons, window_size=15, tendency_distance=40, button_concentration_window_size=12):
-    """
-    Calculates loss that enforces button concentration in a BUTTON_CONCENTRATION_WINDOW_SIZE window
-    that shifts based on pitch tendency.
-    
-    Args:
-        e: Tensor of shape [batch, seq_len] containing encoder outputs in [-1,1] range
-        note_tokens: Dictionary containing pitch tokens
-        window_size: Size of window to calculate local pitch means
-        tendency_distance: Distance between tokens to calculate pitch tendency
-    
-    Returns:
-        A differentiable loss tensor
-    """
-
-    batch_size, seq_len = e.shape
-    pitches = note_tokens['pitch'][:, 1:]  # Use same pitch slice as in other functions
-    
-    # Convert to float for calculations
-    pitches = pitches.float()
-    e = e.float()
-    
-    # Calculate pitch means for each position using sliding window (unfold keeps grad)
-    pad = window_size // 2
-    padded = F.pad(pitches, (pad, pad), mode='reflect')
-    frames = padded.unfold(1, window_size, 1)
-    pitch_means = frames.mean(dim=2)
-    
-    # Calculate pitch tendencies by comparing current pitch_mean with earlier pitch_mean
-    pitch_tendencies = torch.zeros_like(pitches)
-    
-    for i in range(tendency_distance, seq_len):
-        # Compare current pitch_mean with pitch_mean from tendency_distance steps ago
-        current_pitch_mean = pitch_means[:, i:i+1]
-        earlier_pitch_mean = pitch_means[:, i-tendency_distance:i-tendency_distance+1]
-        pitch_tendencies[:, i:i+1] = current_pitch_mean - earlier_pitch_mean
-    
-    # Scale pitch tendencies to control window shift
-    # Use tanh to bound the tendencies and scale appropriately
-    scaled_tendency = torch.tanh(pitch_tendencies / 10.0)  # Normalize pitch differences
-    
-    # Calculate target center for button concentration window
-    # e range [-1,1] equivalent to button range [0-18]
-    # BUTTON_CONCENTRATION_WINDOW_SIZE (12) in e space = 12/19*2 = 1.263
-    window_size_e = button_concentration_window_size / num_buttons * 2  # 1.263
-    max_shift = (2 - window_size_e) / 2  # Maximum shift from center = (2-1.263)/2 = 0.368
-    
-    # For positive tendency: shift toward +1 (high buttons)
-    # For negative tendency: shift toward -1 (low buttons)
-    # For neutral tendency: center at 0
-    target_center = scaled_tendency * max_shift
-    
-    # Calculate how far e values are from their target center
-    distance_from_center = torch.abs(e - target_center)
-    
-    # Penalize when e values are too far from their target center
-    # Allow for half the window size on each side
-    allowed_distance = window_size_e / 2  # 1.263/2 = 0.632
-    
-    # Only consider positions where we have valid pitch tendencies
-    valid_mask = torch.zeros_like(pitch_tendencies)
-    valid_mask[:, tendency_distance:] = 1.0
-    
-    # Calculate loss only for valid positions
-    violations = torch.maximum(
-        distance_from_center - allowed_distance,
-        torch.zeros_like(distance_from_center)
-    ) * valid_mask
-    
-    loss = torch.square(violations).sum() / valid_mask.sum().clamp(min=1e-6)
-    
-    return loss
-
-#===================================================
-def windowed_correlation_loss(
-    pitches: Tensor,
-    e: Tensor,
-    window_size: int = 11,
-    eps: float = 1e-6
-) -> Tensor:
-    """
-    Sliding-window Pearson correlation loss between normalized pitch windows
-    and encoder output windows. Maximizes correlation by minimizing (1 - corr).
-
-    Args:
-        pitches: [B, T] float tensor (e.g., MIDI semitones)
-        e:       [B, T] float tensor in [-1, 1]
-        window_size: odd window size for local correlation (>=3)
-        eps: small constant for numerical stability
-        use_abs_corr: if True, maximize |corr| (reward negative correlation too)
-
-    Returns:
-        Scalar tensor loss.
-    """
-    B, T = pitches.shape
-    if T < window_size:
-        # Return differentiable zero tensor on correct device/dtype
-        return torch.zeros((), device=pitches.device, dtype=e.dtype, requires_grad=True)
-
-    p = pitches.float()
-    x = e.float()
-
-    # Extract sliding windows [B, n_windows, window_size]
-    pw = p.unfold(1, window_size, 1)
-    xw = x.unfold(1, window_size, 1)
-
-    # Z-score normalize per window (mean 0, std 1)
-    pw = pw - pw.mean(dim=2, keepdim=True)
-    xw = xw - xw.mean(dim=2, keepdim=True)
-    pw = pw / (pw.std(dim=2, keepdim=True).clamp(min=eps))
-    xw = xw / (xw.std(dim=2, keepdim=True).clamp(min=eps))
-
-    # Compute Pearson correlation per window
-    corr = (pw * xw).mean(dim=2).clamp(min=-1.0, max=1.0)  # [B, n_windows]
-
-    #  Define loss (maximize correlation → minimize 1 - corr)
-    loss = (1.0 - corr).clamp_min(0.0)  # focus on positive correlation only
-
-    # 5️⃣ Return mean loss across batch and windows
-    return loss.mean()
-
-#===================================================
-def button_held_loss(
-    pitches: Tensor,
-    e: Tensor,
-    num_buttons: int,
-) -> Tensor:
-    """
-     When the melody moves to a different note, the latent/button trajectory should also change meaningfully (roughly a bin’s worth). 
-    This loss nudges e to move at least ~0.8 of one bin on pitch changes, while not penalizing positions where the pitch is held (mask is 0 there).
-    It’s “soft” and fully differentiable (uses the continuous e and ReLU-like clamping), so it’s training-friendly.
-    Args:
-        pitches: [B, T] float tensor (e.g., MIDI semitones)
-        e:       [B, T] float tensor in [-1, 1]
-        window_size: odd window size for local correlation (>=3)
-        eps: small constant for numerical stability
-        use_abs_corr: if True, maximize |corr| (reward negative correlation too)
-
-    Returns:
-        Scalar tensor loss.
-    """
-    # Soft button-held penalty using continuous e (keeps gradients)
-    # Identifies when consecutive notes are different (pitch change)
-    # Penalizes same button values when consecutive notes are different
-    # Helps maintain consistency in the mapping
-    notes_diff = (pitches[:, 1:] != pitches[:, :-1]).float() # a mask notes_diff that is 1 where the pitch changes between time t−1 and t, and 0 where it stays the same.
-    delta_e = torch.abs(torch.diff(e, dim=1)) #  the absolute step size in e between consecutive steps: |e_t − e_{t-1}|
-    bin_size = 2.0 / (num_buttons - 1) # the size of one button bin, which is 2/(num_buttons−1)
-    margin = 0.8 * bin_size #  minimum desired movement threshold 80% of one bin
-    loss = ((margin - delta_e).clamp_min(0.0) * notes_diff).mean() #Penalizes steps where the pitch changed but e moved less than margin. Averages over batch and time to get a scalar.
-    return loss

@@ -44,7 +44,7 @@ from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset, load_from_disk
 
 from params import *
-from midiUtils import tokens_to_dict, Any_Pickle_File_Reader
+from midiUtils import Any_Pickle_File_Reader
 from model_loader import load_model
 from x_transformer import *
 

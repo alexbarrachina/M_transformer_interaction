@@ -32,7 +32,7 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model_name = 'loss_norm_pos'
+model_name = 'contour+loss_norm_pos'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)

@@ -25,14 +25,15 @@ import random
 import os
 from tqdm import tqdm
 
-from midiUtils import midi2ms_score, Any_Pickle_File_Writer #, DUR_OFF, PITCH_OFF, VEL_OFF, time2quant, dur2quant
-from params import *
+from midiUtils import midi2ms_score, Any_Pickle_File_Writer
+from params import OFFSET_DUR, OFFSET_PITCH, OFFSET_VEL, OFFSET_CHAN
 
 # Offsets create non-overlapping ranges for each token type
 # DTIME 0-127
 # DUR 128-255
 # PITCH 256-383
 # VEL 384-511
+# CHAN 512-639
 
 # Process MIDIs
 
@@ -43,9 +44,20 @@ def time2quant(time):
 def dur2quant(dur):
     return int(dur/20)
 
-
+melody_only = True # if True, only process melody notes (channel 0)
 sorted_or_random_file_loading_order = False # Sorted order is NOT usually recommended
-dataset_ratio = 1 # Change this if you need more data
+dataset_ratio = 1 # Change this if you need more or less % of the dataset
+
+# train_and_test_ratio = 1. # 100% for training
+train_and_test_ratio = 0.8 # 80% for training, 20% for testing
+
+# Melody channel filter
+MELODY_CHANNEL = 0  # Channel 0 is melody
+
+if melody_only:
+    print(f'Processing MIDI files for MELODY ONLY (channel {MELODY_CHANNEL}). Please wait...')
+else:
+    print('Processing MIDI files for ALL CHANNELS. Please wait...')
 
 ###########
 
@@ -54,11 +66,15 @@ files_count = 0
 gfiles = []
 
 train_data1 = []
+test_data1 = []
 
 ###########
 
 # dataset_addr = "./Samples"  # when testing
-dataset_addr = "../../../DataSets/MIDI/giantMIDI/test"
+dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_chan_segmented"
+# Output file names
+output_name = 'giantmidi_full_melody'
+
 
 filez = list()
 for (dirpath, dirnames, filenames) in os.walk(dataset_addr):
@@ -100,31 +116,46 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
         
         if len(events_matrix) > 0:
 
-          # Sorting...
-          events_matrix.sort(key=lambda x: x[4], reverse=True)
-          events_matrix.sort(key=lambda x: x[1])
+          # Sorting by pitch (descending) then by time (ascending). when the second sort reorders by time, 
+          # notes with the same start time (i.e., chords) retain their relative order from the first sort (by pitch descending).
+          events_matrix.sort(key=lambda x: x[4], reverse=True) # pitch
+          events_matrix.sort(key=lambda x: x[1]) # time
 
-          # recalculating timings
-          for e in events_matrix:
+          # Filter for melody notes BEFORE timing recalculation
+          # This ensures delta times are calculated between consecutive melody notes
+          if melody_only:
+            # event format: ['note', start_time, duration, channel, pitch, velocity]
+            filtered_events_matrix = [e for e in events_matrix if e[3] == MELODY_CHANNEL]
+          else:
+            filtered_events_matrix = events_matrix
+          
+          # Skip files with no notes after filtering
+          if len(filtered_events_matrix) == 0:
+              continue
+
+          # Recalculating timings (quantize) 
+          for e in filtered_events_matrix:
               e[1] = time2quant(e[1])
               e[2] = dur2quant(e[2])
-          
-          # final processing...
 
-            # TODO comprovar l'ordre correcte
-          #train_data1.extend([0+PITCH_OFF, 126+0, 126+DUR_OFF, 0+VEL_OFF]) # Intro/Zero seq
-          train_data1.extend([126+0, 126+OFFSET_DUR, 0+OFFSET_PITCH, 0+OFFSET_VEL]) # Intro/Zero seq
+          # Determine if this file goes to train or test
+          is_train = random.random() < train_and_test_ratio
+          target_data = train_data1 if is_train else test_data1
 
-          pe = events_matrix[0]
-          for e in events_matrix:
+          # Intro/Zero seq with channel 0 (5 tokens)
+          target_data.extend([126+0, 126+OFFSET_DUR, 0+OFFSET_PITCH, 0+OFFSET_VEL, 0+OFFSET_CHAN])
+
+          pe = filtered_events_matrix[0]
+          for e in filtered_events_matrix:
 
               time = max(0, min(126, e[1]-pe[1]))
               dur = max(1, min(126, e[2]))
+              chan = max(0, min(15, e[3]))  # Channel 0-15
               ptc = max(1, min(126, e[4]))
               vel = max(1, min(126, e[5]))
 
-              #train_data1.extend([ptc+PITCH_OFF, time+0, dur+DUR_OFF, vel+VEL_OFF]) # re-order to priorize pitch output first
-              train_data1.extend([time+0, dur+OFFSET_DUR, ptc+OFFSET_PITCH, vel+OFFSET_VEL]) # re-order to priorize pitch output first
+              # 5 tokens per note: dtime, dur, chan, pitch, vel
+              target_data.extend([time+0, dur+OFFSET_DUR, ptc+OFFSET_PITCH, vel+OFFSET_VEL, chan+OFFSET_CHAN])
 
               pe = e
 
@@ -134,13 +165,25 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
         print('Quitting...')
         break  
 
-    except:
-        print('Bad MIDI:', f)
+    except Exception as ex:
+        print(f'Bad MIDI: {f} - {ex}')
         continue
 
-print('=' * 70)
-Any_Pickle_File_Writer(train_data1, './Training-Data/processedMIDIs')        
-print('Done!')   
-print(str(len(train_data1)) + ' tokens')
+# Save training data
+output_path = './Training-Data/' + output_name + '_train'
+print('Saving training data...')
+Any_Pickle_File_Writer(train_data1, output_path)        
+print(f'Training data saved to {output_path}.pickle')   
+print(f'{len(train_data1)} tokens ({len(train_data1)//5} notes)')
 print('=' * 70)
 
+# Save test data
+if train_and_test_ratio < 1.:
+    print('Saving test data...')
+    output_path = './Training-Data/' + output_name + '_test'
+    Any_Pickle_File_Writer(test_data1, output_path)
+    print(f'Test data saved to {output_path}.pickle')
+    print(f'{len(test_data1)} tokens ({len(test_data1)//5} notes)')
+    print('=' * 70)
+
+print('Done!')

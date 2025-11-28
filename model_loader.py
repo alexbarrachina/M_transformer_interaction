@@ -164,6 +164,19 @@ def load_model(model_name='default',
                 attn_flash = True
             )
         )
+    elif cfg['model_type'] == 'autoencoder_melody':
+        # Melody autoencoder with arrow guidance (no encoder needed)
+        mpt_model = AutoregressiveAutoencoder_melody(
+            cfg = cfg,
+            decoder = Decoder_melody(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
+        )
     if set_only == False:
         model_path = cfg['ckpt_file_name']
 

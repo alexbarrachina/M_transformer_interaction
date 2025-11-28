@@ -108,6 +108,8 @@ OFFSET_DTIME:Final[int] = 0
 OFFSET_DUR:Final[int] = 128
 OFFSET_PITCH:Final[int] = 256
 OFFSET_VEL:Final[int] = 384
+OFFSET_CHAN:Final[int] = 512
+OFFSET_END:Final[int] = 640  # End marker for token ranges
 
 
 
