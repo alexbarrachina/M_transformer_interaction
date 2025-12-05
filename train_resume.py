@@ -51,16 +51,18 @@ from x_transformer import *
 #==========================================================================
 
 class MusicSamplerDataset(Dataset):
-    def __init__(self, data, seq_len, is_eval=False):
+    def __init__(self, data, seq_len, is_eval=False, cfg=None):
         super().__init__()
 
         self.data = data
         self.seq_len = seq_len
-        self.seq_tot_tokens = self.seq_len * 4 + 4 # 4 tokens per note + 4 for the current note
+        self.tokens_per_note = 5  # dtime, dur, pitch, vel, chan (no offsets)
+        self.seq_tot_tokens = self.seq_len * self.tokens_per_note + self.tokens_per_note
+        self.cfg = cfg if cfg is not None else {}
 
 
     def __len__(self):
-        return int(self.data.size(0) / (self.seq_len * 4 + 4))  #  self.seq_len if you want exact training time per epoch
+        return int(self.data.size(0) / self.seq_tot_tokens)
 
     def __getitem__(self, index): # TODO concatenates all data, end of files with begining of files
         seq_tot_tokens = self.seq_tot_tokens
@@ -72,11 +74,13 @@ class MusicSamplerDataset(Dataset):
         # Extract sequences for each feature, +1 to include the current token
         x = self.data[rand: rand + seq_tot_tokens] # we take an extra token
 
-        # convert to tensors, move to device
-        dtimes = x[0::4].long()  # Every 4th token starting at index 0. observed min = 0, max = 70
-        durs = (x[1::4] - OFFSET_DUR).long()  # Every 4th token starting at index 2. observed min = 1, max = 74
-        pitches = (x[2::4] - OFFSET_PITCH).long()  # Every 4th token starting at index 3. observed min = 30, max = 88
-        #vels = (x[3::4] - OFFSET_VEL).long()  # Every 4th token starting at index 4. observed min = 30, max = 88
+        # Convert to tensors
+        # Pickle format: [dtime, dur, pitch, vel, chan] (5 tokens per note, no offsets)
+        dtimes = x[0::5].long()  # Every 5th token starting at index 0
+        durs = x[1::5].long()  # Every 5th token starting at index 1
+        pitches = x[2::5].long()  # Every 5th token starting at index 2
+        vels = x[3::5].long()  # Every 5th token starting at index 3
+        channels = x[4::5].long()  # Every 5th token starting at index 4
 
         # Data augmentation
         # Time stretching
@@ -120,6 +124,7 @@ class MusicSamplerDataset(Dataset):
         abs_times = abs_times[sorted_indices]
         durs = durs[sorted_indices]
         pitches = pitches[sorted_indices]
+        channels = channels[sorted_indices]
         
         # Convert back to delta times
         dtimes = torch.cat([abs_times[0:1], abs_times[1:] - abs_times[:-1]])
@@ -135,7 +140,8 @@ class MusicSamplerDataset(Dataset):
 
         feature_data = {
                 'dtime': dtimes,
-                'dur':  durs,
+                'dur': durs,
+                'channel': channels,
                 'pitch': pitches
                 #'vel': vels
             }
@@ -278,7 +284,7 @@ def main():
     print(f"Dataset size: {len(train_dataset)}")
     train_loader  = DataLoader(train_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=True)
     print(f"Number of batches: {len(train_loader)}")
-    val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True) # train in chunks of SEQ_LEN
+    val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True, cfg=cfg) # train in chunks of SEQ_LEN
     val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False)
 
     #==========================================================================
@@ -335,6 +341,7 @@ def main():
                 x = {
                     'dtime': batch['dtime'].to(device),
                     'dur': batch['dur'].to(device),
+                    'channel': batch['channel'].to(device),
                     'pitch': batch['pitch'].to(device)
                 }
 
@@ -369,6 +376,7 @@ def main():
                             x = {
                                 'dtime': batch['dtime'].to(device),
                                 'dur': batch['dur'].to(device),
+                                'channel': batch['channel'].to(device),
                                 'pitch': batch['pitch'].to(device)
                             }
                             # run the model

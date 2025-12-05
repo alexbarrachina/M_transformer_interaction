@@ -46,8 +46,6 @@ import statistics
 import math
 import matplotlib.pyplot as plt
 
-from params import OFFSET_DUR, OFFSET_PITCH, OFFSET_VEL, OFFSET_CHAN, OFFSET_END
-
 import torch
 
 _previous_warning = ''  # 5.4
@@ -2078,91 +2076,22 @@ SEMITONES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 ###################################################################################
 
 
-def tokens_to_dict(data):
-        
-        filtered_score = []
-
-        for entry in tqdm.tqdm(data):
-            score = entry['midi_score']
-
-            i = 0
-            while i < len(score):
-                if score[i] < OFFSET_VEL:  # Process valid tokens (dtime, pitch, dur)
-                    # If we're missing notes in a triplet (chord case), add dtime=0
-                    if score[i] > OFFSET_DUR and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
-                        filtered_score.append(0)  # Insert dtime=0 for chord notes
-                    
-                    # range checker. We don't need it for now.
-                    if len(filtered_score) % 3 == 0:
-                        assert(score[i] < OFFSET_DUR), "not a valid dtime"
-                    if len(filtered_score) % 3 == 1:
-                        assert(127 < score[i] < OFFSET_PITCH), "not a valid dur"
-                    if len(filtered_score) % 3 == 2:
-                        assert (255 < score[i] < OFFSET_VEL), "not a valid pitch"
-
-                    # revert offsets to homogenize the data for the purpose of aggregating embbedings
-                    offset = 0
-                    if len(filtered_score) % 3 == 1:
-                        offset = OFFSET_DUR
-                    elif len(filtered_score) % 3 == 2:
-                        offset = OFFSET_PITCH
-
-                    filtered_score.append(score[i] - offset)
-                i += 1
-
+'''def tokens_to_dict(score):
         # Ensure we have complete triplets
-        assert len(filtered_score) % 3 == 0, "Data length must be divisible by 3 (dtime, pitch, dur)"
+        assert len(score) % 5 == 0, "Data length must be divisible by 5 (dtime, pitch, dur, vel, channel)"
 
-        num_notes = len(filtered_score) // 3
+        num_notes = len(score) // 5
         feature_data = {
-            'dtime': filtered_score[0::3],  # Every 3rd token starting at index 0. observed min = 0, max = 70
-            'dur': filtered_score[1::3],  # Every 3rd token starting at index 2. observed min = 1, max = 74
-            'pitch': filtered_score[2::3]     # Every 3rd token starting at index 3. observed min = 30, max = 88
-        }
+          'dtime': score[0::5],  # Every 5th token starting at index 0. observed min = 0, max = 70
+          'dur': score[1::5],  # Every 5th token starting at index 2. observed min = 1, max = 74
+          'pitch': score[2::5],  # Every 5th token starting at index 3. observed min = 30, max = 88
+          'vel': score[3::5],  # Every 5th token starting at index 4. observed min = 0, max = 127
+          'channel': score[4::5]  # Every 5th token starting at index 5. observed min = 0, max = 15
+      }
 
         return feature_data, num_notes
 
-
-def midi_tokens_to_dict(score):
-        
-            filtered_score = []
-
-            i = 0
-            while i < len(score):
-                if score[i] < OFFSET_VEL:  # Process valid tokens (dtime, pitch, dur)
-                    # If we're missing notes in a triplet (chord case), add dtime=0
-                    if score[i] > OFFSET_DUR and len(filtered_score) % 3 == 0: # dur or pitch in dtime postion
-                        filtered_score.append(0)  # Insert dtime=0 for chord notes
-                    
-                    # range checker. We don't need it for now.
-                    if len(filtered_score) % 3 == 0:
-                        assert(score[i] < OFFSET_DUR), "not a valid dtime"
-                    if len(filtered_score) % 3 == 1:
-                        assert(127 < score[i] < OFFSET_PITCH), "not a valid dur"
-                    if len(filtered_score) % 3 == 2:
-                        assert (255 < score[i] < OFFSET_VEL), "not a valid pitch"
-
-                    # revert offsets to homogenize the data for the purpose of aggregating embbedings
-                    offset = 0
-                    if len(filtered_score) % 3 == 1:
-                        offset = OFFSET_DUR
-                    elif len(filtered_score) % 3 == 2:
-                        offset = OFFSET_PITCH
-
-                    filtered_score.append(score[i] - offset)
-                i += 1
-
-            # Ensure we have complete triplets
-            assert len(filtered_score) % 3 == 0, "Data length must be divisible by 3 (dtime, pitch, dur)"
-
-            num_notes = len(filtered_score) // 3
-            feature_data = {
-              'dtime': filtered_score[0::3],  # Every 3rd token starting at index 0. observed min = 0, max = 70
-              'dur': filtered_score[1::3],  # Every 3rd token starting at index 2. observed min = 1, max = 74
-              'pitch': filtered_score[2::3]     # Every 3rd token starting at index 3. observed min = 30, max = 88
-          }
-
-            return feature_data, num_notes
+'''
 
 def dict_to_song(dict_data, force_vel=True, force_chan=True):
     song_d = []
@@ -2202,21 +2131,116 @@ def to_device(tensor_or_dict, device):
     return tensor_or_dict
 
 #===================================================================================================
+'''
+def dict_to_midi(note_dict,
+                 custom_channel=-1,
+                 custom_velocity=-1,
+                 custom_patch=-1,
+                 output_signature='Monster genie',
+                 track_name='monster genie',
+                 output_midi_name='Monster-genie',
+                 return_ms_score=False,
+                 verbose=False
+                 ):
+
+    if verbose:
+        print('=' * 70)
+        print('Converting dict to MIDI...')
+    
+    # Extract features from dict
+    dtimes = note_dict.get('dtime', [])
+    durs = note_dict.get('dur', [])
+    pitches = note_dict.get('pitch', [])
+    vels = note_dict.get('vel', None)
+    channels = note_dict.get('channel', None)
+    
+    # Convert tensors to lists if needed
+    if hasattr(dtimes, 'tolist'):
+        dtimes = dtimes.tolist()
+    if hasattr(durs, 'tolist'):
+        durs = durs.tolist()
+    if hasattr(pitches, 'tolist'):
+        pitches = pitches.tolist()
+    if vels is not None and hasattr(vels, 'tolist'):
+        vels = vels.tolist()
+    if channels is not None and hasattr(channels, 'tolist'):
+        channels = channels.tolist()
+    
+    has_velocity = vels is not None and len(vels) > 0
+    has_channel = channels is not None and len(channels) > 0
+    
+    song_f = []
+    time = 0
+    patch = 0
+    
+    patches = [0] * 16
+    
+    if -1 < custom_patch < 128:
+        patch = custom_patch
+        if -1 < custom_channel < 16:
+            patches[custom_channel] = patch
+        else:
+            patches[0] = patch
+    
+    num_notes = min(len(dtimes), len(durs), len(pitches))
+    
+    for i in range(num_notes):
+        # Delta time (multiply by 32 to convert from quantized to ms)
+        dtime = dtimes[i] if i < len(dtimes) else 0
+        time += dtime * 32
+        
+        # Duration
+        dur = (durs[i] if i < len(durs) else 8) * 32
+        
+        # Pitch
+        pitch = pitches[i] if i < len(pitches) else 60
+        
+        # Velocity
+        if has_velocity and i < len(vels):
+            vel = vels[i]
+        elif 0 < custom_velocity < 128:
+            vel = custom_velocity
+        else:
+            vel = max(40, pitch)  # Default: velocity based on pitch
+        
+        # Channel
+        if -1 < custom_channel < 16:
+            channel = custom_channel
+        elif has_channel and i < len(channels):
+            channel = channels[i]
+        else:
+            channel = 0
+        
+        song_f.append(['note', time, dur, channel, pitch, vel, patch])
+    
+    if verbose:
+        print(f'Converted {num_notes} notes')
+        print('Done!')
+        print('=' * 70)
+    
+    detailed_stats = ms_SONG_to_MIDI_Converter(song_f,
+                                               output_signature=output_signature,
+                                               output_file_name=output_midi_name,
+                                               track_name=track_name,
+                                               list_of_MIDI_patches=patches,
+                                               verbose=verbose
+                                               )
+    
+    if verbose:
+        print('=' * 70)
+    
+    if return_ms_score:
+        return song_f
+    else:
+        return detailed_stats
+
+#===================================================================================================
 
 def midi_to_tokens(input_midi,
-                   encode_velocity=False,
-                   encode_channel=False,
+                   encode_velocity=True,
+                   encode_channel=True,
                    verbose=False
                    ):
-    '''
-    Encode MIDI to tokens
-    input_midi: MIDI file path
-    encode_velocity: bool, whether to encode velocity
-    encode_channel: bool, whether to encode channel
-    verbose: bool, whether to print verbose output
-    Eliminate redundant dtimes in chords.
-    output: dtime, dur, pitch, (vel), (channel)
-    '''
 
     if verbose:
         print('=' * 70)
@@ -2244,15 +2268,15 @@ def midi_to_tokens(input_midi,
         for n in c: # notes in chord event
             if encode_velocity: # add dur+pitch+vel
                 if encode_channel: # add dur+pitch+vel+channel
-                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH, max(1, min(127, n[5]))+OFFSET_VEL, n[3]])
+                    score.extend([max(1, min(127, n[2])), max(1, min(127, n[4])), max(1, min(127, n[5])), n[3]])
                 else: # add dur+pitch+vel
-                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH, max(1, min(127, n[5]))+OFFSET_VEL])
+                    score.extend([max(1, min(127, n[2])), max(1, min(127, n[4])), max(1, min(127, n[5]))])
 
             else: # add dur+pitch
                 if encode_channel: # add dur+pitch+channel
-                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH, n[3]])
+                    score.extend([max(1, min(127, n[2])), max(1, min(127, n[4])), n[3]])
                 else: # add dur+pitch
-                    score.extend([max(1, min(127, n[2]))+OFFSET_DUR, max(1, min(127, n[4]))+OFFSET_PITCH])
+                    score.extend([max(1, min(127, n[2])), max(1, min(127, n[4]))])
                 
             notes_counter += 1
     
@@ -2272,104 +2296,7 @@ def midi_to_tokens(input_midi,
         print('=' * 70)
         
     return score
-
-#===================================================================================================
-
-def tokens_to_midi(tokens,
-                   custom_channel=-1,
-                   custom_velocity=-1,
-                   custom_patch=-1,
-                   output_signature = 'Monster genie',
-                   track_name='monster genie',
-                   output_midi_name='Monster-genie',
-                   return_ms_score=False,
-                   verbose=False
-                   ):
-    
-    if verbose:
-        print('=' * 70)
-        print('Decoding tokens...')
-    
-    if [t for t in tokens if OFFSET_VEL < t < OFFSET_END]: # vel in tokens 384-511
-        model_with_velocity = True
-        
-    else:
-        model_with_velocity = False
-    
-    song = tokens
-    song_f = []
-
-    time = 0
-    dur = 8
-    vel = 90
-    pitch = 60
-    channel = 0
-    patch = 0
-
-    patches = [0] * 16
-    
-    if -1 < custom_channel < 16:
-        channel = custom_channel
-        
-    if -1 < custom_patch < 128:
-        patch = custom_patch
-        patches[channel] = patch
-
-    for m in song:
-
-        if 0 <= m < OFFSET_DUR: # dtime 0-127
-            time += m * 32
-
-        elif OFFSET_DUR < m < OFFSET_PITCH: # dur 128-255
-            dur = (m-OFFSET_DUR) * 32
-
-        elif OFFSET_PITCH < m < OFFSET_VEL: # pitch 256-383
-            pitch = (m-OFFSET_PITCH)
-            
-            if not model_with_velocity:
-                
-                if 0 < custom_velocity < 128:
-                    vel = custom_velocity
-                    
-                else:
-                    if not model_with_velocity:
-                        vel = max(40, pitch)
-                
-                song_f.append(['note', time, dur, channel, pitch, vel, patch])
-
-        elif OFFSET_VEL < m < OFFSET_END:
-            vel = (m-OFFSET_VEL)
-
-            if model_with_velocity:
-                
-                if 0 < custom_velocity < 128:
-                    vel = custom_velocity
-                    
-                song_f.append(['note', time, dur, channel, pitch, vel, patch])
-                
-    if verbose:
-        print('Done!')
-        print('=' * 70)
-                
-    detailed_stats = ms_SONG_to_MIDI_Converter(song_f,
-                                                                output_signature=output_signature,
-                                                                output_file_name=output_midi_name,
-                                                                track_name=track_name,
-                                                                list_of_MIDI_patches=patches,
-                                                                verbose=verbose
-                                                            )
-    
-    if verbose:
-        print('=' * 70)
-    
-    if return_ms_score:
-        return song_f
-
-    else:
-        return detailed_stats
-
-#===================================================================================================
-
+'''
 
 def midi_to_dict(input_midi,
                    encode_velocity=False,

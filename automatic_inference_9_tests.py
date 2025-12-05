@@ -24,7 +24,7 @@ import torch
 from params import *
 from model_loader import load_model
 from models import get_model_hparams
-from midiUtils import midi_to_tokens, midi_tokens_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
+from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 
 ''' DEVICE '''
 #device = torch.device('cpu')
@@ -54,12 +54,9 @@ for j in range(1, 9):  # generate 10 continuation files
 
   ''' BUILD CTX '''
   # Load seed MIDI
-  input_tokens = midi_to_tokens(sample_midi_path+str(j)+'.midi') # tokens, without vel
+  dict_input_tokens, num_notes = midi_to_dict(sample_midi_path+str(j)+'.midi') # tokens
 
-  output_tokens = input_tokens.copy()
-
-  dict_input_tokens, num_notes = midi_tokens_to_dict(input_tokens) # vel already filtered out
-  dict_output_tokens, num_notes = midi_tokens_to_dict(output_tokens) # vel already filtered out
+  dict_output_tokens = dict_input_tokens.copy()
 
   print("num_notes",num_notes)
   

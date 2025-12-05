@@ -27,7 +27,8 @@
 import time
 import torch
 
-from midiUtils import midi_to_dict, dict_to_song, ms_SONG_to_MIDI_Converter, monophonic_melody_mask
+from midiUtils import midi_to_dict, dict_to_song, ms_SONG_to_MIDI_Converter
+from preprocessUtils import monophonic_melody_mask
 
 ''' DEVICE '''
 #device = torch.device('cpu')
@@ -35,8 +36,9 @@ device = torch.device('mps')
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-sample_midi_path = './samples/test4.midi'
-output_midi_name = './out/test4'
+file_name='Baines_hkNo8ESFFZU'
+sample_midi_path = './samples/2hands/' + file_name + '.midi'
+output_midi_name = './out/' + file_name
 
 CHANNEL = 0
 
@@ -73,8 +75,8 @@ modified_features = {
     'chan': features['chan'].clone()
 }
 
-# change channel of selected melody notes to CHANNEL+1
-modified_features['chan'][melody_mask] = CHANNEL + 1
+# change channel of non-melody chord notes to CHANNEL+1
+modified_features['chan'][chord_mask] = CHANNEL + 1
 
 # convert to lists for MIDI generation
 output_tokens = {
@@ -87,7 +89,7 @@ output_tokens = {
 
 # generate a midi file from generated pitches
 print('Generating MIDI file...')
-print(f'Original notes on channel {CHANNEL}, monophonic melody on channel {CHANNEL+1}')
+print(f'melody notes on channel {CHANNEL}, chord notes on channel {CHANNEL+1}')
 
 song_d = dict_to_song(output_tokens, force_chan=False)
 detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,

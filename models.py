@@ -592,16 +592,36 @@ MODELS_PARAMETERS = {
         'model_type': 'autoencoder_melody',
         'description': 'Melody autoencoder with arrow guidance. Uses melody-only pickles (channel 0).',
         'train_log': '',
-        'ckpt_file_name': './save_models/melody_arrow_v1.pth',
+        'ckpt_file_name': './save_models/melody_arrow_v1_75_eps_152_steps_2.2351_loss_0.8008_acc.pth',
         'seq_len': 1024,
         'pad_idx': 128,
         'emb_dim': 2048,
         'num_layers': 4,
         'heads': 32,
         'loss_recons': 1.0,
+        'loss_arrow_consistency': 0.1,  # Weight for arrow consistency loss (soft arrows + KL divergence)
+        'arrow_soft_temp': 2.0,  # Temperature for soft arrow boundaries (lower = sharper)
         "dataset_train_path": "./Training-Data/giantmidi_full_melody_train", # './Training-Data/asigalov_train'
         "dataset_val_path": "./Training-Data/giantmidi_full_melody_test", # './Training-Data/asigalov_val'
 
+        "save_every": 15, # in epochs
+        },
+    'tester_arrow': {
+        'model_type': 'autoencoder_melody',
+        'description': 'Tester model for arrow consistency loss inspection.',
+        'train_log': '',
+        'ckpt_file_name': 'melody_arrow_v1_1140_eps_2282_steps_0.0187_loss_0.9978_acc.pth',
+        'seq_len': 32,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_recons': 1.0,
+        'loss_arrow_consistency': 0.1,  # Weight for arrow consistency loss (soft arrows + KL divergence)
+        'arrow_soft_temp': 2.0,  # Temperature for soft arrow boundaries (lower = sharper)
+        "dataset_train_path": "./Training-Data/tester_train", # './Training-Data/asigalov_train'
+        "dataset_val_path": "./Training-Data/tester_train", # './Training-Data/asigalov_val'
+        "batch_size": 1,
         "save_every": 15, # in epochs
         },
     }

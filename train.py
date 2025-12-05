@@ -73,12 +73,12 @@ class MusicSamplerDataset(Dataset):
         x = self.data[rand: rand + seq_tot_tokens] # we take an extra token
 
         # Convert to tensors
-        # Pickle format: [dtime, dur, chan, pitch, vel] (5 tokens per note)
+        # Pickle format: [dtime, dur, pitch, vel, chan] (5 tokens per note, no offsets)
         dtimes = x[0::5].long()  # Every 5th token starting at index 0
-        durs = (x[1::5] - OFFSET_DUR).long()  # Every 5th token starting at index 1
-        pitches = (x[2::5] - OFFSET_PITCH).long()  # Every 5th token starting at index 2
-        vels = (x[3::5] - OFFSET_VEL).long()  # Every 5th token starting at index 3
-        channels = (x[4::5] - OFFSET_CHAN).long()  # Every 5th token starting at index 4
+        durs = x[1::5].long()  # Every 5th token starting at index 1
+        pitches = x[2::5].long()  # Every 5th token starting at index 2
+        vels = x[3::5].long()  # Every 5th token starting at index 3
+        channels = x[4::5].long()  # Every 5th token starting at index 4
 
         # Data augmentation
         # Time stretching
@@ -271,6 +271,8 @@ def main():
                             wandb.log({"loss_button_held": cfg['loss_button_held']*loss['loss_button_held'].item()}, step=nsteps)
                         if cfg['loss_recons']>0 and 'loss_recons' in loss: 
                             wandb.log({"loss_recons": cfg['loss_recons']*loss['loss_recons'].item()}, step=nsteps)
+                        if cfg.get('loss_arrow_consistency', 0)>0 and 'loss_arrow_consistency' in loss: 
+                            wandb.log({"loss_arrow_consistency": cfg['loss_arrow_consistency']*loss['loss_arrow_consistency'].item()}, step=nsteps)
                         
                         nsteps += 1
 

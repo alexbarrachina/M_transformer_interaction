@@ -55,6 +55,8 @@ DEFAULT_HPARAMS = {
     "loss_multi_step_perc": 1., # 0.3, original # considers relationships between the current note and multiple previous notes (in directions, not magnitude, -1,+1)
     "loss_interval_perc": 0., # 0.2, original # Encourages the relative magnitudes of intervals to be preserved between pitches and buttons
     "loss_shape_perc": 0., # 0.1, original # Preserves the overall shape of melodic phrases by comparing the pattern of ups and downs within sliding windows.
+    'loss_arrow_consistency': 0.1, # Weight for arrow consistency loss (soft arrows + KL divergence)
+    'arrow_soft_temp': 2.0, # Temperature for soft arrow boundaries (lower = sharper)
 
     # training parameters
     'learning_rate': 1e-4,
@@ -103,15 +105,6 @@ VOCAB_SIZE_DUR:Final[int] = RANGE_DUR_SHIFT + 1
 
 RANGE_VEL_SHIFT:Final[int] = 127 
 VOCAB_SIZE_VEL:Final[int] = RANGE_VEL_SHIFT + 1
-
-OFFSET_DTIME:Final[int] = 0
-OFFSET_DUR:Final[int] = 128
-OFFSET_PITCH:Final[int] = 256
-OFFSET_VEL:Final[int] = 384
-OFFSET_CHAN:Final[int] = 512
-OFFSET_END:Final[int] = 640  # End marker for token ranges
-
-
 
 ''' TRAINING '''
 # Taken from the paper

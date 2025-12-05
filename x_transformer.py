@@ -3389,44 +3389,6 @@ class Encoder_antic(nn.Module):
         return out.squeeze(-1) # (B, T (seq_len)) (20, 1024)
     
 
-
-def pitch_to_arrow(pitch_seq: Tensor) -> Tensor:
-    """
-    Convert pitch sequence to arrow sequence based on pitch differences.
-    Arrow mapping:
-        a=0: dPitch <= -8 (descending more than 7 semitones)
-        a=1: -7 <= dPitch <= -3 (descend between 3 and 7 semitones)
-        a=2: -2 <= dPitch <= -1 (descends 1 or 2 semitones)
-        a=3: dPitch = 0 (no change)
-        a=4: 1 <= dPitch <= 2 (increases 1 or 2 semitones)
-        a=5: 3 <= dPitch <= 7 (increases between 3 and 7 semitones)
-        a=6: dPitch >= 8 (increases more than 7 semitones)
-    
-    Args:
-        pitch_seq: Tensor of shape [B, T] containing pitch values
-    
-    Returns:
-        arrows: Tensor of shape [B, T-1] containing arrow indices (0-6)
-    """
-    # Calculate pitch differences: d[t] = pitch[t+1] - pitch[t]
-    d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T-1]
-    
-    # Initialize arrow tensor with zeros
-    arrows = torch.zeros_like(d, dtype=torch.long)
-    
-    # Apply mapping based on pitch difference ranges
-    # Note: conditions are mutually exclusive, applied in sequence
-    arrows = torch.where(d <= -8, torch.tensor(0, dtype=torch.long, device=d.device), arrows)
-    arrows = torch.where((d >= -7) & (d <= -3), torch.tensor(1, dtype=torch.long, device=d.device), arrows)
-    arrows = torch.where((d >= -2) & (d <= -1), torch.tensor(2, dtype=torch.long, device=d.device), arrows)
-    arrows = torch.where(d == 0, torch.tensor(3, dtype=torch.long, device=d.device), arrows)
-    arrows = torch.where((d >= 1) & (d <= 2), torch.tensor(4, dtype=torch.long, device=d.device), arrows)
-    arrows = torch.where((d >= 3) & (d <= 7), torch.tensor(5, dtype=torch.long, device=d.device), arrows)
-    arrows = torch.where(d >= 8, torch.tensor(6, dtype=torch.long, device=d.device), arrows)
-    
-    return arrows
-
-
 class Decoder_melody(nn.Module):
     """
     Decoder for melody generation using arrow guidance instead of learned buttons.
@@ -3573,6 +3535,128 @@ class AutoregressiveAutoencoder_melody(Module):
         self.decoder = decoder
         self.max_seq_len = decoder.max_seq_len
 
+    def soft_pitch_to_arrow(self, pitch_seq: Tensor, temperature: float = 1.0) -> Tensor:
+        """
+        Differentiable version of pitch_to_arrow using soft sigmoid boundaries.
+        Returns soft arrow probabilities [B, T-1, 7] instead of hard indices.
+        
+        Arrow mapping (same thresholds as pitch_to_arrow):
+            a=0: dPitch <= -8
+            a=1: -7 <= dPitch <= -3
+            a=2: -2 <= dPitch <= -1
+            a=3: dPitch = 0
+            a=4: 1 <= dPitch <= 2
+            a=5: 3 <= dPitch <= 7
+            a=6: dPitch >= 8
+        
+        Args:
+            pitch_seq: Tensor of shape [B, T] containing pitch values
+            temperature: Controls sharpness of boundaries (lower = sharper)
+        
+        Returns:
+            soft_arrows: Tensor of shape [B, T-1, 7] with probability distribution over arrows
+        """
+        # 1. Ensure input is a float tensor and add a dimension for broadcasting
+        # We need to compare every single pitch difference against every single threshold.
+        d = (pitch_seq[:, 1:] - pitch_seq[:, :-1]).float()  # [B, T-1] pitch differences
+        d = d.unsqueeze(-1)  # [B, T-1, 1]
+        
+        # 2. Define the boundaries (Thresholds)
+        # These are the "thresholds" between the arrow bins.
+        # Note: -7.5 is the midpoint between -8 (Large Down) and -7 (Medium Down).
+        # Arrow boundaries: ..., -8, -3, -1, 0, 1, 3, 8, ...
+        # Midpoints:        -7.5, -2.5, -0.5, 0.5, 2.5, 7.5
+        thresholds = torch.tensor([-7.5, -2.5, -0.5, 0.5, 2.5, 7.5], device=d.device, dtype=d.dtype)
+        
+        # Compute soft membership using sigmoids
+        # 3. Compute the "Soft Greater Than" probabilities (The Sigmoid)
+        # This asks: "What is the probability that d is greater than this threshold?"
+        # If d is far above the threshold, result is ~1.0. If far below, result is ~0.0.
+        soft_geq = torch.sigmoid((d - thresholds) / temperature)  # [B, T-1, 6]
+        
+       
+        
+        # 4. Add the "Infinity" boundaries
+        # The probability of being > -infinity is always 1.0 (All numbers are > -inf)
+        # The probability of being > +infinity is always 0.0 (No numbers are > +inf)
+        ones = torch.ones(d.shape[0], d.shape[1], 1, device=d.device, dtype=d.dtype) # Represents boundary at -infinity
+        zeros = torch.zeros(d.shape[0], d.shape[1], 1, device=d.device, dtype=d.dtype) # Represents boundary at +infinity
+
+        # 5. Combine boundaries with soft probabilities
+        # This creates a "probability distribution" over the 7 arrow bins.
+        # The first bin (arrow 0) has probability 1.0 for all differences.
+        # The last bin (arrow 6) has probability 0.0 for all differences.
+        # The intermediate bins have probabilities based on how far above/below their threshold the difference is.
+        # We stack them: [1.0,  prob_>_T1,  prob_>_T2, ... , 0.0]
+        soft_geq_extended = torch.cat([ones, soft_geq, zeros], dim=-1)  # [B, T-1, 8]
+
+        # 6. Calculate the "probability of being in each arrow bin"
+        # This is the difference between the probabilities of being greater than or equal to each threshold.
+        # Probability(Arrow i) = Prob(d > Lower_Wall) - Prob(d > Upper_Wall)
+        # ex. probability of Arrow 1 = Probability we are between threshold 1 and threshold 2 = (Probability we are above threshold 1) minus (Probability we are above threshold 2)
+        soft_arrows = soft_geq_extended[..., :-1] - soft_geq_extended[..., 1:]  # [B, T-1, 7]
+        
+        return soft_arrows  # Probability distribution over 7 arrows
+
+    def arrow_consistency_loss(self, input_pitch: Tensor, predicted_logits: Tensor, 
+                                soft_temp: float = 2.0) -> Tensor:
+        """
+        Loss that encourages predicted pitches to follow the same arrow pattern as input.
+        Uses soft arrows and KL divergence for differentiability.
+        
+        Args:
+            input_pitch: [B, T+1] - input pitch sequence
+            predicted_logits: [B, T, vocab_size] - predicted pitch logits from decoder
+            soft_temp: Temperature for soft arrow computation
+        
+        Returns:
+            loss: Scalar tensor with arrow consistency loss
+        """
+        device = predicted_logits.device
+        
+        # Get input arrows (soft) from the target pitch sequence
+        # input_pitch[:, 1:] are the target pitches, so differences are input_pitch[:, 1:] - input_pitch[:, :-1]
+        input_soft_arrows = self.soft_pitch_to_arrow(input_pitch, temperature=soft_temp)  # [B, T, 7]
+        
+        # Get predicted pitch probabilities
+        pred_probs = F.softmax(predicted_logits, dim=-1)  # [B, T, vocab_size]
+        
+        # Compute expected predicted pitch at each position
+        vocab_size = pred_probs.shape[-1]
+        pitch_values = torch.arange(vocab_size, device=device, dtype=torch.float)
+        expected_pred_pitch = (pred_probs * pitch_values).sum(dim=-1)  # [B, T]
+        
+        # Previous pitches (from input sequence)
+        prev_pitch = input_pitch[:, :-1].float()  # [B, T]
+        
+        # Predicted pitch difference: expected_pred_pitch - previous_input_pitch
+        pred_diff = expected_pred_pitch - prev_pitch  # [B, T]
+        pred_diff = pred_diff.unsqueeze(-1)  # [B, T, 1]
+        
+        # Compute soft arrows for predicted differences
+        thresholds = torch.tensor([-8.5, -2.5, -0.5, 0.5, 2.5, 7.5], device=device, dtype=pred_diff.dtype)
+        soft_geq = torch.sigmoid((pred_diff - thresholds) / soft_temp)  # [B, T, 6]
+        
+        ones = torch.ones(pred_diff.shape[0], pred_diff.shape[1], 1, device=device, dtype=pred_diff.dtype)
+        zeros = torch.zeros(pred_diff.shape[0], pred_diff.shape[1], 1, device=device, dtype=pred_diff.dtype)
+        
+        soft_geq_extended = torch.cat([ones, soft_geq, zeros], dim=-1)  # [B, T, 8]
+        pred_soft_arrows = soft_geq_extended[..., :-1] - soft_geq_extended[..., 1:]  # [B, T, 7]
+        
+        # KL divergence: KL(input || pred)
+        # Add small epsilon to avoid log(0)
+        eps = 1e-8
+        pred_soft_arrows_log = (pred_soft_arrows + eps).log()
+        
+        # F.kl_div expects log-probabilities as input and probabilities as target
+        loss = F.kl_div(
+            pred_soft_arrows_log,
+            input_soft_arrows,
+            reduction='batchmean'
+        )
+        
+        return loss
+
     def forward(self, note_tokens: Dict[str, Tensor]):
         """
         Training forward pass.
@@ -3583,9 +3667,9 @@ class AutoregressiveAutoencoder_melody(Module):
         Returns:
             Dictionary with loss components
         """
-        # Extract arrows from pitch differences
+        # Extract arrows from pitch differences (hard, for decoder input)
         # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
-        arrows = pitch_to_arrow(note_tokens['pitch'])  # [B, T]
+        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T]
         
         # Create decoder context
         # Decoder needs: previous pitches [B, T] and current arrows [B, T]
@@ -3607,11 +3691,20 @@ class AutoregressiveAutoencoder_melody(Module):
             ignore_index=self.ignore_index
         )
         
-        # No contour/margin/button losses needed since arrows already encode contour deterministically
-        # All auxiliary losses that relied on encoder output 'e' are removed
+        # Compute arrow consistency loss (differentiable)
+        # This encourages the model to generate pitches that follow the same arrow pattern
+        loss_arrow_consistency = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_arrow_consistency = self.arrow_consistency_loss(
+                note_tokens['pitch'],
+                logits,
+                soft_temp=self.cfg.get('arrow_soft_temp', 2.0)
+            )
         
-        # Compute total loss (only reconstruction for now)
+        # Compute total loss
         loss_total = loss_recons * self.cfg['loss_recons']
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
         
         # Compute accuracy
         acc = self.compute_accuracy(logits, target)
@@ -3620,6 +3713,7 @@ class AutoregressiveAutoencoder_melody(Module):
         loss = {
             'loss_total': loss_total,
             'loss_recons': loss_recons,
+            'loss_arrow_consistency': loss_arrow_consistency,
             # All other losses set to 0 since we don't use them
             'loss_margin': torch.tensor(0.0, device=loss_total.device),
             'loss_deviate': torch.tensor(0.0, device=loss_total.device),
@@ -3637,10 +3731,48 @@ class AutoregressiveAutoencoder_melody(Module):
         return loss, acc
  
     @torch.inference_mode()
+    def pitch_to_arrow(self, pitch_seq: Tensor) -> Tensor:
+        """
+        Convert pitch sequence to arrow sequence based on pitch differences.
+        Arrow mapping:
+            a=0: dPitch <= -8 (descending more than 7 semitones)
+            a=1: -7 <= dPitch <= -3 (descend between 3 and 7 semitones)
+            a=2: -2 <= dPitch <= -1 (descends 1 or 2 semitones)
+            a=3: dPitch = 0 (no change)
+            a=4: 1 <= dPitch <= 2 (increases 1 or 2 semitones)
+            a=5: 3 <= dPitch <= 7 (increases between 3 and 7 semitones)
+            a=6: dPitch >= 8 (increases more than 7 semitones)
+        
+        Args:
+            pitch_seq: Tensor of shape [B, T] containing pitch values
+        
+        Returns:
+            arrows: Tensor of shape [B, T-1] containing arrow indices (0-6)
+        """
+        # Calculate pitch differences: d[t] = pitch[t+1] - pitch[t]
+        d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T-1]
+        
+        # Initialize arrow tensor with zeros
+        arrows = torch.zeros_like(d, dtype=torch.long)
+        
+        # Apply mapping based on pitch difference ranges
+        # Note: conditions are mutually exclusive, applied in sequence
+        arrows = torch.where(d <= -8, torch.tensor(0, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= -7) & (d <= -3), torch.tensor(1, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= -2) & (d <= -1), torch.tensor(2, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where(d == 0, torch.tensor(3, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= 1) & (d <= 2), torch.tensor(4, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= 3) & (d <= 7), torch.tensor(5, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where(d >= 8, torch.tensor(6, dtype=torch.long, device=d.device), arrows)
+        
+        return arrows
+
+    
+    @torch.inference_mode()
     def gen_pitch_token(
         self, 
             note_tokens: Dict[str, Tensor],
-            temperature: float = 1.0
+            temperature: float = 0.001
     ) -> int:
         """
         Generate next pitch token given previous pitches and current arrow.
@@ -3653,7 +3785,7 @@ class AutoregressiveAutoencoder_melody(Module):
             next_token: Integer pitch value (0-127)
         """
         device = note_tokens['pitch'].device
-        arrows = pitch_to_arrow(note_tokens['pitch'])  # [B, T]
+        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T]
 
         # Create decoder context
         # note_tokens['pitch'] contains previous pitches [B, T]
@@ -3695,7 +3827,7 @@ class AutoregressiveAutoencoder_melody(Module):
         # B = batch size = 1
         # note_tokens supposed on gpu
         # Extract arrows deterministically from pitch differences
-        arrows = pitch_to_arrow(note_tokens['pitch'])  # [B, T-1]
+        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T-1]
         
         return arrows
 
@@ -3758,7 +3890,7 @@ class AutoregressiveAutoencoder_melody(Module):
                 context_pitch = out_pitch[:, -max_seq_len:]
                 # Create arrow context by extracting from pitch history
                 if context_pitch.shape[1] > 1:
-                    context_arrows = pitch_to_arrow(context_pitch)  # [B, T-1]
+                    context_arrows = self.pitch_to_arrow(context_pitch)  # [B, T-1]
                     # Append current arrow
                     context_arrows = torch.cat([context_arrows, current_arrow], dim=1)  # [B, T]
                 else:
@@ -3773,7 +3905,7 @@ class AutoregressiveAutoencoder_melody(Module):
                 context_pitch = out_pitch
                 # Extract arrows from full history
                 if context_pitch.shape[1] > 1:
-                    context_arrows = pitch_to_arrow(context_pitch)
+                    context_arrows = self.pitch_to_arrow(context_pitch)
                     context_arrows = torch.cat([context_arrows, current_arrow], dim=1)
                 else:
                     context_arrows = current_arrow

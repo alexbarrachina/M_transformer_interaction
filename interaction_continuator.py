@@ -38,7 +38,7 @@ from params import *
 from model_loader import load_model
 from models import get_model_hparams
 from visualizer import Visualizer
-from midiUtils import midi_to_tokens, midi_tokens_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
+from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 #import params
 
 TRACES = False
@@ -162,14 +162,11 @@ first_note = True
 
 ''' BUILD CTX '''
 # Load seed MIDI
-input_tokens = midi_to_tokens(sample_midi_path) # tokens, without vel
+dict_input_tokens, num_notes = midi_to_dict(sample_midi_path) # tokens
 
-output_tokens = input_tokens.copy()
+dict_output_tokens = dict_input_tokens.copy()
 
-output_tokens_extended = output_tokens * 10
-
-dict_input_tokens, num_notes = midi_tokens_to_dict(input_tokens) # vel already filtered out
-dict_output_tokens, num_notes = midi_tokens_to_dict(output_tokens) # vel already filtered out
+dict_output_tokens = dict_output_tokens * 10
 
 # Build context tokens
 context = {
@@ -201,7 +198,7 @@ def manageNote(note, velocity):
     print("manageNote", note, velocity)
     print("i", i)
 
-  timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_tokens()
+  timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_dict()
 
   if velocity > 0: # noteOn
     # Update position token

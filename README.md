@@ -162,6 +162,39 @@ Generated files are saved in the `out/` directory:
 - `*_e.mid` - continuous-value Encoder outputs as MIDI
 
 
+## Format conversion
+
+
+    MIDI File ──────────────► midi_to_tokens() ──────► Flat Tokens ◄──── (pickles)
+        │                                                     │
+        │                                                     │                  
+        │                                                     │                  
+        │                                                     ▼
+        │                                          tokens_to_dict()              
+        │                                                     │
+        │                                                     │                  
+        │                                                     ▼                  
+        │                                                  ┌─────────────────────────┐
+        └──────────► midi_to_dict() ─────────────────────► │         DICT            │
+                     (no offsets)                          │  {'dtime':[], 'dur':[], │
+                                                           │   'pitch':[], ...}      │    
+                                                           └─────────────────────────┘
+                                                                      │
+                                                                      ▼
+                                                              dict_to_song()
+                                                                      │
+                                                                      ▼
+                                                           ┌─────────────────────┐
+                                                           │   Song (ms_score)   │
+                                                           │ [['note', t, d, c,  │
+                                                           │   p, v, patch], ...] │
+                                                           └─────────────────────┘
+                                                                      │
+                                                                      ▼
+                                                         ms_SONG_to_MIDI_Converter()
+                                                                      │
+                                                                      ▼
+                                                                 MIDI File
 
 
 

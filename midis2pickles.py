@@ -26,14 +26,10 @@ import os
 from tqdm import tqdm
 
 from midiUtils import midi2ms_score, Any_Pickle_File_Writer
-from params import OFFSET_DUR, OFFSET_PITCH, OFFSET_VEL, OFFSET_CHAN
 
-# Offsets create non-overlapping ranges for each token type
-# DTIME 0-127
-# DUR 128-255
-# PITCH 256-383
-# VEL 384-511
-# CHAN 512-639
+# NO OFFSETS: Each token type is stored in its raw range (0-127)
+# The pickle format stores 5 tokens per note: [dtime, dur, pitch, vel, chan]
+# All values are in range 0-127 (or 0-15 for channel)
 
 # Process MIDIs
 
@@ -48,7 +44,7 @@ melody_only = True # if True, only process melody notes (channel 0)
 sorted_or_random_file_loading_order = False # Sorted order is NOT usually recommended
 dataset_ratio = 1 # Change this if you need more or less % of the dataset
 
-# train_and_test_ratio = 1. # 100% for training
+#train_and_test_ratio = 1. # 100% for training
 train_and_test_ratio = 0.8 # 80% for training, 20% for testing
 
 # Melody channel filter
@@ -110,7 +106,7 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
 
         while itrack < len(score):
             for event in score[itrack]:         
-                if event[0] == 'note' and event[3] != 9:
+                if event[0] == 'note' and event[3] != 9: # skip percussion notes
                     events_matrix.append(event)
             itrack += 1
         
@@ -142,8 +138,8 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           is_train = random.random() < train_and_test_ratio
           target_data = train_data1 if is_train else test_data1
 
-          # Intro/Zero seq with channel 0 (5 tokens)
-          target_data.extend([126+0, 126+OFFSET_DUR, 0+OFFSET_PITCH, 0+OFFSET_VEL, 0+OFFSET_CHAN])
+          # Intro/Zero seq (5 tokens) - no offsets, raw values
+          target_data.extend([126, 126, 0, 0, 0])  # dtime, dur, pitch, vel, chan
 
           pe = filtered_events_matrix[0]
           for e in filtered_events_matrix:
@@ -154,8 +150,8 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
               ptc = max(1, min(126, e[4]))
               vel = max(1, min(126, e[5]))
 
-              # 5 tokens per note: dtime, dur, chan, pitch, vel
-              target_data.extend([time+0, dur+OFFSET_DUR, ptc+OFFSET_PITCH, vel+OFFSET_VEL, chan+OFFSET_CHAN])
+              # 5 tokens per note: dtime, dur, pitch, vel, chan (no offsets)
+              target_data.extend([time, dur, ptc, vel, chan])
 
               pe = e
 
