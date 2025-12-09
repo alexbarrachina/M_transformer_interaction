@@ -130,13 +130,14 @@ class Visualizer:
             self._draw()
             self.clock.tick(self.fps)'''
 
-    def draw(self) -> None:
+    def draw(self, handle_events: bool = True) -> None:
         self.update()
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
-                pygame.quit()
-                exit(0)
+        if handle_events:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    pygame.quit()
+                    exit(0)
         self.screen.fill((30, 30, 30))
         # Draw static primer rolls at the top (pitches left, buttons right)
         ref_y = 0

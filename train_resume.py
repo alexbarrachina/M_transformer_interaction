@@ -46,6 +46,7 @@ from datasets import load_dataset, load_from_disk
 from params import *
 from midiUtils import Any_Pickle_File_Reader
 from model_loader import load_model
+from models import get_model_hparams
 from x_transformer import *
 
 #==========================================================================
@@ -250,7 +251,8 @@ def main():
 
 
     ''' MODEL & HYPERPARAMETERS '''
-    model_name = 'encoder_button_held'
+    project_name = 'monsterGenie_melody'
+    model_name = 'melody_arrow_v4'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
@@ -260,10 +262,9 @@ def main():
 
     ''' WANDB '''
     if(cfg['use_logs']):
-        #tensorboard_summary = SummaryWriter()
         import wandb
         wandb.login()
-        wandb.init(project="monsterGenie", config=cfg)
+        wandb.init(project=project_name, name=model_name, config=cfg)
 
 
     #==========================================================================
@@ -273,9 +274,9 @@ def main():
     """ LOAD TRAINING DATA """
 
     # Loading dataset from a pickle in ./Training-Data
-    train_data = Any_Pickle_File_Reader(DATASET_TRAIN_PATH)   
+    train_data = Any_Pickle_File_Reader(cfg['dataset_train_path'])   
     data_train = torch.Tensor(train_data)
-    eval_data = Any_Pickle_File_Reader(DATASET_VAL_PATH)   
+    eval_data = Any_Pickle_File_Reader(cfg['dataset_val_path'])   
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
@@ -287,15 +288,18 @@ def main():
     val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True, cfg=cfg) # train in chunks of SEQ_LEN
     val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False)
 
+    # Right after val_loader is created and before model definition, add a reusable iterator for streaming validation
+    val_iter = iter(val_loader)  # will be cycled through inside training loop
+
     #==========================================================================
  
     ''' PRECISION/OPTIMIZER/SCALER '''
 
     dtype = torch.bfloat16
 
-    ctx = torch.amp.autocast(device_type=device_type, dtype=dtype)
+    #ctx = torch.amp.autocast(device_type=device_type, dtype=dtype)
 
-    optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optim = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'])
 
     scaler = torch.amp.GradScaler(device_type)
 
@@ -313,15 +317,7 @@ def main():
         start_steps = 0
         print("Starting training from scratch (no checkpoint found)")
 
-    #==========================================================================
-
-    ''' WANDB '''
-    if(USE_LOGS):
-        # Resume wandb run if we have a checkpoint
-        if checkpoint_path:
-            wandb.init(project="monsterGenie", config=config, resume="allow")
-        else:
-            wandb.init(project="monsterGenie", config=config)
+  
 
     #==========================================================================
 
@@ -329,7 +325,7 @@ def main():
 
     nsteps = start_steps
 
-    for ep in range(start_epoch, NUM_EPOCHS):
+    for ep in range(start_epoch, cfg['epochs']):
         print(f'Epoch #{ep} (resuming from step {nsteps})')
         
         model.train()
@@ -345,15 +341,48 @@ def main():
                     'pitch': batch['pitch'].to(device)
                 }
 
-                with ctx:
+                with torch.amp.autocast(device_type=device_type, dtype=dtype):
                     loss, acc = model(x)  # Update your model to accept target separately
                 scaler.scale(loss['loss_total']).backward()
                 
-                if (i % cfg['validate_every'] == 0) or TESTING:
-                    if(cfg['use_logs']):                
-                        wandb.log({"train_loss": loss['loss_total'].item()}, step=nsteps)
+                if (i % cfg['print_stats_every'] == 0) or TESTING:
+                    if( cfg['use_logs']):                
+                        wandb.log({"loss_total": loss['loss_total'].item()}, step=nsteps)
                         wandb.log({"train_acc": acc.item()}, step=nsteps)
+                        if cfg['loss_norm_pos']>0 and 'loss_norm_pos' in loss:
+                            wandb.log({"loss_norm_pos": cfg['loss_norm_pos']*loss['loss_norm_pos'].item()}, step=nsteps)
+                        if cfg['loss_deviate']>0 and 'loss_deviate' in loss:
+                            wandb.log({"loss_deviate": cfg['loss_deviate']*loss['loss_deviate'].item()}, step=nsteps)
+                        if cfg['loss_margin']>0 and 'loss_margin' in loss:
+                            wandb.log({"loss_margin": cfg['loss_margin']*loss['loss_margin'].item()}, step=nsteps)
+                        if cfg['loss_pitch_button']>0 and 'loss_pitch_button' in loss:
+                            wandb.log({"loss_pitch_button": cfg['loss_pitch_button']*loss['loss_pitch_button'].item()}, step=nsteps)
+                        if cfg['loss_button_concentration']>0 and 'loss_button_concentration' in loss:
+                            wandb.log({"loss_button_concentration": cfg['loss_button_concentration']*loss['loss_button_concentration'].item()}, step=nsteps)
+                        if cfg['loss_window_corr']>0 and 'loss_window_corr' in loss:
+                            wandb.log({"loss_window_corr": cfg['loss_window_corr']*loss['loss_window_corr'].item()}, step=nsteps)
+
+                        if cfg['loss_contour']>0 and 'loss_contour' in loss:
+                            wandb.log({"loss_contour_all": cfg['loss_contour']*loss['loss_contour'].item()}, step=nsteps)
+                        
+                            if cfg['loss_contour_perc']>0 and 'loss_contour_perc' in loss:
+                                wandb.log({"loss_contour_perc": cfg['loss_contour']*cfg['loss_contour_perc']*loss['loss_contour_perc'].item()}, step=nsteps)
+                            if cfg['loss_multi_step_perc']>0 and 'loss_multi_step_perc' in loss:
+                                wandb.log({"loss_multi_step": cfg['loss_contour']*cfg['loss_multi_step_perc']*loss['loss_multi_step_perc'].item()}, step=nsteps)
+                            if cfg['loss_interval_perc']>0 and 'loss_interval' in loss:
+                                wandb.log({"loss_interval": cfg['loss_contour']*cfg['loss_interval_perc']*loss['loss_interval_perc'].item()}, step=nsteps)
+                            if cfg['loss_shape_perc']>0 and 'loss_shape_perc' in loss:
+                                wandb.log({"loss_shape": cfg['loss_contour']*cfg['loss_shape_perc']*loss['loss_shape_perc'].item()}, step=nsteps)
+                        
+                        if cfg['loss_button_held']>0 and 'loss_button_held' in loss: 
+                            wandb.log({"loss_button_held": cfg['loss_button_held']*loss['loss_button_held'].item()}, step=nsteps)
+                        if cfg['loss_recons']>0 and 'loss_recons' in loss: 
+                            wandb.log({"loss_recons": cfg['loss_recons']*loss['loss_recons'].item()}, step=nsteps)
+                        if cfg.get('loss_arrow_consistency', 0)>0 and 'loss_arrow_consistency' in loss: 
+                            wandb.log({"loss_arrow_consistency": cfg['loss_arrow_consistency']*loss['loss_arrow_consistency'].item()}, step=nsteps)
+                        
                         nsteps += 1
+
 
                 scaler.unscale_(optim)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['grad_clip'])
@@ -365,29 +394,30 @@ def main():
 
                 if (i % cfg['print_stats_every'] == 0) or TESTING:
                     try:
-                        x = next(iter(val_loader)) # extract batches from test dataloader
+                        val_batch = next(val_iter) # extract batches from test dataloader
                     except StopIteration:
-                        val_loader_iter = iter(val_loader)
-                        batch = next(iter(val_loader_iter)) # extract batches from test dataloader           
+                        val_iter = iter(val_loader)
+                        val_batch = next(iter(val_iter)) # extract batches from test dataloader           
                     model.eval()
                     with torch.no_grad():
-                        with ctx:
+                        with torch.amp.autocast(device_type=device_type, dtype=dtype):
                             # move to device
-                            x = {
-                                'dtime': batch['dtime'].to(device),
-                                'dur': batch['dur'].to(device),
-                                'channel': batch['channel'].to(device),
-                                'pitch': batch['pitch'].to(device)
+                            vx = {
+                                'dtime': val_batch['dtime'].to(device),
+                                'dur': val_batch['dur'].to(device),
+                                'channel': val_batch['channel'].to(device),
+                                'pitch': val_batch['pitch'].to(device)
                             }
                             # run the model
-                            val_loss, val_acc = model(x)  # Update your model to accept target separately
+                            val_loss, val_acc = model(vx)  # Update your model to accept target separately
 
                         if(cfg['use_logs']):                
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
                             wandb.log({"val_acc": val_acc.item()}, step=nsteps)
 
                     model.train()
-
+                    del val_batch, vx
+                    torch.cuda.empty_cache()
         
         if ep % cfg['save_every'] == 0:
             fname = './save_models/' + cfg['model_name'] + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'

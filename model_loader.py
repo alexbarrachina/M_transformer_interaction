@@ -173,6 +173,7 @@ def load_model(model_name='default',
                 dim = cfg['emb_dim'],
                 depth = cfg['num_layers'],
                 heads = cfg['heads'],
+                pitch_history_dropout = cfg.get('pitch_history_dropout', 0.0),  # Zero out pitch embeddings to force arrow reliance
                 rotary_pos_emb = True,
                 attn_flash = True
             )

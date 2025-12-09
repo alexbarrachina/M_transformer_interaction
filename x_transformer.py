@@ -3397,6 +3397,10 @@ class Decoder_melody(nn.Module):
     Arrows are treated as continuous scalar values (like buttons in Decoder_no_dtime)
     to preserve their ordinal relationship: 0 < 1 < 2 < 3 < 4 < 5 < 6
     (from "large down" to "large up").
+    
+    Pitch history dropout: During training, randomly zeros out pitch embeddings to force
+    the model to rely more on arrow guidance. This prevents the model from ignoring arrows
+    and just predicting autoregressively from pitch history alone.
     """
     def __init__(
         self,
@@ -3406,6 +3410,7 @@ class Decoder_melody(nn.Module):
         depth: int,
         heads: int,
         emb_dropout: float = 0.,
+        pitch_history_dropout: float = 0.0,  # Dropout rate for pitch embeddings (0.0-1.0)
         post_emb_norm: bool = False,
         num_memory_tokens: Optional[int] = None,
         memory_tokens_interspersed_every: Optional[int] = None,
@@ -3418,15 +3423,19 @@ class Decoder_melody(nn.Module):
         
         self.emb_dim = dim # 2048
         self.max_seq_len = max_seq_len
+        self.pitch_history_dropout = pitch_history_dropout  # Store for use in forward()
         
         # Embedding for pitch only (arrows are treated as continuous scalars)
         self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
-        # No arrow_emb - arrows are continuous scalars like buttons in original
         
+        # NEW: Arrow Embedding (Stronger conditioning)
+        self.arrow_emb = nn.Embedding(7, dim)
+        
+        # OLD: No arrow_emb - arrows are continuous scalars like buttons in original
         # Input projection for concatenated features
         # pitch embedding (dim) + arrow scalar (1)
-        input_dim = dim + 1  # pitch_emb + arrow (continuous scalar)
-        self.input_proj = nn.Linear(input_dim, dim)
+        # input_dim = dim + 1  # pitch_emb + arrow (continuous scalar)
+        # self.input_proj = nn.Linear(input_dim, dim)
         
         # Dropout
         self.emb_dropout = nn.Dropout(emb_dropout)
@@ -3450,7 +3459,8 @@ class Decoder_melody(nn.Module):
 
     def init_(self):
         nn.init.kaiming_normal_(self.pitch_emb.weight)
-        nn.init.kaiming_normal_(self.input_proj.weight)
+        nn.init.kaiming_normal_(self.arrow_emb.weight)
+        # nn.init.kaiming_normal_(self.input_proj.weight)
 
     def forward(
         self,
@@ -3470,20 +3480,38 @@ class Decoder_melody(nn.Module):
         Args:
             past_tokens: Dict with 'pitch' [B, T] and 'arrow' [B, T]
                 - pitch: integer tensor with MIDI pitch values (0-127)
-                - arrow: integer tensor with arrow indices (0-6), treated as continuous
+                - arrow: integer tensor with arrow indices (0-6)
         """
         # Embed pitch
         pitch = self.pitch_emb(past_tokens['pitch'])  # [B, T, dim]
         
-        # Treat arrow as continuous scalar (preserves ordinal relationship)
+        # PITCH HISTORY DROPOUT: During training, randomly zero out pitch embeddings
+        # to force the model to rely more on arrow guidance.
+        # A zero embedding vector is distinct from any learned pitch embedding,
+        # so the model learns: "zero = unknown pitch, trust the arrow"
+        if self.training and self.pitch_history_dropout > 0:
+            # Create random mask: keep_prob of positions are kept (1), rest are zeroed (0)
+            keep_prob = 1.0 - self.pitch_history_dropout
+            mask_shape = (pitch.shape[0], pitch.shape[1], 1)  # [B, T, 1] for broadcasting
+            keep_mask = (torch.rand(mask_shape, device=pitch.device) < keep_prob).float()
+            pitch = pitch * keep_mask  # Zero out dropped positions
+        
+        # NEW: Embed arrows (Strong conditioning)
+        # Cast to long to ensure it works with nn.Embedding
+        arrow = self.arrow_emb(past_tokens['arrow'].long()) # [B, T, dim]
+        
+        # Combine by addition
+        x = pitch + arrow
+        
+        # OLD: Treat arrow as continuous scalar (preserves ordinal relationship)
         # This matches the original Decoder_no_dtime approach for buttons
-        arrow = past_tokens['arrow'].float().unsqueeze(-1)  # [B, T, 1]
+        # arrow = past_tokens['arrow'].float().unsqueeze(-1)  # [B, T, 1]
         
         # Concatenate pitch embedding with arrow scalar
-        concat_inputs = torch.cat([pitch, arrow], dim=-1)  # [B, T, dim+1]
+        # concat_inputs = torch.cat([pitch, arrow], dim=-1)  # [B, T, dim+1]
         
         # Project to model dimension
-        x = self.input_proj(concat_inputs)  # [B, T, dim]
+        # x = self.input_proj(concat_inputs)  # [B, T, dim]
         
         # Apply dropout
         x = self.emb_dropout(x)
@@ -3662,20 +3690,30 @@ class AutoregressiveAutoencoder_melody(Module):
         Training forward pass.
         
         Args:
-            note_tokens: Dict with 'pitch' [B, T+1]
+            note_tokens: Dict with 'pitch' [B, T+1] - ground truth pitch sequence
         
         Returns:
             Dictionary with loss components
+        
+        Training alignment:
+            - Input pitch: [p0, p1, ..., pT]  (T+1 pitches)
+            - Arrows: [a0, a1, ..., aT-1] where ai = p(i+1) - pi (T arrows)
+            - Decoder input: pitch[0:T] and arrows[0:T]
+            - Target: pitch[1:T+1]
+            
+            At position i, the decoder sees pitch[i] and arrow[i].
+            Arrow[i] encodes the direction FROM pitch[i] TO pitch[i+1].
+            The model learns to predict pitch[i+1] given pitch[i] and arrow[i].
         """
-        # Extract arrows from pitch differences (hard, for decoder input)
+        # Extract arrows from pitch differences (ground truth arrows for training)
         # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
         arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T]
         
         # Create decoder context
-        # Decoder needs: previous pitches [B, T] and current arrows [B, T]
+        # At position i: pitch[i] + arrow[i] -> predict pitch[i+1]
         decoder_context = {
-            'pitch': note_tokens['pitch'][:, :-1],  # Previous pitches [B, T]
-            'arrow': arrows  # Current arrows [B, T]
+            'pitch': note_tokens['pitch'][:, :-1],  # [B, T] - pitch[0:T] avoid pitch[T+1]
+            'arrow': arrows                          # [B, T] - direction for each transition
         }
         
         # Get logits from decoder
@@ -3729,8 +3767,8 @@ class AutoregressiveAutoencoder_melody(Module):
             'loss_shape_perc': torch.tensor(0.0, device=loss_total.device),
         }
         return loss, acc
- 
-    @torch.inference_mode()
+
+    #@torch.inference_mode()
     def pitch_to_arrow(self, pitch_seq: Tensor) -> Tensor:
         """
         Convert pitch sequence to arrow sequence based on pitch differences.
@@ -3772,27 +3810,32 @@ class AutoregressiveAutoencoder_melody(Module):
     def gen_pitch_token(
         self, 
             note_tokens: Dict[str, Tensor],
-            temperature: float = 0.001
+        temperature: float = 1.0
     ) -> int:
         """
-        Generate next pitch token given previous pitches and current arrow.
+        Generate next pitch token given previous pitches and USER-PROVIDED arrows.
+        
+        The model predicts pitch[T] given:
+        - pitch[0:T]: generated pitches so far
+        - arrow[0:T]: user-provided arrows, where arrow[i] indicates direction from pitch[i] to pitch[i+1]
+        
+        At the last position (T-1), arrow[T-1] tells us where to go FROM pitch[T-1],
+        so the model predicts pitch[T].
         
         Args:
-            note_tokens: Dict with 'pitch' [B, T] and 'arrow' [B, 1] (current arrow)
+            note_tokens: Dict with:
+                - 'pitch' [B, T]: generated pitches so far
+                - 'arrow' [B, T]: user-provided arrows (arrow[-1] is direction for next pitch)
             temperature: Sampling temperature
         
         Returns:
             next_token: Integer pitch value (0-127)
         """
-        device = note_tokens['pitch'].device
-        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T]
-
-        # Create decoder context
-        # note_tokens['pitch'] contains previous pitches [B, T]
-        # note_tokens['arrow'] contains current arrow [B, 1] or [B, T]
+        # Arrows are USER-PROVIDED, not derived from pitches
+        # note_tokens['arrow'][:, -1] is the current arrow guiding next pitch generation
         decoder_context = {
-            'pitch': note_tokens['pitch'][:, :-1],  # [B, T]
-            'arrow': arrows   # [B, T] (last one is current)
+            'pitch': note_tokens['pitch'],   # [B, T] - generated pitches so far
+            'arrow': note_tokens['arrow']    # [B, T] - user-provided arrows
         }
 
         logits, _ = self.decoder(
@@ -3802,7 +3845,7 @@ class AutoregressiveAutoencoder_melody(Module):
             seq_start_pos=None
         )
         
-        logits = logits[:, -1]  # [B, vocab_size] - get last timestep
+        logits = logits[:, -1]  # [B, vocab_size] - get last token logits
 
         probs = F.softmax(logits / temperature, dim=-1)
 

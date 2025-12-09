@@ -78,6 +78,7 @@ DEFAULT_HPARAMS = {
     "data_augment_time_stretch_max": 0.05, # Max time stretch for data augmentation (+- 5%)
     "data_augment_transpose_max": 6, # Max transpose for data augmentation (+- 6 semitones, tritone)
     "data_augment_chord_threshold": 2, # Define chord threshold (e.g., notes within 2 time units are considered part of same chord)
+    'pitch_history_dropout': 0.0,
     'dataset': 'giantmidi_full',
     "dataset_train_path": "./Training-Data/giantMIDI_sel", # './Training-Data/asigalov_train'
     "dataset_val_path": "./Training-Data/giantMIDI_sel_test", # './Training-Data/asigalov_val'
