@@ -3428,8 +3428,12 @@ class Decoder_melody(nn.Module):
         # Embedding for pitch only (arrows are treated as continuous scalars)
         self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
         
-        # NEW: Arrow Embedding (Stronger conditioning)
-        self.arrow_emb = nn.Embedding(7, dim)
+        # Arrow Embedding (Stronger conditioning)
+        # 0-6: fine arrows (specific intervals)
+        # 7: coarse down (any negative pitch change)
+        # 8: coarse up (any positive pitch change)
+        # Arrow 3 (stay) is shared between fine and coarse modes
+        self.arrow_emb = nn.Embedding(9, dim)
         
         # OLD: No arrow_emb - arrows are continuous scalars like buttons in original
         # Input projection for concatenated features
@@ -3685,6 +3689,75 @@ class AutoregressiveAutoencoder_melody(Module):
         
         return loss
 
+    def coarse_set_loss(self, logits: Tensor, prev_pitch: Tensor, arrows: Tensor) -> Tensor:
+        """
+        Compute set-based loss for coarse arrow positions.
+        Instead of exact pitch CE, maximize probability of the valid set:
+        - Arrow 7 (down): maximize P(p_next < p_prev)
+        - Arrow 8 (up): maximize P(p_next > p_prev)
+        
+        Uses log-sum-exp for numerical stability.
+        
+        Args:
+            logits: [B, T, vocab_size] - decoder output logits
+            prev_pitch: [B, T] - previous pitch at each position
+            arrows: [B, T] - arrow indices (7=down, 8=up for coarse)
+        
+        Returns:
+            loss: Scalar tensor with average set-based NLL for coarse positions
+        """
+        B, T, V = logits.shape
+        device = logits.device
+        
+        # Identify coarse positions (arrows 7 or 8)
+        coarse_down_mask = (arrows == 7)  # [B, T]
+        coarse_up_mask = (arrows == 8)    # [B, T]
+        coarse_mask = coarse_down_mask | coarse_up_mask
+        
+        if not coarse_mask.any():
+            return torch.tensor(0.0, device=device)
+        
+        # Create pitch index tensor for comparison: [V]
+        pitch_indices = torch.arange(V, device=device)  # [V]
+        
+        # Expand for broadcasting: prev_pitch [B, T, 1] vs pitch_indices [V]
+        prev_pitch_expanded = prev_pitch.unsqueeze(-1)  # [B, T, 1]
+        
+        # Valid pitch masks: [B, T, V]
+        valid_down = pitch_indices < prev_pitch_expanded  # p < p_prev
+        valid_up = pitch_indices > prev_pitch_expanded    # p > p_prev
+        
+        # Combine: for down arrows use valid_down, for up arrows use valid_up
+        # valid_set[b, t, v] = True if pitch v is valid for arrow at (b, t)
+        valid_set = torch.zeros(B, T, V, dtype=torch.bool, device=device)
+        valid_set[coarse_down_mask] = valid_down[coarse_down_mask]
+        valid_set[coarse_up_mask] = valid_up[coarse_up_mask]
+        
+        # Mask out invalid pitches with -inf for log-sum-exp
+        masked_logits = logits.clone()
+        masked_logits[~valid_set] = float('-inf')
+        
+        # log P(valid set) = log-sum-exp(valid logits) - log-sum-exp(all logits)
+        # = logsumexp(valid) - logsumexp(all)
+        log_sum_valid = torch.logsumexp(masked_logits, dim=-1)  # [B, T]
+        log_sum_all = torch.logsumexp(logits, dim=-1)           # [B, T]
+        
+        # NLL = -log P(valid set) = log_sum_all - log_sum_valid
+        nll = log_sum_all - log_sum_valid  # [B, T]
+        
+        # Average only over coarse positions
+        coarse_nll = nll[coarse_mask]
+        
+        # Handle edge case: if all valid pitches are -inf (e.g., prev_pitch=0 for down)
+        # Replace inf with a large but finite penalty
+        coarse_nll = torch.where(
+            torch.isinf(coarse_nll),
+            torch.tensor(10.0, device=device),  # Penalty for impossible cases
+            coarse_nll
+        )
+        
+        return coarse_nll.mean() if coarse_nll.numel() > 0 else torch.tensor(0.0, device=device)
+
     def forward(self, note_tokens: Dict[str, Tensor]):
         """
         Training forward pass.
@@ -3704,10 +3777,18 @@ class AutoregressiveAutoencoder_melody(Module):
             At position i, the decoder sees pitch[i] and arrow[i].
             Arrow[i] encodes the direction FROM pitch[i] TO pitch[i+1].
             The model learns to predict pitch[i+1] given pitch[i] and arrow[i].
+        
+        Coarse Arrow Training:
+            With coarse_arrow_ratio > 0, some contiguous spans of the sequence
+            will use coarse arrows (7=down, 8=up) instead of fine arrows (0-6).
+            This teaches the model to handle both fine and coarse guidance,
+            mimicking real player behavior where they switch between modes.
         """
         # Extract arrows from pitch differences (ground truth arrows for training)
         # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
-        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T]
+        # coarse_arrow_ratio determines fraction of sequence using coarse arrows
+        coarse_ratio = self.cfg.get('coarse_arrow_ratio', 0.0)
+        arrows = self.pitch_to_arrow(note_tokens['pitch'], coarse_ratio=coarse_ratio)  # [B, T]
         
         # Create decoder context
         # At position i: pitch[i] + arrow[i] -> predict pitch[i+1]
@@ -3721,13 +3802,38 @@ class AutoregressiveAutoencoder_melody(Module):
         
         # Target is the current pitch (shifted by 1)
         target = note_tokens['pitch'][:, 1:]  # [B, T]
+        prev_pitch = note_tokens['pitch'][:, :-1]  # [B, T] - previous pitch for coarse loss
         
-        # Compute reconstruction loss
-        loss_recons = F.cross_entropy(
-            rearrange(logits, 'b n c -> b c n'),
-            target,
-            ignore_index=self.ignore_index
-        )
+        # Identify fine vs coarse positions
+        fine_mask = (arrows <= 6)  # Fine arrows: 0-6
+        coarse_mask = (arrows >= 7)  # Coarse arrows: 7, 8
+        
+        # Compute fine loss (exact CE) only on fine positions
+        if fine_mask.any():
+            # Set coarse positions to ignore_index so they don't contribute to CE
+            fine_target = target.clone()
+            fine_target[coarse_mask] = self.ignore_index
+            loss_fine = F.cross_entropy(
+                rearrange(logits, 'b n c -> b c n'),
+                fine_target,
+                ignore_index=self.ignore_index
+            )
+        else:
+            loss_fine = torch.tensor(0.0, device=logits.device)
+        
+        # Compute coarse loss (set-based NLL) only on coarse positions
+        loss_coarse = self.coarse_set_loss(logits, prev_pitch, arrows)
+        
+        # Combine losses (weighted by fraction of positions)
+        n_fine = fine_mask.sum().float()
+        n_coarse = coarse_mask.sum().float()
+        n_total = n_fine + n_coarse
+        
+        if n_total > 0:
+            # Weighted combination based on position counts
+            loss_recons = (n_fine / n_total) * loss_fine + (n_coarse / n_total) * loss_coarse
+        else:
+            loss_recons = loss_fine
         
         # Compute arrow consistency loss (differentiable)
         # This encourages the model to generate pitches that follow the same arrow pattern
@@ -3744,8 +3850,8 @@ class AutoregressiveAutoencoder_melody(Module):
         if self.cfg.get('loss_arrow_consistency', 0) > 0:
             loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
         
-        # Compute accuracy
-        acc = self.compute_accuracy(logits, target)
+        # Compute accuracy (exact for fine, direction for coarse)
+        acc = self.compute_accuracy_mixed(logits, target, prev_pitch, arrows)
         
         # Return loss dictionary (keeping structure for compatibility)
         loss = {
@@ -3768,24 +3874,85 @@ class AutoregressiveAutoencoder_melody(Module):
         }
         return loss, acc
 
+    def create_coarse_spans_mask(self, seq_len: int, target_ratio: float = 0.3,
+                                   min_span: int = 8, max_span: int = 64,
+                                   device: torch.device = None) -> Tensor:
+        """
+        Create a mask with contiguous spans for coarse arrows.
+        Total coarse positions ≈ target_ratio * seq_len.
+        
+        This mimics real player behavior where they use coarse control for 
+        entire musical phrases, not individual notes.
+        
+        Args:
+            seq_len: Length of the sequence
+            target_ratio: Target fraction of positions to be coarse (e.g., 0.3 = 30%)
+            min_span: Minimum span length
+            max_span: Maximum span length
+            device: Torch device
+        
+        Returns:
+            mask: Boolean tensor [seq_len] where True = use coarse arrow
+        """
+        import random
+        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+        target_count = int(seq_len * target_ratio)
+        
+        if target_count == 0:
+            return mask
+        
+        attempts = 0
+        max_attempts = 100  # Prevent infinite loop
+        
+        while mask.sum().item() < target_count and attempts < max_attempts:
+            # Random span length (capped by remaining sequence)
+            actual_max_span = min(max_span, seq_len)
+            actual_min_span = min(min_span, actual_max_span)
+            span_len = random.randint(actual_min_span, actual_max_span)
+            
+            # Random start position
+            if seq_len - span_len > 0:
+                start = random.randint(0, seq_len - span_len)
+            else:
+                start = 0
+            end = start + span_len
+            
+            # Mark this span as coarse (may overlap with existing spans, that's fine)
+            mask[start:end] = True
+            attempts += 1
+        
+        return mask
+
     #@torch.inference_mode()
-    def pitch_to_arrow(self, pitch_seq: Tensor) -> Tensor:
+    def pitch_to_arrow(self, pitch_seq: Tensor, coarse_ratio: float = 0.0) -> Tensor:
         """
         Convert pitch sequence to arrow sequence based on pitch differences.
-        Arrow mapping:
+        
+        Fine arrow mapping (0-6):
             a=0: dPitch <= -8 (descending more than 7 semitones)
             a=1: -7 <= dPitch <= -3 (descend between 3 and 7 semitones)
             a=2: -2 <= dPitch <= -1 (descends 1 or 2 semitones)
-            a=3: dPitch = 0 (no change)
+            a=3: dPitch = 0 (no change) - SHARED with coarse
             a=4: 1 <= dPitch <= 2 (increases 1 or 2 semitones)
             a=5: 3 <= dPitch <= 7 (increases between 3 and 7 semitones)
             a=6: dPitch >= 8 (increases more than 7 semitones)
         
+        Coarse arrow mapping (7-8, plus shared 3):
+            a=7: any negative dPitch (coarse down)
+            a=3: dPitch = 0 (stay, shared with fine)
+            a=8: any positive dPitch (coarse up)
+        
+        During training, coarse_ratio determines what fraction of the sequence
+        uses coarse arrows. Coarse arrows are applied in contiguous spans to
+        mimic real player behavior (using coarse control for entire phrases).
+        
         Args:
             pitch_seq: Tensor of shape [B, T] containing pitch values
+            coarse_ratio: Fraction of positions to use coarse arrows (0.0-1.0)
+                          Only applied during training.
         
         Returns:
-            arrows: Tensor of shape [B, T-1] containing arrow indices (0-6)
+            arrows: Tensor of shape [B, T-1] containing arrow indices (0-8)
         """
         # Calculate pitch differences: d[t] = pitch[t+1] - pitch[t]
         d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T-1]
@@ -3793,7 +3960,7 @@ class AutoregressiveAutoencoder_melody(Module):
         # Initialize arrow tensor with zeros
         arrows = torch.zeros_like(d, dtype=torch.long)
         
-        # Apply mapping based on pitch difference ranges
+        # Apply fine arrow mapping based on pitch difference ranges
         # Note: conditions are mutually exclusive, applied in sequence
         arrows = torch.where(d <= -8, torch.tensor(0, dtype=torch.long, device=d.device), arrows)
         arrows = torch.where((d >= -7) & (d <= -3), torch.tensor(1, dtype=torch.long, device=d.device), arrows)
@@ -3802,6 +3969,25 @@ class AutoregressiveAutoencoder_melody(Module):
         arrows = torch.where((d >= 1) & (d <= 2), torch.tensor(4, dtype=torch.long, device=d.device), arrows)
         arrows = torch.where((d >= 3) & (d <= 7), torch.tensor(5, dtype=torch.long, device=d.device), arrows)
         arrows = torch.where(d >= 8, torch.tensor(6, dtype=torch.long, device=d.device), arrows)
+        
+        # Replace fine arrows with coarse arrows in contiguous spans during training
+        if self.training and coarse_ratio > 0:
+            B, T = arrows.shape
+            for b in range(B):
+                coarse_mask = self.create_coarse_spans_mask(T, coarse_ratio, device=d.device)
+                # Down arrows (0, 1, 2) → coarse down (7)
+                arrows[b] = torch.where(
+                    coarse_mask & (arrows[b] <= 2),
+                    torch.tensor(7, device=d.device, dtype=torch.long),
+                    arrows[b]
+                )
+                # Arrow 3 (stay) remains 3 - it's shared between fine and coarse
+                # Up arrows (4, 5, 6) → coarse up (8)
+                arrows[b] = torch.where(
+                    coarse_mask & (arrows[b] >= 4),
+                    torch.tensor(8, device=d.device, dtype=torch.long),
+                    arrows[b]
+                )
         
         return arrows
 

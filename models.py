@@ -678,6 +678,101 @@ MODELS_PARAMETERS = {
         "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
         "save_every": 15,
         },
+    'melody_arrow_v5': {
+        'model_type': 'autoencoder_melody',
+        'description': 'Melody autoencoder with fine+coarse arrow guidance (30percent coarse in contiguous spans)',
+        'train_log': '',
+        'ckpt_file_name': '',
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_recons': 1.0,
+        'loss_arrow_consistency': 0.2,  # Weight for arrow consistency loss (fine arrows)
+        'arrow_soft_temp': 1.0,  # Temperature for soft arrow boundaries
+        'pitch_history_dropout': 0.1,  # 30% of pitch embeddings are zeroed during training
+        'coarse_arrow_ratio': 0.1,  # 30% of sequence uses coarse arrows in contiguous spans
+        "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+        "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+        "save_every": 15,
+        },
+'melody_arrow_v6': {
+    'model_type': 'autoencoder_melody',
+    'description': 'High accuracy attempt: No dropout, fine arrows only',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 6,           # Increased depth
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 1.0,         # Sharper boundaries
+    'pitch_history_dropout': 0.0,   # No dropout (full context)
+    'coarse_arrow_ratio': 0.0,      # Fine arrows only (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+    "save_every": 15,
+    },
+'melody_arrow_v7': {
+    'model_type': 'autoencoder_melody',
+    'description': 'High accuracy attempt: dropout 10%, fine arrows only',
+    'train_log': '',
+    'ckpt_file_name': './save_models/melody_arrow_v7_375_eps_752_steps_0.5624_loss_0.969_acc.pth',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 6,           # Increased depth
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 1.0,         # Sharper boundaries
+    'pitch_history_dropout': 0.1,   # 10% dropout (full context)
+    'coarse_arrow_ratio': 0.0,      # Fine arrows only (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+    "save_every": 15,
+    },
+'melody_arrow_v8': {
+    'model_type': 'autoencoder_melody',
+    'description': 'High accuracy attempt: dropout 10%, fine arrows only, coarse arrows 10%',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 6,           # Increased depth
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 1.0,         # Sharper boundaries
+    'pitch_history_dropout': 0.1,   # 10% dropout (full context)
+    'coarse_arrow_ratio': 0.1,      # 10% coarse arrows (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+    "save_every": 15,
+    },
+ 'melody_arrow_v9': {
+    'model_type': 'autoencoder_melody',
+    'description': 'High accuracy attempt: dropout 10%, coarse arrows 100%',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 6,           # Increased depth
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 1.0,         # Sharper boundaries
+    'pitch_history_dropout': 0.1,   # 10% dropout (full context)
+    'coarse_arrow_ratio': 1.0,      # 100% coarse arrows (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+    "save_every": 15,
+    },
     }
 
 

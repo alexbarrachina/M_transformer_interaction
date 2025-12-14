@@ -41,15 +41,15 @@ from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
 
-TRACES = True
+TRACES = False
 AUTOMATIC_ARROWS = False # if True, use original midi file arrows for guidance
 
 ''' DEVICE '''
-#device = torch.device('cpu')
+#device = torch.device('cpu') 
 device = torch.device('mps') 
 
 ''' MODEL '''
-model_name = 'melody_arrow_v4'
+model_name = 'melody_arrow_v7'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -59,6 +59,7 @@ model.eval()
 # Get sample seed MIDI path
 #sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
 sample_midi_path = './samples/clairTester_to_end_monophonic.midi'
+sample_midi_path2 = './samples/clara.mid'
 output_midi_name = './out/interactive_performance'
 
 CTX_LEN = 256 # num notes in context. tokens = CTX_LENGTH * 3
@@ -69,10 +70,19 @@ temperature = 0.0001 # sampling temperature
 visualizer = Visualizer()
 
 '''KEY MAPPING'''
+# Fine arrows (0-6): specific interval ranges
+# Coarse arrows (7-8): direction only (any down / any up)
+# Arrow 3 (stay) is shared between fine and coarse modes
 KEY_MAPPING = {
-#    K_c: 0, K_x: 1, K_z: 2, K_a: 3, K_s: 4, K_d: 5,K_f: 6, K_SPACE: 5
-    K_v: 0, K_c: 1, K_x: 2, K_w: 3, K_e: 4, K_r: 5,K_t: 6,
-    K_f: 0, K_d: 1, K_s: 2, K_2: 3, K_3: 4, K_4: 5,K_5: 6,
+    # Fine arrows (specific intervals)
+    # Row 1: v=large_down, c=medium_down, x=small_down, w=stay, e=small_up, r=medium_up, t=large_up
+    K_v: 0, K_c: 1, K_x: 2, K_w: 3, K_e: 4, K_r: 5, K_t: 6,
+    # Row 2: alternative keys (f, d, s, 2, 3, 4, 5)
+    K_f: 0, K_d: 1, K_s: 2, K_2: 3, K_3: 4, K_4: 5, K_5: 6,
+    # Coarse arrows (direction only, no specific interval)
+    K_DOWN: 7,   # Coarse down: any negative pitch change
+    K_UP: 8,     # Coarse up: any positive pitch change
+    # Note: K_w / K_2 already map to 3 (stay) - shared between fine and coarse
 }
 
 """# FLUIDSYNTH INIT """
@@ -110,22 +120,58 @@ def save_performance():
   detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,
                                                             timings_multiplier=2
                                                             )
-  print("saved performance")
+  if TRACES:
+    print("saved performance")
 
-def reset_context():
+def reset_context(dict_input):
     global i
     global pitch_buffer
     global arrows
-    global dict_input_tokens
     global first_note
 
+    # 1. Capture the last N notes of the current performance
+    PRESERVE_LEN = 16
+    # Ensure we have enough notes generated to capture
+    current_end_idx = i + CTX_LEN
+    preserved_pitch = []
+    
+    if i > 0:
+        # Get the last 16 notes from the current buffer
+        start_slice = max(0, current_end_idx - PRESERVE_LEN)
+        preserved_pitch = pitch_buffer[start_slice:current_end_idx]
+        if TRACES:
+            print(f"Preserving {len(preserved_pitch)} notes")
+    
+    # 2. Reset global variables
     i = 0
     first_note = True
-    pitch_buffer = dict_input_tokens['pitch'].copy()
-    # Regenerate arrows from original melody
-    original_pitch_tensor = torch.tensor(dict_input_tokens['pitch'][:TOTAL_GEN_LEN], dtype=torch.long).unsqueeze(0)
-    original_arrows = model.pitch_to_arrow(original_pitch_tensor).squeeze(0).tolist() 
-    arrows = original_arrows.copy()
+    # 3. Reload the original seed content
+    # Start with a fresh copy of the original inputs
+    pitch_buffer = dict_input['pitch'].copy()
+    # 4. Splice the preserved notes into the end of the context window
+    # The context window is pitch_buffer[0 : CTX_LEN]
+    if len(preserved_pitch) > 0:
+        splice_start = CTX_LEN - len(preserved_pitch)
+        # Overwrite the end of the seed context with our preserved notes
+        pitch_buffer[splice_start : CTX_LEN] = preserved_pitch
+
+    # 5. Regenerate arrows for this new hybrid sequence
+    # We need to ensure the arrows match the new pitch sequence
+    # Create a tensor for the whole buffer (or at least enough for generation)
+    # We'll re-calculate arrows for the whole buffer to be safe and consistent
+    
+    # IMPORTANT: The model needs arrows for the *entire* potential generation length
+    # We must ensure pitch_buffer is long enough if it was short
+    if len(pitch_buffer) < TOTAL_GEN_LEN:
+         # Pad if necessary (though dict_input_tokens should be long enough usually)
+         pitch_buffer += [0] * (TOTAL_GEN_LEN - len(pitch_buffer))
+
+    current_pitch_tensor = torch.tensor(pitch_buffer[:TOTAL_GEN_LEN], dtype=torch.long).unsqueeze(0)
+    
+    # Recalculate arrows based on this new hybrid melody
+    # This is crucial because the spliced notes create new intervals
+    new_arrows = model.pitch_to_arrow(current_pitch_tensor).squeeze(0).tolist()
+    arrows = new_arrows # Update the global arrows list
 
 ''' VARIABLES '''
 
@@ -138,6 +184,7 @@ first_note = True
 ''' BUILD CTX '''
 # Load seed MIDI
 dict_input_tokens, num_notes = midi_to_dict(sample_midi_path) # tokens, without vel
+dict_input_tokens2, _ = midi_to_dict(sample_midi_path2) # tokens, without vel
 
 original_pitch_tensor = torch.tensor(dict_input_tokens['pitch'], dtype=torch.long).unsqueeze(0)
 original_arrows = model.pitch_to_arrow(original_pitch_tensor).squeeze(0).tolist() 
@@ -277,6 +324,7 @@ try:
                 
             elif event.type == KEYDOWN:
                 if TRACES:
+                    print("event", event.key)
                     print("noteOn_dict", noteOn_dict)
                 if event.key in KEY_MAPPING:
                     if TRACES:
@@ -286,9 +334,14 @@ try:
                     print("saving performance")
                     save_performance()
                     os._exit(1)                              
-                elif event.key == K_0: # Reset
-                    print("resetting context")
-                    reset_context()
+                elif event.key == K_SPACE: # Reset
+                    if TRACES:
+                        print("resetting context")
+                    reset_context(dict_input_tokens)
+                elif event.key == 1073742051: # Reset
+                    if TRACES:
+                        print("resetting context")
+                    reset_context(dict_input_tokens2)
                 elif event.key == K_ESCAPE:
                     pygame.quit()
                     sys.exit()
