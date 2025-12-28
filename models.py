@@ -773,6 +773,80 @@ MODELS_PARAMETERS = {
     "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
     "save_every": 15,
     },
+ 'melody_arrow_v10': {
+    'model_type': 'autoencoder_melody',
+    'description': 'High accuracy attempt: dropout 10%, coarse arrows 100%',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 6,           # Increased depth
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 1.0,         # Sharper boundaries
+    'pitch_history_dropout': 0.0,   # 10% dropout (full context)
+    'coarse_arrow_ratio': 1.0,      # 100% coarse arrows (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+    "save_every": 15,
+    },
+# Harmony-conditioned autoencoder (Tonnetz conditioning)
+'autoenc_no_dtime_harmony_v1': {
+    'model_type': 'autoencoder_no_dtime_harmony',
+    'description': 'Autoencoder with Tonnetz harmony conditioning (decoder-only). Tester light model.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/autoenc_no_dtime_harmony_v1_40_eps_533_steps_0.846_loss_0.7605_acc.pth',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 12,
+    # Loss weights
+    'loss_recons': 1.0,
+    'loss_margin': 0.1,
+    'loss_deviate': 0.1,
+    'loss_contour': 0.1,
+    'loss_button_held': 0.0,
+    'loss_norm_pos': 0.0,
+    'loss_pitch_button': 0.0,
+    'loss_button_concentration': 0.0,
+    'loss_window_corr': 0.0,
+    # Contour loss components
+    'loss_contour_perc': 0.0,
+    'loss_multi_step_perc': 1.0,
+    'loss_interval_perc': 0.0,
+    'loss_shape_perc': 0.0,
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 8,
+    },
+# Harmony-conditioned autoencoder (Tonnetz conditioning)
+'autoenc_just_harmony_v1b': {
+    'model_type': 'autoencoder_just_harmony',
+    'description': 'Tester light with no harmony conditioning. With no pitch augmentation, no chord augmentation.',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048, 
+    'num_layers': 4,
+    'heads': 32,
+    # Loss weights
+    'loss_recons': 1.0,
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 24,
+    "num_workers": 10,
+    },
     }
 
 

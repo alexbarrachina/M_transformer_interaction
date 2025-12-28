@@ -17,6 +17,8 @@ wandb
 matplotlib
 python-rtmidi
 pyfluidsynth
+scipy
+pretty_midi
 ```
 
 Install with:

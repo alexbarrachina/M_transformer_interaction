@@ -92,6 +92,9 @@ DEFAULT_HPARAMS = {
     # Activation flags 
     "use_logs": False,
     "use_topk": False,
+
+    # Zero out pitch embeddings to force arrow/buttons reliance
+    'pitch_history_dropout': 0.0,
 }
 
 ''' VOCABULARY '''

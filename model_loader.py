@@ -173,10 +173,45 @@ def load_model(model_name='default',
                 dim = cfg['emb_dim'],
                 depth = cfg['num_layers'],
                 heads = cfg['heads'],
-                pitch_history_dropout = cfg.get('pitch_history_dropout', 0.0),  # Zero out pitch embeddings to force arrow reliance
+                pitch_history_dropout = cfg['pitch_history_dropout'],  # Zero out pitch embeddings to force arrow reliance
                 rotary_pos_emb = True,
                 attn_flash = True
             )
+        )
+    elif cfg['model_type'] == 'autoencoder_no_dtime_harmony':
+        # Autoencoder with Tonnetz harmony conditioning (decoder-only)
+        mpt_model = AutoregressiveAutoencoder_no_dtime_harmony(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_harmony(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
+        )
+    elif cfg['model_type'] == 'autoencoder_just_harmony':
+        # Autoencoder with Tonnetz harmony conditioning (decoder-only)
+        mpt_model = AutoregressiveAutoencoder_just_harmony(
+            cfg = cfg,
+            decoder = Decoder_just_harmony(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+
         )
     if set_only == False:
         model_path = cfg['ckpt_file_name']

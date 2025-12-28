@@ -163,7 +163,7 @@ def main():
 
     ''' MODEL & HYPERPARAMETERS '''
     project_name = 'monsterGenie_melody'
-    model_name = 'melody_arrow_v9'
+    model_name = 'melody_arrow_v10'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
