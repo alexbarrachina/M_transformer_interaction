@@ -1001,12 +1001,16 @@ class RealtimeHarmonyExtractor:
     Real-time harmony feature extraction and visualization.
     
     Processes a rolling buffer of recent notes and extracts:
-    - Global key (updated periodically)
+    - Fixed global key (set at initialization)
     - Current tension (x, y, magnitude)
     - Current harmonic region
     
     Usage:
-        extractor = RealtimeHarmonyExtractor()
+        # C major
+        extractor = RealtimeHarmonyExtractor(global_key=0)
+        
+        # C minor
+        extractor = RealtimeHarmonyExtractor(global_key=12)
         
         # Add notes as they occur
         extractor.add_note(pitch=60, start_time=0.0, velocity=80)
@@ -1018,36 +1022,48 @@ class RealtimeHarmonyExtractor:
     
     def __init__(
         self,
-        key_window_sec: float = 4.0,
+        global_key: int = 0,
         tension_window_sec: float = 1.0,
-        key_update_interval_sec: float = 2.0,
         buffer_size_sec: float = 10.0,
         visualize: bool = True,
-        fs: int = 10
+        fs: int = 10,
+        chord_threshold: float = 0.3
     ):
         """
         Initialize the real-time harmony extractor.
         
         Args:
-            key_window_sec: Window size for key detection (seconds)
+            global_key: Fixed global key (0-11 for major, 12-23 for minor)
+                       0=C major, 1=C# major, ..., 11=B major
+                       12=C minor, 13=C# minor, ..., 23=B minor
             tension_window_sec: Window size for tension computation (seconds)
-            key_update_interval_sec: How often to update key detection (seconds)
             buffer_size_sec: How long to keep notes in buffer (seconds)
             visualize: If True, enable real-time visualization
             fs: Sampling frequency for visualization data storage
+            chord_threshold: Threshold ratio for detecting active pitch classes (0.0-1.0)
+                           Lower = more pitch classes included, Higher = only strongest notes
         """
-        self.key_window_sec = key_window_sec
+        # Decode global key
+        if global_key < 12:
+            # Major key
+            self.key_root = global_key
+            self.key_mode = 'major'
+        else:
+            # Minor key
+            self.key_root = global_key - 12
+            self.key_mode = 'minor'
+        
+        self.global_key_encoded = global_key
         self.tension_window_sec = tension_window_sec
-        self.key_update_interval_sec = key_update_interval_sec
         self.buffer_size_sec = buffer_size_sec
         self.fs = fs
+        self.chord_threshold = chord_threshold
         
         # Note buffer: list of {pitch, start, end, velocity}
         self.notes: List[dict] = []
         
-        # Current state
-        self.current_key: Tuple[int, str] = (0, 'major')  # Default to C major
-        self.last_key_update: float = 0.0
+        # Current state (key is fixed, not updated)
+        self.current_key: Tuple[int, str] = (self.key_root, self.key_mode)
         
         # Visualization data (for trail history)
         self.tension_history: List[Tuple[float, float]] = []
@@ -1127,6 +1143,14 @@ class RealtimeHarmonyExtractor:
         )
         self.ax.add_patch(self.tension_circle)
         
+        # Chord shape visualization
+        self.chord_polygon = None  # Will be created dynamically
+        self.chord_points = self.ax.scatter(
+            [], [], s=120, c='#74b9ff', 
+            marker='o', edgecolors='#fff', linewidths=1.5,
+            alpha=0.9, zorder=8
+        )
+        
         # Text displays
         self.key_text = self.ax.text(
             0.02, 0.98, '', transform=self.ax.transAxes,
@@ -1134,6 +1158,14 @@ class RealtimeHarmonyExtractor:
             fontweight='bold', va='top',
             bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', 
                      edgecolor='#ffd700', alpha=0.8)
+        )
+        
+        self.chord_text = self.ax.text(
+            0.98, 0.02, '', transform=self.ax.transAxes,
+            fontsize=11, color='#74b9ff', fontfamily='monospace',
+            ha='right', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', 
+                     edgecolor='#74b9ff', alpha=0.8)
         )
         
         self.coord_text = self.ax.text(
@@ -1268,27 +1300,25 @@ class RealtimeHarmonyExtractor:
         # Keep notes that either have no end time (still active) or ended after cutoff
         self.notes = [n for n in self.notes if (n['end'] if n.get('end') is not None else current_time) > cutoff_time]
     
-    def _update_key(self, current_time: float) -> bool:
+    def _extract_active_pitch_classes(self, current_time: float) -> List[int]:
         """
-        Update key detection if enough time has passed.
+        Extract active pitch classes from current notes.
+        
+        Args:
+            current_time: Current time in seconds
         
         Returns:
-            True if key was updated
+            List of active pitch classes (0-11)
         """
-        if current_time - self.last_key_update < self.key_update_interval_sec:
-            return False
+        # Get chroma from tension window
+        chroma = notes_to_chroma(self.notes, current_time, self.tension_window_sec)
         
-        # Get chroma from key detection window
-        chroma = notes_to_chroma(self.notes, current_time, self.key_window_sec)
+        if np.max(chroma) == 0:
+            return []
         
-        if np.sum(chroma) > 0:
-            new_key = estimate_key(chroma)
-            if new_key is not None:
-                self.current_key = new_key
-                self.last_key_update = current_time
-                return True
-        
-        return False
+        threshold = np.max(chroma) * self.chord_threshold
+        active = [i for i in range(12) if chroma[i] >= threshold]
+        return active
     
     def extract_current_features(self, current_time: float) -> Tuple[float, float, float, int, str]:
         """
@@ -1300,13 +1330,10 @@ class RealtimeHarmonyExtractor:
         Returns:
             Tuple of (centroid_x, centroid_y, magnitude, key_root, key_mode)
         """
-        # Update key if needed
-        self._update_key(current_time)
-        
         # Get chroma from tension window
         tension_chroma = notes_to_chroma(self.notes, current_time, self.tension_window_sec)
         
-        # Extract key
+        # Use fixed global key
         key_root, key_mode = self.current_key
         
         # Compute tension
@@ -1346,7 +1373,8 @@ class RealtimeHarmonyExtractor:
     def _update_visualization(self, cx: float, cy: float, mag: float, 
                             key_root: int, key_mode: str, current_time: float):
         """Update the real-time visualization."""
-        from tonnetz import lattice_to_display
+        from tonnetz import lattice_to_display, get_chord_vertices
+        from matplotlib.patches import Polygon
         
         # Convert relative to absolute lattice coords
         key_x, key_y = TONNETZ_COORDS[key_root]
@@ -1373,6 +1401,51 @@ class RealtimeHarmonyExtractor:
             trail_lattice = trail_rel + np.array([key_x, key_y])
             trail_disp = np.array([lattice_to_display(p[0], p[1]) for p in trail_lattice])
             self.trail_line.set_data(trail_disp[:, 0], trail_disp[:, 1])
+        
+        # Update chord shape visualization
+        active_pcs = self._extract_active_pitch_classes(current_time)
+        
+        # Remove old polygon if exists
+        if self.chord_polygon is not None:
+            self.chord_polygon.remove()
+            self.chord_polygon = None
+        
+        if len(active_pcs) >= 2:
+            # Get chord vertices in lattice coords (already absolute)
+            vertices_lattice = get_chord_vertices(active_pcs, key_root)
+            
+            # Transform to display coordinates
+            verts_disp = np.array([lattice_to_display(v[0], v[1]) for v in vertices_lattice])
+            
+            # Update chord points scatter
+            self.chord_points.set_offsets(verts_disp)
+            
+            if len(active_pcs) >= 3:
+                # Draw polygon for chords with 3+ notes
+                # Sort vertices by angle for proper polygon drawing
+                centroid = verts_disp.mean(axis=0)
+                angles = np.arctan2(verts_disp[:, 1] - centroid[1], 
+                                   verts_disp[:, 0] - centroid[0])
+                sorted_idx = np.argsort(angles)
+                sorted_vertices = verts_disp[sorted_idx]
+                
+                self.chord_polygon = Polygon(
+                    sorted_vertices,
+                    fill=True,
+                    facecolor='#74b9ff',
+                    edgecolor='#fff',
+                    alpha=0.25,
+                    linewidth=2,
+                    zorder=3
+                )
+                self.ax.add_patch(self.chord_polygon)
+            
+            # Show harmonic region notes
+            note_names = [PITCH_NAMES[p] for p in active_pcs]
+            self.chord_text.set_text(f"Region ({len(active_pcs)}): {', '.join(note_names)}")
+        else:
+            self.chord_points.set_offsets(np.empty((0, 2)))
+            self.chord_text.set_text("")
         
         # Update text
         self.key_text.set_text(f"Key: {format_key_name(key_root, key_mode)}")
@@ -1404,24 +1477,516 @@ class RealtimeHarmonyExtractor:
         )
 
 
+def estimate_key_from_pitches(pitches: List[int]) -> int:
+    """
+    Estimate the global key from a list of MIDI pitches.
+    
+    Args:
+        pitches: List of MIDI pitch values (0-127)
+    
+    Returns:
+        Encoded global key: 0-11 for major keys (C=0, C#=1, ..., B=11)
+                           12-23 for minor keys (Cm=12, C#m=13, ..., Bm=23)
+    """
+    # Build chroma vector from pitches
+    chroma = np.zeros(12, dtype=float)
+    for pitch in pitches:
+        pc = pitch % 12
+        chroma[pc] += 1.0
+    
+    # Use existing key estimation
+    key_result = estimate_key(chroma)
+    
+    if key_result is None:
+        return 0  # Default to C major
+    
+    key_root, key_mode = key_result
+    
+    # Encode: major = 0-11, minor = 12-23
+    if key_mode == 'major':
+        return key_root
+    else:
+        return key_root + 12
+
+
+class harmony_visualizer:
+    """
+    Real-time harmony visualization from a buffer of active pitches.
+    
+    Simple interface for real-time interaction:
+    - get_note(pitch, velocity): Add (velocity > 0) or remove (velocity == 0) a pitch
+    - draw(): Update the tonnetz visualization
+    
+    Usage:
+        visualizer = harmony_visualizer(global_key=0)  # C major
+        visualizer.get_note(60, 100)  # Note on: middle C
+        visualizer.get_note(64, 100)  # Note on: E
+        visualizer.draw()             # Update visualization
+        visualizer.get_note(60, 0)    # Note off: middle C
+    """
+    
+    def __init__(
+        self,
+        global_key: int = 0,
+        buffer_size: int = 32,
+        chord_threshold: float = 0.3,
+        visualize: bool = True
+    ):
+        """
+        Initialize the harmony visualizer.
+        
+        Args:
+            global_key: Fixed global key (0-11 for major, 12-23 for minor)
+                       0=C major, 1=C# major, ..., 11=B major
+                       12=C minor, 13=C# minor, ..., 23=B minor
+            buffer_size: Maximum number of pitches to keep in buffer
+            chord_threshold: Threshold ratio for detecting active pitch classes (0.0-1.0)
+            visualize: If True, enable real-time visualization
+        """
+        # Decode global key
+        if global_key < 12:
+            self.key_root = global_key
+            self.key_mode = 'major'
+        else:
+            self.key_root = global_key - 12
+            self.key_mode = 'minor'
+        
+        self.global_key_encoded = global_key
+        self.buffer_size = buffer_size
+        self.chord_threshold = chord_threshold
+        
+        # Active notes: pitch -> velocity
+        self.active_notes: dict = {}
+        
+        # Pitch buffer (rolling buffer of last N pitches for history)
+        self.pitch_buffer: List[int] = []
+        
+        # Current state
+        self.current_key: Tuple[int, str] = (self.key_root, self.key_mode)
+        
+        # Tension history for trail
+        self.tension_history: List[Tuple[float, float]] = []
+        self.magnitude_history: List[float] = []
+        
+        # Visualization setup
+        self.visualize_enabled = visualize
+        self.fig = None
+        self.ax = None
+        if self.visualize_enabled:
+            self._setup_visualization()
+    
+    def _setup_visualization(self):
+        """Setup matplotlib for real-time plotting."""
+        import matplotlib.pyplot as plt
+        plt.ion()  # Enable interactive mode
+        plt.style.use('dark_background')
+        
+        # Disable matplotlib keyboard shortcuts to avoid conflicts with QWERTY input
+        for key in ['fullscreen', 'home', 'back', 'forward', 'pan', 'zoom', 
+                    'save', 'quit', 'grid', 'yscale', 'xscale', 'copy']:
+            try:
+                plt.rcParams[f'keymap.{key}'] = []
+            except KeyError:
+                pass
+        
+        self.fig, self.ax = plt.subplots(figsize=(12, 10), facecolor='#1a1a2e')
+        self.ax.set_facecolor('#16213e')
+        
+        # Set fixed limits
+        grid_min, grid_max = -3, 3
+        from tonnetz import lattice_to_display
+        
+        corners = [
+            lattice_to_display(grid_min, grid_min),
+            lattice_to_display(grid_min, grid_max),
+            lattice_to_display(grid_max, grid_min),
+            lattice_to_display(grid_max, grid_max),
+        ]
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
+        padding = 0.8
+        self.ax.set_xlim(min(xs) - padding, max(xs) + padding)
+        self.ax.set_ylim(min(ys) - padding, max(ys) + padding)
+        
+        self.ax.set_xlabel('Circle of Fifths (← Subdominant | Dominant →)', 
+                          fontsize=12, color='#e8e8e8', fontfamily='monospace')
+        self.ax.set_ylabel('Major Thirds (↓ Minor | Major ↑)', 
+                          fontsize=12, color='#e8e8e8', fontfamily='monospace')
+        self.ax.set_title('Real-Time Harmonic Tension', fontsize=14, 
+                         color='#f8f8f8', fontfamily='monospace', pad=20)
+        
+        self.ax.set_aspect('equal')
+        self.ax.grid(False)
+        self.ax.tick_params(colors='#a0a0a0', labelsize=9)
+        
+        for spine in self.ax.spines.values():
+            spine.set_color('#4a4a6a')
+        
+        # Draw static Tonnetz grid
+        self._draw_tonnetz_grid()
+        
+        # Initialize plot elements
+        self.current_point, = self.ax.plot(
+            [], [], 'o', markersize=18, 
+            color='#ff9f43', markeredgecolor='#fff', 
+            markeredgewidth=2, zorder=10
+        )
+        
+        self.inner_point, = self.ax.plot(
+            [], [], 'o', markersize=8,
+            color='#fff', zorder=11
+        )
+        
+        self.trail_line, = self.ax.plot(
+            [], [], '-', linewidth=2, color='#ff9f43', 
+            alpha=0.6, zorder=5
+        )
+        
+        # Tension magnitude circle
+        from matplotlib.patches import Circle
+        self.tension_circle = Circle(
+            (0, 0), 0.0,
+            fill=False, edgecolor='#ff6b6b', linewidth=2.5,
+            linestyle='--', alpha=0.8, zorder=6
+        )
+        self.ax.add_patch(self.tension_circle)
+        
+        # Chord shape visualization
+        self.chord_polygon = None
+        self.chord_points = self.ax.scatter(
+            [], [], s=120, c='#74b9ff', 
+            marker='o', edgecolors='#fff', linewidths=1.5,
+            alpha=0.9, zorder=8
+        )
+        
+        # Text displays
+        self.key_text = self.ax.text(
+            0.02, 0.98, '', transform=self.ax.transAxes,
+            fontsize=14, color='#ffd700', fontfamily='monospace',
+            fontweight='bold', va='top',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', 
+                     edgecolor='#ffd700', alpha=0.8)
+        )
+        
+        self.chord_text = self.ax.text(
+            0.98, 0.02, '', transform=self.ax.transAxes,
+            fontsize=11, color='#74b9ff', fontfamily='monospace',
+            ha='right', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e', 
+                     edgecolor='#74b9ff', alpha=0.8)
+        )
+        
+        self.coord_text = self.ax.text(
+            0.02, 0.02, '', transform=self.ax.transAxes,
+            fontsize=10, color='#7a7a9a', fontfamily='monospace',
+            va='bottom'
+        )
+        
+        self.notes_text = self.ax.text(
+            0.98, 0.98, '', transform=self.ax.transAxes,
+            fontsize=11, color='#a0a0a0', fontfamily='monospace',
+            ha='right', va='top'
+        )
+        
+        plt.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.001)
+    
+    def _draw_tonnetz_grid(self):
+        """Draw the static Tonnetz grid (C at origin)."""
+        from tonnetz import lattice_to_display, get_pitch_at_tonnetz_coord
+        from matplotlib.patches import Circle
+        
+        grid_min, grid_max = -3, 3
+        
+        # Draw lattice lines
+        line_color = '#3a3a5a'
+        line_alpha = 0.3
+        
+        # Horizontal lines
+        for y in range(grid_min, grid_max + 1):
+            x1, y1 = lattice_to_display(grid_min, y)
+            x2, y2 = lattice_to_display(grid_max, y)
+            self.ax.plot([x1, x2], [y1, y2], '-', color=line_color, 
+                        alpha=line_alpha, linewidth=0.5, zorder=1)
+        
+        # Vertical lines
+        for x in range(grid_min, grid_max + 1):
+            x1, y1 = lattice_to_display(x, grid_min)
+            x2, y2 = lattice_to_display(x, grid_max)
+            self.ax.plot([x1, x2], [y1, y2], '-', color=line_color, 
+                        alpha=line_alpha, linewidth=0.5, zorder=1)
+        
+        # Diagonal lines
+        for d in range(2 * grid_min, 2 * grid_max + 1):
+            points = []
+            for x in range(grid_min, grid_max + 1):
+                y = d - x
+                if grid_min <= y <= grid_max:
+                    points.append(lattice_to_display(x, y))
+            if len(points) >= 2:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                self.ax.plot(xs, ys, '-', color=line_color, 
+                            alpha=line_alpha, linewidth=0.5, zorder=1)
+        
+        # Draw pitch nodes
+        for x in range(grid_min, grid_max + 1):
+            for y in range(grid_min, grid_max + 1):
+                pitch_name = get_pitch_at_tonnetz_coord(x, y, key_root=0)
+                X, Y = lattice_to_display(float(x), float(y))
+                
+                # Color coding
+                if x == 0 and y == 0:
+                    color = '#ffd700'  # Gold for C
+                    fontweight = 'bold'
+                    fontsize = 11
+                elif x == 1 and y == 0:
+                    color = '#ff6b6b'  # Red for G
+                    fontweight = 'normal'
+                    fontsize = 10
+                elif x == -1 and y == 0:
+                    color = '#4ecdc4'  # Teal for F
+                    fontweight = 'normal'
+                    fontsize = 10
+                elif y == 1:
+                    color = '#95e1d3'  # Light green for major third
+                    fontweight = 'normal'
+                    fontsize = 9
+                elif y == -1:
+                    color = '#f38181'  # Coral for minor
+                    fontweight = 'normal'
+                    fontsize = 9
+                else:
+                    color = '#7a7a9a'
+                    fontweight = 'normal'
+                    fontsize = 9
+                
+                circle = Circle((X, Y), 0.08, color=color, alpha=0.3)
+                self.ax.add_patch(circle)
+                
+                self.ax.text(
+                    X, Y + 0.18, pitch_name,
+                    ha='center', va='bottom',
+                    fontsize=fontsize, fontweight=fontweight,
+                    color=color, fontfamily='monospace'
+                )
+    
+    def get_note(self, pitch: int, velocity: int):
+        """
+        Add or remove a note from the active notes buffer.
+        
+        Args:
+            pitch: MIDI pitch (0-127)
+            velocity: MIDI velocity (0-127). velocity > 0 = note on, velocity == 0 = note off
+        """
+        if velocity > 0:
+            # Note on
+            self.active_notes[pitch] = velocity
+            # Add to pitch buffer
+            self.pitch_buffer.append(pitch)
+            if len(self.pitch_buffer) > self.buffer_size:
+                self.pitch_buffer.pop(0)
+        else:
+            # Note off
+            if pitch in self.active_notes:
+                del self.active_notes[pitch]
+    
+    def _get_chroma_from_active(self) -> np.ndarray:
+        """
+        Get chroma vector from currently active notes.
+        
+        Returns:
+            12-element chroma vector weighted by velocity
+        """
+        chroma = np.zeros(12, dtype=float)
+        for pitch, velocity in self.active_notes.items():
+            pc = pitch % 12
+            chroma[pc] += velocity / 127.0
+        return chroma
+    
+    def _get_active_pitch_classes(self) -> List[int]:
+        """
+        Get active pitch classes from current notes.
+        
+        Returns:
+            List of active pitch classes (0-11)
+        """
+        chroma = self._get_chroma_from_active()
+        if np.max(chroma) == 0:
+            return []
+        
+        threshold = np.max(chroma) * self.chord_threshold
+        active = [i for i in range(12) if chroma[i] >= threshold]
+        return active
+    
+    def _compute_tension(self) -> Tuple[float, float, float]:
+        """
+        Compute tonnetz tension from active notes.
+        
+        Returns:
+            Tuple of (centroid_x, centroid_y, magnitude)
+        """
+        chroma = self._get_chroma_from_active()
+        return chroma_to_tonnetz_tension(chroma, self.key_root)
+    
+    def draw(self, handle_events: bool = True):
+        """
+        Update the tonnetz visualization with current harmony state.
+        
+        Args:
+            handle_events: If True, process matplotlib events (set False if using pygame)
+        """
+        if not self.visualize_enabled or self.fig is None:
+            return
+        
+        from tonnetz import lattice_to_display, get_chord_vertices
+        from matplotlib.patches import Polygon
+        import matplotlib.pyplot as plt
+        
+        # Compute current tension
+        cx, cy, mag = self._compute_tension()
+        
+        # Store in history
+        self.tension_history.append((cx, cy))
+        self.magnitude_history.append(mag)
+        
+        # Limit history length
+        max_history = 100
+        if len(self.tension_history) > max_history:
+            self.tension_history = self.tension_history[-max_history:]
+            self.magnitude_history = self.magnitude_history[-max_history:]
+        
+        # Convert relative to absolute lattice coords
+        key_x, key_y = TONNETZ_COORDS[self.key_root]
+        lat_x = key_x + cx
+        lat_y = key_y + cy
+        
+        # Transform to display coordinates
+        X, Y = lattice_to_display(float(lat_x), float(lat_y))
+        
+        # Update current position
+        self.current_point.set_data([X], [Y])
+        self.inner_point.set_data([X], [Y])
+        
+        # Update tension circle
+        key_disp_x, key_disp_y = lattice_to_display(float(key_x), float(key_y))
+        self.tension_circle.set_center((key_disp_x, key_disp_y))
+        self.tension_circle.set_radius(mag)
+        
+        # Update trail
+        trail_length = 50
+        if len(self.tension_history) > 1:
+            trail_start = max(0, len(self.tension_history) - trail_length)
+            trail_rel = np.array(self.tension_history[trail_start:])
+            trail_lattice = trail_rel + np.array([key_x, key_y])
+            trail_disp = np.array([lattice_to_display(p[0], p[1]) for p in trail_lattice])
+            self.trail_line.set_data(trail_disp[:, 0], trail_disp[:, 1])
+        
+        # Update chord shape visualization
+        active_pcs = self._get_active_pitch_classes()
+        
+        # Remove old polygon if exists
+        if self.chord_polygon is not None:
+            self.chord_polygon.remove()
+            self.chord_polygon = None
+        
+        if len(active_pcs) >= 2:
+            # Get chord vertices in lattice coords
+            vertices_lattice = get_chord_vertices(active_pcs, self.key_root)
+            
+            # Transform to display coordinates
+            verts_disp = np.array([lattice_to_display(v[0], v[1]) for v in vertices_lattice])
+            
+            # Update chord points scatter
+            self.chord_points.set_offsets(verts_disp)
+            
+            if len(active_pcs) >= 3:
+                # Draw polygon for chords with 3+ notes
+                centroid = verts_disp.mean(axis=0)
+                angles = np.arctan2(verts_disp[:, 1] - centroid[1], 
+                                   verts_disp[:, 0] - centroid[0])
+                sorted_idx = np.argsort(angles)
+                sorted_vertices = verts_disp[sorted_idx]
+                
+                self.chord_polygon = Polygon(
+                    sorted_vertices,
+                    fill=True,
+                    facecolor='#74b9ff',
+                    edgecolor='#fff',
+                    alpha=0.25,
+                    linewidth=2,
+                    zorder=3
+                )
+                self.ax.add_patch(self.chord_polygon)
+            
+            # Show harmonic region notes
+            note_names = [PITCH_NAMES[p] for p in active_pcs]
+            self.chord_text.set_text(f"Region ({len(active_pcs)}): {', '.join(note_names)}")
+        else:
+            self.chord_points.set_offsets(np.empty((0, 2)))
+            self.chord_text.set_text("")
+        
+        # Update text
+        self.key_text.set_text(f"Key: {format_key_name(self.key_root, self.key_mode)}")
+        self.coord_text.set_text(f"Centroid: ({cx:.2f}, {cy:.2f}) | Mag: {mag:.2f}")
+        self.notes_text.set_text(f"Active: {len(self.active_notes)} | Buffer: {len(self.pitch_buffer)}")
+        
+        # Redraw
+        self.fig.canvas.draw_idle()
+        self.fig.canvas.flush_events()
+        if handle_events:
+            plt.pause(0.001)
+    
+    def close(self):
+        """Close the visualization."""
+        if self.visualize_enabled and self.fig is not None:
+            import matplotlib.pyplot as plt
+            plt.close(self.fig)
+            self.fig = None
+    
+    def reset(self):
+        """Reset the buffer and history."""
+        self.active_notes.clear()
+        self.pitch_buffer.clear()
+        self.tension_history.clear()
+        self.magnitude_history.clear()
+
+
 def demo_realtime_from_midi(
     midi_path: str,
+    global_key: int = 0,
     playback_speed: float = 1.0,
-    update_interval_sec: float = 0.1
+    update_interval_sec: float = 0.1,
+    chord_threshold: float = 0.3
 ):
     """
     Demo: Load a MIDI file and simulate real-time processing with visualization.
     
     Args:
         midi_path: Path to MIDI file
+        global_key: Fixed global key (0-11 for major, 12-23 for minor)
         playback_speed: Speed multiplier (1.0 = normal, 2.0 = 2x speed)
         update_interval_sec: How often to update (seconds)
+        chord_threshold: Threshold ratio for chord detection (0.0-1.0)
     """
     import pretty_midi
     import time as time_module
     
     print(f"Loading MIDI file: {midi_path}")
     pm = pretty_midi.PrettyMIDI(midi_path)
+    
+    # Detect key from file if global_key is -1 (auto-detect mode)
+    if global_key == -1:
+        print("Auto-detecting key from MIDI file...")
+        chroma_matrix = pm.get_chroma(fs=10)
+        global_chroma = np.sum(chroma_matrix, axis=1)
+        detected_key = estimate_key(global_chroma)
+        if detected_key is None:
+            detected_key = (0, 'major')
+        key_root, key_mode = detected_key
+        global_key = key_root if key_mode == 'major' else key_root + 12
+        print(f"Detected key: {format_key_name(key_root, key_mode)} (encoded as {global_key})")
     
     # Collect all note events
     events: List[Tuple[float, str, int, int]] = []  # (time, type, pitch, velocity)
@@ -1440,14 +2005,15 @@ def demo_realtime_from_midi(
         return
     
     print(f"Found {len(events)} note events")
+    print(f"Using global key: {global_key} ({format_key_name(global_key % 12, 'major' if global_key < 12 else 'minor')})")
     print("Starting real-time simulation...")
     
-    # Create extractor
+    # Create extractor with fixed global key
     extractor = RealtimeHarmonyExtractor(
-        key_window_sec=4.0,
+        global_key=global_key,
         tension_window_sec=1.0,
-        key_update_interval_sec=2.0,
-        visualize=True
+        visualize=True,
+        chord_threshold=chord_threshold
     )
     
     # Simulate real-time playback
@@ -1500,7 +2066,7 @@ def demo_realtime_from_midi(
 # --- RUN IT ---
 if __name__ == "__main__":
     
-    # Real-time harmony extraction from MIDI file
-    demo_realtime_from_midi(midi_path, playback_speed=1.0, update_interval_sec=0.1)
+    # Real-time harmony extraction from MIDI file (auto-detect key)
+    demo_realtime_from_midi(midi_path, global_key=-1, playback_speed=1.0, update_interval_sec=0.1)
     # Default: full analysis and visualization
     #extract_and_visualize()

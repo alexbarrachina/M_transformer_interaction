@@ -3269,10 +3269,8 @@ class Decoder_melody(nn.Module):
         
         # Arrow Embedding (Stronger conditioning)
         # 0-6: fine arrows (specific intervals)
-        # 7: coarse down (any negative pitch change)
-        # 8: coarse up (any positive pitch change)
         # Arrow 3 (stay) is shared between fine and coarse modes
-        self.arrow_emb = nn.Embedding(9, dim)
+        self.arrow_emb = nn.Embedding(7, dim)
         
         # OLD: No arrow_emb - arrows are continuous scalars like buttons in original
         # Input projection for concatenated features
@@ -3445,8 +3443,6 @@ class AutoregressiveAutoencoder_melody(Module):
         # If d is far above the threshold, result is ~1.0. If far below, result is ~0.0.
         soft_geq = torch.sigmoid((d - thresholds) / temperature)  # [B, T-1, 6]
         
-       
-        
         # 4. Add the "Infinity" boundaries
         # The probability of being > -infinity is always 1.0 (All numbers are > -inf)
         # The probability of being > +infinity is always 0.0 (No numbers are > +inf)
@@ -3556,9 +3552,7 @@ class AutoregressiveAutoencoder_melody(Module):
         """
         # Extract arrows from pitch differences (ground truth arrows for training)
         # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
-        # coarse_arrow_ratio determines fraction of sequence using coarse arrows
-        coarse_ratio = self.cfg.get('coarse_arrow_ratio', 0.0)
-        arrows = self.pitch_to_arrow(note_tokens['pitch'], coarse_ratio=coarse_ratio)  # [B, T]
+        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T]
         
         # Create decoder context
         # At position i: pitch[i] + arrow[i] -> predict pitch[i+1]
@@ -3619,17 +3613,576 @@ class AutoregressiveAutoencoder_melody(Module):
         }
         return loss, acc
 
-    def create_coarse_spans_mask(self, seq_len: int, target_ratio: float = 0.3,
+
+    #@torch.inference_mode()
+    def pitch_to_arrow(self, pitch_seq: Tensor) -> Tensor:
+        """
+        Convert pitch sequence to arrow sequence based on pitch differences.
+        
+        Fine arrow mapping (0-6):
+            a=0: dPitch <= -8 (descending more than 7 semitones)
+            a=1: -7 <= dPitch <= -3 (descend between 3 and 7 semitones)
+            a=2: -2 <= dPitch <= -1 (descends 1 or 2 semitones)
+            a=3: dPitch = 0 (no change) - SHARED with coarse
+            a=4: 1 <= dPitch <= 2 (increases 1 or 2 semitones)
+            a=5: 3 <= dPitch <= 7 (increases between 3 and 7 semitones)
+            a=6: dPitch >= 8 (increases more than 7 semitones)
+        
+        
+        Args:
+            pitch_seq: Tensor of shape [B, T] containing pitch values
+        
+        Returns:
+            arrows: Tensor of shape [B, T-1] containing arrow indices (0-8)
+        """
+        # Calculate pitch differences: d[t] = pitch[t+1] - pitch[t]
+        d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T-1]
+        
+        # Initialize arrow tensor with zeros
+        arrows = torch.zeros_like(d, dtype=torch.long)
+        
+        # Apply fine arrow mapping based on pitch difference ranges
+        # Note: conditions are mutually exclusive, applied in sequence
+        arrows = torch.where(d <= -8, torch.tensor(0, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= -7) & (d <= -3), torch.tensor(1, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= -2) & (d <= -1), torch.tensor(2, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where(d == 0, torch.tensor(3, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= 1) & (d <= 2), torch.tensor(4, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= 3) & (d <= 7), torch.tensor(5, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where(d >= 8, torch.tensor(6, dtype=torch.long, device=d.device), arrows)
+        
+        return arrows
+ 
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self, 
+            note_tokens: Dict[str, Tensor],
+        temperature: float = 1.0
+    ) -> int:
+        """
+        Generate next pitch token given previous pitches and USER-PROVIDED arrows.
+        
+        The model predicts pitch[T] given:
+        - pitch[0:T]: generated pitches so far
+        - arrow[0:T]: user-provided arrows, where arrow[i] indicates direction from pitch[i] to pitch[i+1]
+        
+        At the last position (T-1), arrow[T-1] tells us where to go FROM pitch[T-1],
+        so the model predicts pitch[T].
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch' [B, T]: generated pitches so far
+                - 'arrow' [B, T]: user-provided arrows (arrow[-1] is direction for next pitch)
+            temperature: Sampling temperature
+        
+        Returns:
+            next_token: Integer pitch value (0-127)
+        """
+        # Arrows are USER-PROVIDED, not derived from pitches
+        # note_tokens['arrow'][:, -1] is the current arrow guiding next pitch generation
+        decoder_context = {
+            'pitch': note_tokens['pitch'],   # [B, T] - generated pitches so far
+            'arrow': note_tokens['arrow']    # [B, T] - user-provided arrows
+        }
+
+        logits, _ = self.decoder(
+                decoder_context,
+            return_intermediates=True,
+            cache=None,
+            seq_start_pos=None
+        )
+        
+        logits = logits[:, -1]  # [B, vocab_size] - get last token logits
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
+
+    @torch.inference_mode()
+    def gen_arrows(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        """
+        Generate arrows from pitch sequence (deterministic extraction).
+        
+        Args:
+            note_tokens: Dict with 'pitch' [B, T]
+        
+        Returns:
+            arrows: Tensor [B, T-1] with arrow indices (0-6)
+        """
+        # B = batch size = 1
+        # note_tokens supposed on gpu
+        # Extract arrows deterministically from pitch differences
+        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T-1]
+        
+        return arrows
+
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
+
+        acc = num_right / len(labels) 
+        return acc
+    
+class Decoder_melody_w_coarse_arrows(nn.Module):
+    """
+    Decoder for melody generation using arrow guidance instead of learned buttons.
+    Accepts previous pitches and arrow directions to predict next pitch.
+    
+    Arrows are treated as continuous scalar values (like buttons in Decoder_no_dtime)
+    to preserve their ordinal relationship: 0 < 1 < 2 < 3 < 4 < 5 < 6
+    (from "large down" to "large up").
+    
+    Pitch history dropout: During training, randomly zeros out pitch embeddings to force
+    the model to rely more on arrow guidance. This prevents the model from ignoring arrows
+    and just predicting autoregressively from pitch history alone.
+    """
+    def __init__(
+        self,
+        *,
+        max_seq_len: int,  # SEQ_LEN
+        dim: int,
+        depth: int,
+        heads: int,
+        emb_dropout: float = 0.,
+        pitch_history_dropout: float = 0.0,  # Dropout rate for pitch embeddings (0.0-1.0)
+        post_emb_norm: bool = False,
+        num_memory_tokens: Optional[int] = None,
+        memory_tokens_interspersed_every: Optional[int] = None,
+        rotary_pos_emb: bool = True,
+        attn_flash: bool = True,
+        logits_dim: Optional[int] = None,
+        causal: bool = True  # True for decoder
+    ):
+        super().__init__()
+        
+        self.emb_dim = dim # 2048
+        self.max_seq_len = max_seq_len
+        self.pitch_history_dropout = pitch_history_dropout  # Store for use in forward()
+        
+        # Embedding for pitch only (arrows are treated as continuous scalars)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        
+        # Arrow Embedding (Stronger conditioning)
+        # 0-6: fine arrows (specific intervals)
+        # 7: coarse down (any negative pitch change)
+        # 8: coarse up (any positive pitch change)
+        # Arrow 3 (stay) is shared between fine and coarse modes
+        self.arrow_emb = nn.Embedding(9, dim)
+        
+        # OLD: No arrow_emb - arrows are continuous scalars like buttons in original
+        # Input projection for concatenated features
+        # pitch embedding (dim) + arrow scalar (1)
+        # input_dim = dim + 1  # pitch_emb + arrow (continuous scalar)
+        # self.input_proj = nn.Linear(input_dim, dim)
+        
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout)
+        
+        # Attention layers
+        self.attn_layers = AttentionLayers(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            rotary_pos_emb=rotary_pos_emb,
+            attn_flash=attn_flash,
+            causal=causal
+        )
+        
+        self.init_()
+        
+        # Output projection to pitch logits
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)        
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+    def init_(self):
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.arrow_emb.weight)
+        # nn.init.kaiming_normal_(self.input_proj.weight)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],  # Contains 'pitch' and 'arrow'
+        return_intermediates: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[Tensor] = None,
+        seq_start_pos: Optional[int] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        """
+        Full-sequence forward pass.
+        Returns logits of shape [B, T, VOCAB_SIZE_PITCH],
+        predicting the pitch at every time step.
+        
+        Args:
+            past_tokens: Dict with 'pitch' [B, T] and 'arrow' [B, T]
+                - pitch: integer tensor with MIDI pitch values (0-127)
+                - arrow: integer tensor with arrow indices (0-6)
+        """
+        # Embed pitch
+        pitch = self.pitch_emb(past_tokens['pitch'])  # [B, T, dim]
+        
+        # PITCH HISTORY DROPOUT: During training, randomly zero out pitch embeddings
+        # to force the model to rely more on arrow guidance.
+        # A zero embedding vector is distinct from any learned pitch embedding,
+        # so the model learns: "zero = unknown pitch, trust the arrow"
+        if self.training and self.pitch_history_dropout > 0:
+            # Create random mask: keep_prob of positions are kept (1), rest are zeroed (0)
+            keep_prob = 1.0 - self.pitch_history_dropout
+            mask_shape = (pitch.shape[0], pitch.shape[1], 1)  # [B, T, 1] for broadcasting
+            keep_mask = (torch.rand(mask_shape, device=pitch.device) < keep_prob).float()
+            pitch = pitch * keep_mask  # Zero out dropped positions
+        
+        # NEW: Embed arrows (Strong conditioning)
+        # Cast to long to ensure it works with nn.Embedding
+        arrow = self.arrow_emb(past_tokens['arrow'].long()) # [B, T, dim]
+        
+        # Combine by addition
+        x = pitch + arrow
+        
+        # OLD: Treat arrow as continuous scalar (preserves ordinal relationship)
+        # This matches the original Decoder_no_dtime approach for buttons
+        # arrow = past_tokens['arrow'].float().unsqueeze(-1)  # [B, T, 1]
+        
+        # Concatenate pitch embedding with arrow scalar
+        # concat_inputs = torch.cat([pitch, arrow], dim=-1)  # [B, T, dim+1]
+        
+        # Project to model dimension
+        # x = self.input_proj(concat_inputs)  # [B, T, dim]
+        
+        # Apply dropout
+        x = self.emb_dropout(x)
+        
+        # Pass through attention layers
+        x, intermediates = self.attn_layers(
+            x, 
+            mask=mask, 
+            mems=mems, 
+            cache=cache, 
+            return_hiddens=True, 
+            seq_start_pos=seq_start_pos, 
+            **kwargs
+        )
+        
+        # Project to pitch logits
+        logits = self.to_logits(x)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        if return_intermediates:
+            return logits, intermediates
+        
+        return logits
+
+
+class AE_melody_w_coarse_arrows(Module):
+    """
+    Autoencoder for melody generation using deterministic arrow guidance.
+    Instead of learning a latent button space, arrows are directly extracted
+    from pitch differences and used to guide the decoder.
+    
+    Arrow mapping based on pitch differences (dPitch):
+        a=0: dPitch <= -8 (large descending jump)
+        a=1: -7 <= dPitch <= -3 (medium descending)
+        a=2: -2 <= dPitch <= -1 (small descending)
+        a=3: dPitch = 0 (stay)
+        a=4: 1 <= dPitch <= 2 (small ascending)
+        a=5: 3 <= dPitch <= 7 (medium ascending)
+        a=6: dPitch >= 8 (large ascending jump)
+    """
+    def __init__(
+        self,
+        decoder: Decoder_melody,
+        cfg: Optional[Dict] = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        # No encoder needed - arrows are deterministically extracted
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def soft_pitch_to_arrow(self, pitch_seq: Tensor, temperature: float = 1.0) -> Tensor:
+        """
+        Differentiable version of pitch_to_arrow using soft sigmoid boundaries.
+        Returns soft arrow probabilities [B, T-1, 7] instead of hard indices.
+        
+        Arrow mapping (same thresholds as pitch_to_arrow):
+            a=0: dPitch <= -8
+            a=1: -7 <= dPitch <= -3
+            a=2: -2 <= dPitch <= -1
+            a=3: dPitch = 0
+            a=4: 1 <= dPitch <= 2
+            a=5: 3 <= dPitch <= 7
+            a=6: dPitch >= 8
+        
+        Args:
+            pitch_seq: Tensor of shape [B, T] containing pitch values
+            temperature: Controls sharpness of boundaries (lower = sharper)
+        
+        Returns:
+            soft_arrows: Tensor of shape [B, T-1, 7] with probability distribution over arrows
+        """
+        # 1. Ensure input is a float tensor and add a dimension for broadcasting
+        # We need to compare every single pitch difference against every single threshold.
+        d = (pitch_seq[:, 1:] - pitch_seq[:, :-1]).float()  # [B, T-1] pitch differences
+        d = d.unsqueeze(-1)  # [B, T-1, 1]
+        
+        # 2. Define the boundaries (Thresholds)
+        # These are the "thresholds" between the arrow bins.
+        # Note: -7.5 is the midpoint between -8 (Large Down) and -7 (Medium Down).
+        # Arrow boundaries: ..., -8, -3, -1, 0, 1, 3, 8, ...
+        # Midpoints:        -7.5, -2.5, -0.5, 0.5, 2.5, 7.5
+        thresholds = torch.tensor([-7.5, -2.5, -0.5, 0.5, 2.5, 7.5], device=d.device, dtype=d.dtype)
+        
+        # Compute soft membership using sigmoids
+        # 3. Compute the "Soft Greater Than" probabilities (The Sigmoid)
+        # This asks: "What is the probability that d is greater than this threshold?"
+        # If d is far above the threshold, result is ~1.0. If far below, result is ~0.0.
+        soft_geq = torch.sigmoid((d - thresholds) / temperature)  # [B, T-1, 6]
+        
+       
+        
+        # 4. Add the "Infinity" boundaries
+        # The probability of being > -infinity is always 1.0 (All numbers are > -inf)
+        # The probability of being > +infinity is always 0.0 (No numbers are > +inf)
+        ones = torch.ones(d.shape[0], d.shape[1], 1, device=d.device, dtype=d.dtype) # Represents boundary at -infinity
+        zeros = torch.zeros(d.shape[0], d.shape[1], 1, device=d.device, dtype=d.dtype) # Represents boundary at +infinity
+
+        # 5. Combine boundaries with soft probabilities
+        # This creates a "probability distribution" over the 7 arrow bins.
+        # The first bin (arrow 0) has probability 1.0 for all differences.
+        # The last bin (arrow 6) has probability 0.0 for all differences.
+        # The intermediate bins have probabilities based on how far above/below their threshold the difference is.
+        # We stack them: [1.0,  prob_>_T1,  prob_>_T2, ... , 0.0]
+        soft_geq_extended = torch.cat([ones, soft_geq, zeros], dim=-1)  # [B, T-1, 8]
+
+        # 6. Calculate the "probability of being in each arrow bin"
+        # This is the difference between the probabilities of being greater than or equal to each threshold.
+        # Probability(Arrow i) = Prob(d > Lower_Wall) - Prob(d > Upper_Wall)
+        # ex. probability of Arrow 1 = Probability we are between threshold 1 and threshold 2 = (Probability we are above threshold 1) minus (Probability we are above threshold 2)
+        soft_arrows = soft_geq_extended[..., :-1] - soft_geq_extended[..., 1:]  # [B, T-1, 7]
+        
+        return soft_arrows  # Probability distribution over 7 arrows
+
+    def soft_arrow_consistency_loss(self, input_pitch: Tensor, predicted_logits: Tensor, 
+                                soft_temp: float = 2.0) -> Tensor:
+        """
+        Loss that encourages predicted pitches to follow the same arrow pattern as input.
+        Uses soft arrows and KL divergence for differentiability.
+        
+        Args:
+            input_pitch: [B, T+1] - input pitch sequence
+            predicted_logits: [B, T, vocab_size] - predicted pitch logits from decoder
+            soft_temp: Temperature for soft arrow computation
+        
+        Returns:
+            loss: Scalar tensor with arrow consistency loss
+        """
+        device = predicted_logits.device
+        
+        # Get input arrows (soft) from the target pitch sequence
+        # input_pitch[:, 1:] are the target pitches, so differences are input_pitch[:, 1:] - input_pitch[:, :-1]
+        input_soft_arrows = self.soft_pitch_to_arrow(input_pitch, temperature=soft_temp)  # [B, T, 7]
+        
+        # Get predicted pitch probabilities
+        pred_probs = F.softmax(predicted_logits, dim=-1)  # [B, T, vocab_size]
+        
+        # Compute expected predicted pitch at each position
+        vocab_size = pred_probs.shape[-1]
+        pitch_values = torch.arange(vocab_size, device=device, dtype=torch.float)
+        expected_pred_pitch = (pred_probs * pitch_values).sum(dim=-1)  # [B, T]
+        
+        # Previous pitches (from input sequence)
+        prev_pitch = input_pitch[:, :-1].float()  # [B, T]
+        
+        # Predicted pitch difference: expected_pred_pitch - previous_input_pitch
+        pred_diff = expected_pred_pitch - prev_pitch  # [B, T]
+        pred_diff = pred_diff.unsqueeze(-1)  # [B, T, 1]
+        
+        # Compute soft arrows for predicted differences
+        thresholds = torch.tensor([-8.5, -2.5, -0.5, 0.5, 2.5, 7.5], device=device, dtype=pred_diff.dtype)
+        soft_geq = torch.sigmoid((pred_diff - thresholds) / soft_temp)  # [B, T, 6]
+        
+        ones = torch.ones(pred_diff.shape[0], pred_diff.shape[1], 1, device=device, dtype=pred_diff.dtype)
+        zeros = torch.zeros(pred_diff.shape[0], pred_diff.shape[1], 1, device=device, dtype=pred_diff.dtype)
+        
+        soft_geq_extended = torch.cat([ones, soft_geq, zeros], dim=-1)  # [B, T, 8]
+        pred_soft_arrows = soft_geq_extended[..., :-1] - soft_geq_extended[..., 1:]  # [B, T, 7]
+        
+        # KL divergence: KL(input || pred)
+        # Add small epsilon to avoid log(0)
+        eps = 1e-8
+        pred_soft_arrows_log = (pred_soft_arrows + eps).log()
+        
+        # F.kl_div expects log-probabilities as input and probabilities as target
+        loss = F.kl_div(
+            pred_soft_arrows_log,
+            input_soft_arrows,
+            reduction='batchmean'
+        )
+        
+        return loss
+
+    def arrow_consistency_loss(self, input_arrows: Tensor, predicted_arrows: Tensor) -> Tensor:
+        """
+        Compute arrow consistency loss between input arrows and predicted arrows.
+        
+        Simple comparison: fraction of positions where arrows don't match.
+        
+        Args:
+            input_arrows: [B, T] arrows from ground truth pitch sequence
+            predicted_arrows: [B, T] arrows from predicted pitch sequence
+        
+        Returns:
+            loss: Scalar tensor with arrow consistency loss (fraction of mismatches)
+        """
+        matches = (input_arrows == predicted_arrows)
+        total_positions = input_arrows.numel()
+        
+        if total_positions > 0:
+            accuracy = matches.sum().float() / total_positions
+            loss = 1.0 - accuracy
+        else:
+            loss = torch.tensor(0.0, device=input_arrows.device)
+        
+        return loss
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        """
+        Training forward pass.
+        
+        Args:
+            note_tokens: Dict with 'pitch' [B, T+1] - ground truth pitch sequence
+        
+        Returns:
+            Dictionary with loss components
+        
+        Training alignment:
+            - Input pitch: [p0, p1, ..., pT]  (T+1 pitches)
+            - Arrows: [a0, a1, ..., aT-1] where ai = p(i+1) - pi (T arrows)
+            - Decoder input: pitch[0:T] and arrows[0:T]
+            - Target: pitch[1:T+1]
+            
+            At position i, the decoder sees pitch[i] and arrow[i].
+            Arrow[i] encodes the direction FROM pitch[i] TO pitch[i+1].
+            The model learns to predict pitch[i+1] given pitch[i] and arrow[i].
+        
+        Coarse Arrow Training:
+            With coarse_arrow_ratio > 0, some contiguous spans of the sequence
+            will use coarse arrows (7=down, 8=up) instead of fine arrows (0-6).
+            This teaches the model to handle both fine and coarse guidance,
+            mimicking real player behavior where they switch between modes.
+        """
+        # Extract arrows from pitch differences (ground truth arrows for training)
+        # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
+        # coarse_arrow_ratio determines fraction of sequence using coarse arrows
+        coarse_ratio = self.cfg.get('coarse_arrow_ratio', 0.0)
+        
+        # Generate coarse masks for all batch elements at once [B, T]
+        # T is the arrow sequence length (pitch sequence length - 1)
+        B, T_plus_1 = note_tokens['pitch'].shape
+        T = T_plus_1 - 1  # Arrow sequence length
+        device = note_tokens['pitch'].device
+        
+        coarse_masks = self.create_coarse_spans_mask(B, T, coarse_ratio, device=device)  # [B, T]
+
+        # Compute input arrows from ground truth pitch sequence
+        arrows = self.pitch_to_arrow(note_tokens['pitch'], coarse_masks=coarse_masks, coarse_ratio=coarse_ratio)  # [B, T]
+        
+        # Create decoder context
+        # At position i: pitch[i] + arrow[i] -> predict pitch[i+1]
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1],  # [B, T] - pitch[0:T] avoid pitch[T+1]
+            'arrow': arrows                          # [B, T] - direction for each transition
+        }
+        
+        # Get logits from decoder
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        # Target is the current pitch (shifted by 1)
+        target = note_tokens['pitch'][:, 1:]  # [B, T]
+        
+        # Compute reconstruction loss
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+
+        # Convert logits to predicted pitches (argmax for discrete prediction)
+        predicted_pitches = torch.argmax(logits, dim=-1)  # [B, T]
+        
+        # Prepend the first input pitch to create a full pitch sequence [B, T+1]
+        # This allows computing pitch differences for arrows
+        first_pitch = note_tokens['pitch'][:, :1]  # [B, 1]
+        predicted_pitch_seq = torch.cat([first_pitch, predicted_pitches], dim=1)  # [B, T+1]
+        
+        # Compute predicted arrows using the same coarse_masks
+        predicted_arrows = self.pitch_to_arrow(predicted_pitch_seq, coarse_masks=coarse_masks, coarse_ratio=coarse_ratio)  # [B, T]
+
+        # Compute arrow consistency loss
+        # This encourages the model to generate pitches that follow the same arrow pattern
+        loss_arrow_consistency = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_arrow_consistency = self.arrow_consistency_loss(
+                arrows,
+                predicted_arrows
+            )
+        
+        # Compute total loss
+        loss_total = loss_recons * self.cfg['loss_recons']
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
+        
+        # Compute accuracy
+        acc = self.compute_accuracy(logits, target)
+        
+        # Return loss dictionary (keeping structure for compatibility)
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            'loss_arrow_consistency': loss_arrow_consistency,
+            # All other losses set to 0 since we don't use them
+            'loss_margin': torch.tensor(0.0, device=loss_total.device),
+            'loss_deviate': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_held': torch.tensor(0.0, device=loss_total.device),
+            'loss_norm_pos': torch.tensor(0.0, device=loss_total.device),
+            'loss_pitch_button': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_concentration': torch.tensor(0.0, device=loss_total.device),
+            'loss_window_corr': torch.tensor(0.0, device=loss_total.device),
+            'loss_contour': torch.tensor(0.0, device=loss_total.device),
+            'loss_contour_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_interval_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_shape_perc': torch.tensor(0.0, device=loss_total.device),
+        }
+        return loss, acc
+
+    def create_coarse_spans_mask(self, batch_size: int, seq_len: int, target_ratio: float = 0.3,
                                    min_span: int = 8, max_span: int = 64,
                                    device: torch.device = None) -> Tensor:
         """
-        Create a mask with contiguous spans for coarse arrows.
-        Total coarse positions ≈ target_ratio * seq_len.
+        Create masks with contiguous spans for coarse arrows for all batch elements.
+        Total coarse positions ≈ target_ratio * seq_len per batch element.
         
         This mimics real player behavior where they use coarse control for 
         entire musical phrases, not individual notes.
         
         Args:
+            batch_size: Number of batch elements
             seq_len: Length of the sequence
             target_ratio: Target fraction of positions to be coarse (e.g., 0.3 = 30%)
             min_span: Minimum span length
@@ -3637,39 +4190,48 @@ class AutoregressiveAutoencoder_melody(Module):
             device: Torch device
         
         Returns:
-            mask: Boolean tensor [seq_len] where True = use coarse arrow
+            mask: Boolean tensor [B, seq_len] where True = use coarse arrow
         """
-        import random
-        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+        masks = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
         target_count = int(seq_len * target_ratio)
         
         if target_count == 0:
-            return mask
+            return masks
         
-        attempts = 0
-        max_attempts = 100  # Prevent infinite loop
+        # Clamp span sizes to valid range
+        actual_max_span = min(max_span, seq_len)
+        actual_min_span = min(min_span, actual_max_span)
         
-        while mask.sum().item() < target_count and attempts < max_attempts:
-            # Random span length (capped by remaining sequence)
-            actual_max_span = min(max_span, seq_len)
-            actual_min_span = min(min_span, actual_max_span)
-            span_len = random.randint(actual_min_span, actual_max_span)
-            
-            # Random start position
-            if seq_len - span_len > 0:
-                start = random.randint(0, seq_len - span_len)
-            else:
-                start = 0
-            end = start + span_len
-            
-            # Mark this span as coarse (may overlap with existing spans, that's fine)
-            mask[start:end] = True
-            attempts += 1
+        # Estimate number of spans needed (with some buffer for overlap)
+        avg_span = (actual_min_span + actual_max_span) / 2
+        num_spans = max(1, int((target_count / avg_span) * 1.5))  # 1.5x buffer for overlap
         
-        return mask
+        # Generate random span lengths for all batches and spans [B, num_spans]
+        span_lens = torch.randint(actual_min_span, actual_max_span + 1, 
+                                   (batch_size, num_spans), device=device)
+        
+        # Generate random start positions [B, num_spans]
+        max_start = max(1, seq_len - actual_min_span + 1)
+        starts = torch.randint(0, max_start, (batch_size, num_spans), device=device)
+        
+        # Create position indices [seq_len]
+        positions = torch.arange(seq_len, device=device)
+        
+        # Apply spans using broadcasting: for each batch and span, mark positions
+        # positions[None, None, :] is [1, 1, seq_len]
+        # starts[:, :, None] is [B, num_spans, 1]
+        # Check if position >= start AND position < start + span_len
+        in_span = (positions[None, None, :] >= starts[:, :, None]) & \
+                  (positions[None, None, :] < (starts + span_lens)[:, :, None])
+        
+        # Reduce over spans dimension: any span covering this position makes it True
+        masks = in_span.any(dim=1)  # [B, seq_len]
+        
+        return masks
 
     #@torch.inference_mode()
-    def pitch_to_arrow(self, pitch_seq: Tensor, coarse_ratio: float = 0.0) -> Tensor:
+    def pitch_to_arrow(self, pitch_seq: Tensor, coarse_masks: Optional[Tensor] = None, 
+                       coarse_ratio: float = 0.0) -> Tensor:
         """
         Convert pitch sequence to arrow sequence based on pitch differences.
         
@@ -3692,12 +4254,14 @@ class AutoregressiveAutoencoder_melody(Module):
         mimic real player behavior (using coarse control for entire phrases).
         
         Args:
-            pitch_seq: Tensor of shape [B, T] containing pitch values
+            pitch_seq: Tensor of shape [B, T+1] containing pitch values
+            coarse_masks: Optional[Tensor] of shape [B, T] boolean mask where True = coarse arrow
+                          If None, only fine arrows are used (inference mode).
             coarse_ratio: Fraction of positions to use coarse arrows (0.0-1.0)
-                          Only applied during training.
+                          Only applied during training when coarse_masks is provided.
         
         Returns:
-            arrows: Tensor of shape [B, T-1] containing arrow indices (0-8)
+            arrows: Tensor of shape [B, T] containing arrow indices (0-8)
         """
         # Calculate pitch differences: d[t] = pitch[t+1] - pitch[t]
         d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T-1]
@@ -3716,23 +4280,20 @@ class AutoregressiveAutoencoder_melody(Module):
         arrows = torch.where(d >= 8, torch.tensor(6, dtype=torch.long, device=d.device), arrows)
         
         # Replace fine arrows with coarse arrows in contiguous spans during training
-        if self.training and coarse_ratio > 0:
-            B, T = arrows.shape
-            for b in range(B):
-                coarse_mask = self.create_coarse_spans_mask(T, coarse_ratio, device=d.device)
-                # Down arrows (0, 1, 2) → coarse down (7)
-                arrows[b] = torch.where(
-                    coarse_mask & (arrows[b] <= 2),
-                    torch.tensor(7, device=d.device, dtype=torch.long),
-                    arrows[b]
-                )
-                # Arrow 3 (stay) remains 3 - it's shared between fine and coarse
-                # Up arrows (4, 5, 6) → coarse up (8)
-                arrows[b] = torch.where(
-                    coarse_mask & (arrows[b] >= 4),
-                    torch.tensor(8, device=d.device, dtype=torch.long),
-                    arrows[b]
-                )
+        if self.training and coarse_ratio > 0 and coarse_masks is not None:
+            # Down arrows (0, 1, 2) → coarse down (7) - batched operation
+            arrows = torch.where(
+                coarse_masks & (arrows <= 2),
+                torch.tensor(7, device=d.device, dtype=torch.long),
+                arrows
+            )
+            # Arrow 3 (stay) remains 3 - it's shared between fine and coarse
+            # Up arrows (4, 5, 6) → coarse up (8) - batched operation
+            arrows = torch.where(
+                coarse_masks & (arrows >= 4),
+                torch.tensor(8, device=d.device, dtype=torch.long),
+                arrows
+            )
         
         return arrows
  

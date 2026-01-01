@@ -49,7 +49,7 @@ AUTOMATIC_ARROWS = False # if True, use original midi file arrows for guidance
 device = torch.device('mps') 
 
 ''' MODEL '''
-model_name = 'melody_arrow_v7'
+model_name = 'melody_arrow_v10'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -80,8 +80,8 @@ KEY_MAPPING = {
     # Row 2: alternative keys (f, d, s, 2, 3, 4, 5)
     K_f: 0, K_d: 1, K_s: 2, K_2: 3, K_3: 4, K_4: 5, K_5: 6,
     # Coarse arrows (direction only, no specific interval)
-    K_DOWN: 7,   # Coarse down: any negative pitch change
-    K_UP: 8,     # Coarse up: any positive pitch change
+    K_a: 7,  K_z: 7, # Coarse down: any negative pitch change
+    K_q: 8,  K_1: 8, # Coarse up: any positive pitch change
     # Note: K_w / K_2 already map to 3 (stay) - shared between fine and coarse
 }
 

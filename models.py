@@ -644,7 +644,7 @@ MODELS_PARAMETERS = {
         },
     'melody_arrow_v3': {
         'model_type': 'autoencoder_melody',
-        'description': 'Melody autoencoder with arrow guidance. Uses melody-only pickles (channel 0). New implementation, as arrows are treated as discrete embedded values, not continuous scalars like buttons in original',
+        'description': 'Melody autoencoder with arrow guidance. Uses melody-only pickles (channel 0). New implementation, as arrows are treated as discrete embedded values, not continuous scalars like buttons in original. Soft_temp 1.0',
         'train_log': '',
         'ckpt_file_name': './save_models/melody_arrow_v3_795_eps_796_steps_14.3731_loss_0.8396_acc.pth',
         'pad_idx': 128,
@@ -737,7 +737,7 @@ MODELS_PARAMETERS = {
     },
 'melody_arrow_v8': {
     'model_type': 'autoencoder_melody',
-    'description': 'High accuracy attempt: dropout 10%, fine arrows only, coarse arrows 10%',
+    'description': 'High accuracy attempt: dropout 10%, coarse arrows 10%',
     'train_log': '',
     'ckpt_file_name': '',
     'seq_len': 1024,
@@ -774,20 +774,40 @@ MODELS_PARAMETERS = {
     "save_every": 15,
     },
  'melody_arrow_v10': {
-    'model_type': 'autoencoder_melody',
-    'description': 'High accuracy attempt: dropout 10%, coarse arrows 100%',
+    'model_type': 'AE_melody_w_coarse_arrows',
+    'description': 'High accuracy attempt: dropout 0%, coarse arrows 30%',
+    'train_log': '',
+    'ckpt_file_name': './save_models/melody_arrow_v10_135_eps_272_steps_0.4089_loss_0.8658_acc.pth',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,           
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # 10% dropout (full context)
+    'coarse_arrow_ratio': 0.3,      # 100% coarse arrows (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+    "save_every": 15,
+    },
+
+'melody_arrow_v11': {
+    'model_type': 'AE_melody_w_coarse_arrows',
+    'description': 'High accuracy attempt: dropout 0%, coarse arrows 30%',
     'train_log': '',
     'ckpt_file_name': '',
     'seq_len': 1024,
     'pad_idx': 128,
     'emb_dim': 2048,
-    'num_layers': 6,           # Increased depth
+    'num_layers': 4,           
     'heads': 32,
     'loss_recons': 1.0,
     'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
-    'arrow_soft_temp': 1.0,         # Sharper boundaries
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
     'pitch_history_dropout': 0.0,   # 10% dropout (full context)
-    'coarse_arrow_ratio': 1.0,      # 100% coarse arrows (easier task)
+    'coarse_arrow_ratio': 0.3,      # 100% coarse arrows (easier task)
     "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
     "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
     "save_every": 15,
@@ -829,7 +849,7 @@ MODELS_PARAMETERS = {
 # Harmony-conditioned autoencoder (Tonnetz conditioning)
 'autoenc_just_harmony_v1b': {
     'model_type': 'autoencoder_just_harmony',
-    'description': 'Tester light with no harmony conditioning. With no pitch augmentation, no chord augmentation.',
+    'description': 'no harmony conditioning. With pitch augmentation, chord augmentation.',
     'train_log': '',
     'ckpt_file_name': '',
     'seq_len': 512,
@@ -843,7 +863,32 @@ MODELS_PARAMETERS = {
     "dataset_train_path": "./Training-Data/giantmidi_full_harmony_train",
     "dataset_val_path": "./Training-Data/giantmidi_full_harmony_test",
     # Training settings
-    "save_every": 1,
+    "save_every": 10,
+    "batch_size": 24,
+    "num_workers": 10,
+    },
+
+'autoenc_no_dtime_harmony_v1': {
+    'model_type': 'autoencoder_no_dtime_harmony',
+    'description': ' with harmony conditioning and button guidance.',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048, 
+    'num_layers': 4,
+    'heads': 32,
+    # Loss weights
+    'loss_recons': 1.0,
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    "loss_multi_step_perc": 1.,
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_test",
+    # Training settings
+    "save_every": 5,
     "batch_size": 24,
     "num_workers": 10,
     },

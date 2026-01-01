@@ -178,6 +178,20 @@ def load_model(model_name='default',
                 attn_flash = True
             )
         )
+    elif cfg['model_type'] == 'AE_melody_w_coarse_arrows':
+        # Melody autoencoder with arrow guidance (no encoder needed)
+        mpt_model = AE_melody_w_coarse_arrows(
+            cfg = cfg,
+            decoder = Decoder_melody_w_coarse_arrows(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                pitch_history_dropout = cfg['pitch_history_dropout'],  # Zero out pitch embeddings to force arrow reliance
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
+        )
     elif cfg['model_type'] == 'autoencoder_no_dtime_harmony':
         # Autoencoder with Tonnetz harmony conditioning (decoder-only)
         mpt_model = AutoregressiveAutoencoder_no_dtime_harmony(
@@ -221,7 +235,7 @@ def load_model(model_name='default',
         else:
             map_location = None
 
-        mpt_model.load_state_dict(torch.load(model_path, map_location=map_location)) # weights_only=True not compatible cpu
+        mpt_model.load_state_dict(torch.load(model_path, map_location=map_location), strict=False) # weights_only=True not compatible cpu
 
         if compile_mode != 'none':
             mpt_model = torch.compile(mpt_model, mode=compile_mode)

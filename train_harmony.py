@@ -364,7 +364,7 @@ def main():
 
     ''' MODEL & HYPERPARAMETERS '''
     project_name = 'monsterGenie_harmony'
-    model_name = 'autoenc_just_harmony_v1b'
+    model_name = 'autoenc_no_dtime_harmony_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
