@@ -37,7 +37,7 @@ DEFAULT_HPARAMS = {
     "seq_len": 2048,
     "emb_dim": 2048,
     "num_layers": 4,
-    "heads": 4,
+    "heads": 32,
 
     # loss components
     "loss_recons": 1., # 1., original # Reconstruction loss
@@ -55,6 +55,7 @@ DEFAULT_HPARAMS = {
     "loss_multi_step_perc": 1., # 0.3, original # considers relationships between the current note and multiple previous notes (in directions, not magnitude, -1,+1)
     "loss_interval_perc": 0., # 0.2, original # Encourages the relative magnitudes of intervals to be preserved between pitches and buttons
     "loss_shape_perc": 0., # 0.1, original # Preserves the overall shape of melodic phrases by comparing the pattern of ups and downs within sliding windows.
+
     'loss_arrow_consistency': 0.1, # Weight for arrow consistency loss (soft arrows + KL divergence)
     'arrow_soft_temp': 2.0, # Temperature for soft arrow boundaries (lower = sharper)
 
@@ -88,6 +89,7 @@ DEFAULT_HPARAMS = {
 
     # vocabulary parameters
     "num_buttons": 12,
+    "num_arrows": 7,
 
     # Activation flags 
     "use_logs": False,
@@ -95,6 +97,9 @@ DEFAULT_HPARAMS = {
 
     # Zero out pitch embeddings to force arrow/buttons reliance
     'pitch_history_dropout': 0.0,
+
+    # Freeze encoder for first N steps
+    "unfreeze_encoder_after_n_epochs": 30, # after N epochs
 }
 
 ''' VOCABULARY '''
@@ -109,6 +114,9 @@ VOCAB_SIZE_DUR:Final[int] = RANGE_DUR_SHIFT + 1
 
 RANGE_VEL_SHIFT:Final[int] = 127 
 VOCAB_SIZE_VEL:Final[int] = RANGE_VEL_SHIFT + 1
+
+VOCAB_SIZE_ARROWS:Final[int] = 8
+ARROW_NA:Final[int] = 7
 
 ''' TRAINING '''
 # Taken from the paper

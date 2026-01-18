@@ -46,7 +46,8 @@ TRACES = False
 device = torch.device('mps') 
 
 ''' MODEL '''
-model_name = 'no_dtime_good_reference'
+#model_name = 'no_dtime_good_reference'
+model_name = 'no_dtime_button_concentration_tester_v3'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -97,16 +98,17 @@ def midiin_callback(event, data=None):
             print("resetting context")
             reset_context()
 
-
 def key_to_button(key):
     key = key - 48 # keyboard starts at C = 48
-    button = key % 20 # 12 white keys, 8 black keys
-    toWhite = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11]
+    button = key #% 20 # 12 white keys, 8 black keys
+    toWhite = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11, 12, 12, 13, 14, 14, 15, 15, 16, 17, 17, 18, 18, 19, 19, 20, 21, 21, 22,22,23,23,24]
     button = toWhite[button] # convert to white key index
     #print("k_2_b", button)
+    if TRACES:
+        print("button", button)
     return button
 
-"""# FLUIDSYNTH INIT """
+"""# FLUIDSYNTH INIT """    
 fs = fluidsynth.Synth()
 fs.start()
 sfid = fs.sfload("./piano.sf2")
@@ -208,7 +210,7 @@ def manageNote(note, velocity):
     # MIDI note to button
     try:
         but = key_to_button(note)
-        #b[i+CTX_LEN] = but
+        b[i+CTX_LEN] = but
     except:
         print("ERROR", b[i+CTX_LEN])
     context = {
@@ -218,8 +220,6 @@ def manageNote(note, velocity):
       'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
     }
     context = to_device(context, device)
-    if TRACES:
-        print("dtime", dict_output_tokens['dtime'][i:i+CTX_LEN+1])
                  
     with torch.inference_mode():
         new_pitch_token = model.gen_pitch_token(context)
@@ -234,13 +234,10 @@ def manageNote(note, velocity):
     i += 1
 
   else: # noteOff
-    if TRACES:
-        print("noteOff", note)
     but = key_to_button(note)
     #print("but", but)
     if but in noteOn_dict:
-      if TRACES:
-        print("in_Noteon_dict")
+
       # get pitch and time in dictionary of accumulated notesOns without noteOff
       pitch, noteOn_time = noteOn_dict[but]
       playNote(pitch, 0)

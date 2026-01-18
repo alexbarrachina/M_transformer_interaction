@@ -3553,7 +3553,7 @@ class AutoregressiveAutoencoder_melody(Module):
         # Extract arrows from pitch differences (ground truth arrows for training)
         # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
         arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T]
-        
+
         # Create decoder context
         # At position i: pitch[i] + arrow[i] -> predict pitch[i+1]
         decoder_context = {
@@ -4379,6 +4379,696 @@ class AE_melody_w_coarse_arrows(Module):
 
         acc = num_right / len(labels) 
         return acc
+
+class Decoder_melody_w_coarse_arrows_no_influence(nn.Module):
+    """
+    Decoder for melody generation using arrow guidance instead of learned buttons.
+    Accepts previous pitches and arrow directions to predict next pitch.
+    
+    Arrows are treated as continuous scalar values (like buttons in Decoder_no_dtime)
+    to preserve their ordinal relationship: 0 < 1 < 2 < 3 < 4 < 5 < 6
+    (from "large down" to "large up").
+    
+    Pitch history dropout: During training, randomly zeros out pitch embeddings to force
+    the model to rely more on arrow guidance. This prevents the model from ignoring arrows
+    and just predicting autoregressively from pitch history alone.
+    """
+    def __init__(
+        self,
+        *,
+        max_seq_len: int,  # SEQ_LEN
+        dim: int,
+        depth: int,
+        heads: int,
+        emb_dropout: float = 0.,
+        pitch_history_dropout: float = 0.0,  # Dropout rate for pitch embeddings (0.0-1.0)
+        post_emb_norm: bool = False,
+        num_memory_tokens: Optional[int] = None,
+        memory_tokens_interspersed_every: Optional[int] = None,
+        rotary_pos_emb: bool = True,
+        attn_flash: bool = True,
+        logits_dim: Optional[int] = None,
+        causal: bool = True  # True for decoder
+    ):
+        super().__init__()
+        
+        self.emb_dim = dim # 2048
+        self.max_seq_len = max_seq_len
+        self.pitch_history_dropout = pitch_history_dropout  # Store for use in forward()
+        
+        # Embedding for pitch only (arrows are treated as continuous scalars)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        
+        # Arrow Embedding (Stronger conditioning)
+        # 0-6: fine arrows (specific intervals)
+        # 7: coarse down (any negative pitch change)
+        # 8: coarse up (any positive pitch change)
+        # 9: no influence (model decides freely)
+        # Arrow 3 (stay) is shared between fine and coarse modes
+        self.arrow_emb = nn.Embedding(10, dim)
+        
+        # OLD: No arrow_emb - arrows are continuous scalars like buttons in original
+        # Input projection for concatenated features
+        # pitch embedding (dim) + arrow scalar (1)
+        # input_dim = dim + 1  # pitch_emb + arrow (continuous scalar)
+        # self.input_proj = nn.Linear(input_dim, dim)
+        
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout)
+        
+        # Attention layers
+        self.attn_layers = AttentionLayers(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            rotary_pos_emb=rotary_pos_emb,
+            attn_flash=attn_flash,
+            causal=causal
+        )
+        
+        self.init_()
+        
+        # Output projection to pitch logits
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)        
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+    def init_(self):
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.arrow_emb.weight)
+        
+        # Option A: Initialize coarse arrows semantically
+        # Make arrow 7 (coarse down) similar to fine down arrows (0,1,2)
+        # Make arrow 8 (coarse up) similar to fine up arrows (4,5,6)
+        # Arrow 9 (no influence) initialized to zeros - no conditioning
+        with torch.no_grad():
+            self.arrow_emb.weight[7] = self.arrow_emb.weight[0:3].mean(dim=0)
+            self.arrow_emb.weight[8] = self.arrow_emb.weight[4:7].mean(dim=0)
+            self.arrow_emb.weight[9] = torch.zeros_like(self.arrow_emb.weight[0])
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],  # Contains 'pitch' and 'arrow'
+        return_intermediates: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[Tensor] = None,
+        seq_start_pos: Optional[int] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        """
+        Full-sequence forward pass.
+        Returns logits of shape [B, T, VOCAB_SIZE_PITCH],
+        predicting the pitch at every time step.
+        
+        Args:
+            past_tokens: Dict with 'pitch' [B, T] and 'arrow' [B, T]
+                - pitch: integer tensor with MIDI pitch values (0-127)
+                - arrow: integer tensor with arrow indices (0-9)
+        """
+        # Embed pitch
+        pitch = self.pitch_emb(past_tokens['pitch'])  # [B, T, dim]
+        
+        # PITCH HISTORY DROPOUT: During training, randomly zero out pitch embeddings
+        # to force the model to rely more on arrow guidance.
+        # A zero embedding vector is distinct from any learned pitch embedding,
+        # so the model learns: "zero = unknown pitch, trust the arrow"
+        if self.training and self.pitch_history_dropout > 0:
+            # Create random mask: keep_prob of positions are kept (1), rest are zeroed (0)
+            keep_prob = 1.0 - self.pitch_history_dropout
+            mask_shape = (pitch.shape[0], pitch.shape[1], 1)  # [B, T, 1] for broadcasting
+            keep_mask = (torch.rand(mask_shape, device=pitch.device) < keep_prob).float()
+            pitch = pitch * keep_mask  # Zero out dropped positions
+        
+        # NEW: Embed arrows (Strong conditioning)
+        # Cast to long to ensure it works with nn.Embedding
+        arrow = self.arrow_emb(past_tokens['arrow'].long()) # [B, T, dim]
+        
+        # Combine by addition
+        x = pitch + arrow
+        
+        # OLD: Treat arrow as continuous scalar (preserves ordinal relationship)
+        # This matches the original Decoder_no_dtime approach for buttons
+        # arrow = past_tokens['arrow'].float().unsqueeze(-1)  # [B, T, 1]
+        
+        # Concatenate pitch embedding with arrow scalar
+        # concat_inputs = torch.cat([pitch, arrow], dim=-1)  # [B, T, dim+1]
+        
+        # Project to model dimension
+        # x = self.input_proj(concat_inputs)  # [B, T, dim]
+        
+        # Apply dropout
+        x = self.emb_dropout(x)
+        
+        # Pass through attention layers
+        x, intermediates = self.attn_layers(
+            x, 
+            mask=mask, 
+            mems=mems, 
+            cache=cache, 
+            return_hiddens=True, 
+            seq_start_pos=seq_start_pos, 
+            **kwargs
+        )
+        
+        # Project to pitch logits
+        logits = self.to_logits(x)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        if return_intermediates:
+            return logits, intermediates
+        
+        return logits
+
+
+class AE_melody_w_coarse_arrows_no_influence(Module):
+    """
+    Autoencoder for melody generation using deterministic arrow guidance.
+    Instead of learning a latent button space, arrows are directly extracted
+    from pitch differences and used to guide the decoder.
+    
+    Arrow mapping based on pitch differences (dPitch):
+        a=0: dPitch <= -8 (large descending jump)
+        a=1: -7 <= dPitch <= -3 (medium descending)
+        a=2: -2 <= dPitch <= -1 (small descending)
+        a=3: dPitch = 0 (stay)
+        a=4: 1 <= dPitch <= 2 (small ascending)
+        a=5: 3 <= dPitch <= 7 (medium ascending)
+        a=6: dPitch >= 8 (large ascending jump)
+    """
+    def __init__(
+        self,
+        decoder: Decoder_melody,
+        cfg: Optional[Dict] = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        # No encoder needed - arrows are deterministically extracted
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def arrow_to_direction(self, arrows: Tensor) -> Tensor:
+        """
+        Convert arrows to direction categories.
+        
+        Direction mapping:
+            0 = down (arrows 0, 1, 2, 7)
+            1 = stay (arrow 3)
+            2 = up (arrows 4, 5, 6, 8)
+            3 = no_influence (arrow 9) - special value for comparison exclusion
+        
+        Args:
+            arrows: [B, T] arrow indices (0-9)
+        
+        Returns:
+            directions: [B, T] direction indices (0, 1, 2, 3)
+        """
+        direction = torch.zeros_like(arrows)
+        # Down: arrows 0, 1, 2 (fine down) or 7 (coarse down)
+        direction = torch.where((arrows <= 2) | (arrows == 7), 
+                                torch.tensor(0, device=arrows.device, dtype=arrows.dtype), direction)
+        # Stay: arrow 3 (shared between fine and coarse)
+        direction = torch.where(arrows == 3, 
+                                torch.tensor(1, device=arrows.device, dtype=arrows.dtype), direction)
+        # Up: arrows 4, 5, 6 (fine up) or 8 (coarse up)
+        direction = torch.where((arrows >= 4) & (arrows <= 6) | (arrows == 8), 
+                                torch.tensor(2, device=arrows.device, dtype=arrows.dtype), direction)
+        # No influence: arrow 9
+        direction = torch.where(arrows == 9, 
+                                torch.tensor(3, device=arrows.device, dtype=arrows.dtype), direction)
+        return direction
+
+    def arrow_consistency_loss(self, input_arrows: Tensor, predicted_arrows: Tensor,
+                                no_influence_masks: Optional[Tensor] = None) -> Tensor:
+        """
+        Compute arrow consistency loss between input arrows and predicted arrows.
+        
+        Simple comparison: fraction of positions where arrows don't match.
+        Excludes no_influence positions (arrow 9) since they have no constraint.
+        
+        Args:
+            input_arrows: [B, T] arrows from ground truth pitch sequence
+            predicted_arrows: [B, T] arrows from predicted pitch sequence
+            no_influence_masks: Optional[Tensor] [B, T] True where arrow=9 (excluded from loss)
+        
+        Returns:
+            loss: Scalar tensor with arrow consistency loss (fraction of mismatches)
+        """
+        # Exclude no_influence positions from comparison
+        if no_influence_masks is not None:
+            valid_mask = ~no_influence_masks
+            matches = (input_arrows == predicted_arrows) & valid_mask
+            total_positions = valid_mask.sum().float()
+        else:
+            matches = (input_arrows == predicted_arrows)
+            total_positions = float(input_arrows.numel())
+        
+        if total_positions > 0:
+            accuracy = matches.sum().float() / total_positions
+            loss = 1.0 - accuracy
+        else:
+            loss = torch.tensor(0.0, device=input_arrows.device)
+        
+        return loss
+
+    def direction_consistency_loss(self, input_arrows: Tensor, predicted_arrows: Tensor) -> Tensor:
+        """
+        Option B: Compute arrow consistency loss comparing DIRECTIONS, not exact arrows.
+        
+        This ensures that coarse arrows (7=down, 8=up) are treated as equivalent to
+        their fine counterparts (0,1,2=down and 4,5,6=up).
+        
+        Args:
+            input_arrows: [B, T] arrows from ground truth pitch sequence
+            predicted_arrows: [B, T] arrows from predicted pitch sequence
+        
+        Returns:
+            loss: Scalar tensor with arrow consistency loss (fraction of direction mismatches)
+        """
+        # Convert arrows to directions (down=0, stay=1, up=2)
+        input_dir = self.arrow_to_direction(input_arrows)
+        pred_dir = self.arrow_to_direction(predicted_arrows)
+        
+        # Compare directions instead of exact arrows
+        matches = (input_dir == pred_dir)
+        total_positions = input_arrows.numel()
+        
+        if total_positions > 0:
+            accuracy = matches.sum().float() / total_positions
+            loss = 1.0 - accuracy
+        else:
+            loss = torch.tensor(0.0, device=input_arrows.device)
+        
+        return loss
+
+    def compute_coarse_direction_loss(self, arrows: Tensor, predicted_pitches: Tensor, 
+                                       prev_pitch: Tensor) -> Tensor:
+        """
+        Option D: Compute direction loss for coarse arrows.
+        
+        Explicitly supervises direction (up/down) for coarse arrow positions.
+        Uses a margin-based loss that penalizes pitch differences in the wrong direction.
+        
+        Args:
+            arrows: [B, T] arrow indices (0-9)
+            predicted_pitches: [B, T] predicted pitch values from argmax
+            prev_pitch: [B, T] previous pitch values (note_tokens['pitch'][:, :-1])
+        
+        Returns:
+            loss: Scalar tensor with coarse direction loss
+        """
+        # Identify coarse arrow positions
+        coarse_down_mask = (arrows == 7)  # Positions where model should go down
+        coarse_up_mask = (arrows == 8)    # Positions where model should go up
+        coarse_pos = coarse_down_mask | coarse_up_mask
+        
+        if not coarse_pos.any():
+            return (torch.tensor(0.0, device=arrows.device))
+        
+        # Predicted pitch difference
+        pred_diff = predicted_pitches.float() - prev_pitch.float()  # [B, T]
+        
+        # For down positions (arrow 7): penalize if pred_diff >= 0
+        # For up positions (arrow 8): penalize if pred_diff <= 0
+        # Use soft margin loss: encourage pred_diff to be in correct direction
+        
+        # Direction violations (margin of 1.0 semitone)
+        down_violations = torch.clamp(pred_diff + 1.0, min=0) * coarse_down_mask.float()  # Should be negative
+        up_violations = torch.clamp(-pred_diff + 1.0, min=0) * coarse_up_mask.float()    # Should be positive
+        
+        # Mean violation over coarse positions
+        total_coarse = coarse_pos.sum().float().clamp(min=1)
+        loss = (down_violations.sum() + up_violations.sum()) / total_coarse
+        
+        return loss
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        """
+        Training forward pass.
+        
+        Args:
+            note_tokens: Dict with 'pitch' [B, T+1] - ground truth pitch sequence
+        
+        Returns:
+            Dictionary with loss components
+        
+        Training alignment:
+            - Input pitch: [p0, p1, ..., pT]  (T+1 pitches)
+            - Arrows: [a0, a1, ..., aT-1] where ai = p(i+1) - pi (T arrows)
+            - Decoder input: pitch[0:T] and arrows[0:T]
+            - Target: pitch[1:T+1]
+            
+            At position i, the decoder sees pitch[i] and arrow[i].
+            Arrow[i] encodes the direction FROM pitch[i] TO pitch[i+1].
+            The model learns to predict pitch[i+1] given pitch[i] and arrow[i].
+        
+        Coarse Arrow Training:
+            With coarse_arrow_ratio > 0, some contiguous spans of the sequence
+            will use coarse arrows (7=down, 8=up) instead of fine arrows (0-6).
+            This teaches the model to handle both fine and coarse guidance,
+            mimicking real player behavior where they switch between modes.
+        
+        No Influence Training:
+            With no_influence_ratio > 0, some contiguous spans use no conditioning (arrow 9).
+            The model must predict purely from pitch history, learning to work with no guidance.
+        """
+        # Extract arrows from pitch differences (ground truth arrows for training)
+        # note_tokens['pitch'] is [B, T+1], arrows will be [B, T]
+        coarse_ratio = self.cfg.get('coarse_arrow_ratio', 0.0)
+        no_influence_ratio = self.cfg.get('no_influence_ratio', 0.0)
+        
+        # Generate masks for all batch elements at once [B, T]
+        # T is the arrow sequence length (pitch sequence length - 1)
+        B, T_plus_1 = note_tokens['pitch'].shape
+        T = T_plus_1 - 1  # Arrow sequence length
+        device = note_tokens['pitch'].device
+        
+        # Generate coarse and no_influence masks (non-overlapping)
+        # Priority: no_influence > coarse > fine
+        coarse_masks = self.create_coarse_spans_mask(B, T, coarse_ratio, device=device)  # [B, T]
+        no_influence_masks = self.create_coarse_spans_mask(B, T, no_influence_ratio, device=device)  # [B, T]
+        
+        # Ensure no overlap: no_influence takes priority
+        coarse_masks = coarse_masks & ~no_influence_masks
+
+        # Compute input arrows from ground truth pitch sequence
+        arrows = self.pitch_to_arrow(
+            note_tokens['pitch'], 
+            coarse_masks=coarse_masks, 
+            no_influence_masks=no_influence_masks,
+            coarse_ratio=coarse_ratio
+        )  # [B, T]
+        
+        # Create decoder context
+        # At position i: pitch[i] + arrow[i] -> predict pitch[i+1]
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1],  # [B, T] - pitch[0:T] avoid pitch[T+1]
+            'arrow': arrows                          # [B, T] - direction for each transition
+        }
+        
+        # Get logits from decoder
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        # Target is the current pitch (shifted by 1)
+        target = note_tokens['pitch'][:, 1:]  # [B, T]
+        
+        # Compute reconstruction loss
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+
+        # Convert logits to predicted pitches (argmax for discrete prediction)
+        predicted_pitches = torch.argmax(logits, dim=-1)  # [B, T]
+        
+        # Prepend the first input pitch to create a full pitch sequence [B, T+1]
+        # This allows computing pitch differences for arrows
+        first_pitch = note_tokens['pitch'][:, :1]  # [B, 1]
+        predicted_pitch_seq = torch.cat([first_pitch, predicted_pitches], dim=1)  # [B, T+1]
+        
+        # Compute predicted arrows using the same masks
+        predicted_arrows = self.pitch_to_arrow(
+            predicted_pitch_seq, 
+            coarse_masks=coarse_masks, 
+            no_influence_masks=no_influence_masks,
+            coarse_ratio=coarse_ratio
+        )  # [B, T]
+
+        # Compute arrow consistency loss (excluding no_influence positions)
+        # This encourages the model to generate pitches that follow the same arrow pattern
+        loss_arrow_consistency = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_arrow_consistency = self.arrow_consistency_loss(
+                arrows,
+                predicted_arrows,
+                no_influence_masks
+            )
+        
+        # Option D: Compute direction loss for coarse arrows
+        loss_coarse_direction = torch.tensor(0.0, device=logits.device)
+        coarse_direction_acc = torch.tensor(0.0, device=logits.device)
+        
+        if self.cfg.get('loss_coarse_direction', 0) > 0 and coarse_ratio > 0:
+            prev_pitch = note_tokens['pitch'][:, :-1]  # [B, T]
+            loss_coarse_direction = self.compute_coarse_direction_loss(
+                arrows, predicted_pitches, prev_pitch
+            )
+        
+        # Compute total loss
+        loss_total = loss_recons * self.cfg['loss_recons']
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
+        if self.cfg.get('loss_coarse_direction', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_coarse_direction'] * loss_coarse_direction
+        
+        # Compute accuracy
+        acc = self.compute_accuracy(logits, target)
+        
+        # Return loss dictionary (keeping structure for compatibility)
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            'loss_arrow_consistency': loss_arrow_consistency,
+            'loss_coarse_direction': loss_coarse_direction,
+            'coarse_direction_acc': coarse_direction_acc,
+            # All other losses set to 0 since we don't use them
+            'loss_margin': torch.tensor(0.0, device=loss_total.device),
+            'loss_deviate': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_held': torch.tensor(0.0, device=loss_total.device),
+            'loss_norm_pos': torch.tensor(0.0, device=loss_total.device),
+            'loss_pitch_button': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_concentration': torch.tensor(0.0, device=loss_total.device),
+            'loss_window_corr': torch.tensor(0.0, device=loss_total.device),
+            'loss_contour': torch.tensor(0.0, device=loss_total.device),
+            'loss_contour_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_interval_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_shape_perc': torch.tensor(0.0, device=loss_total.device),
+        }
+        return loss, acc
+
+    def create_coarse_spans_mask(self, batch_size: int, seq_len: int, target_ratio: float = 0.3,
+                                   min_span: int = 8, max_span: int = 64,
+                                   device: torch.device = None) -> Tensor:
+        """
+        Create masks with contiguous spans for coarse arrows for all batch elements.
+        Total coarse positions ≈ target_ratio * seq_len per batch element.
+        
+        This mimics real player behavior where they use coarse control for 
+        entire musical phrases, not individual notes.
+        
+        Args:
+            batch_size: Number of batch elements
+            seq_len: Length of the sequence
+            target_ratio: Target fraction of positions to be coarse (e.g., 0.3 = 30%)
+            min_span: Minimum span length
+            max_span: Maximum span length
+            device: Torch device
+        
+        Returns:
+            mask: Boolean tensor [B, seq_len] where True = use coarse arrow
+        """
+        masks = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+        target_count = int(seq_len * target_ratio)
+        
+        if target_count == 0:
+            return masks
+        
+        # Clamp span sizes to valid range
+        actual_max_span = min(max_span, seq_len)
+        actual_min_span = min(min_span, actual_max_span)
+        
+        # Estimate number of spans needed (with some buffer for overlap)
+        avg_span = (actual_min_span + actual_max_span) / 2
+        num_spans = max(1, int((target_count / avg_span) * 1.5))  # 1.5x buffer for overlap
+        
+        # Generate random span lengths for all batches and spans [B, num_spans]
+        span_lens = torch.randint(actual_min_span, actual_max_span + 1, 
+                                   (batch_size, num_spans), device=device)
+        
+        # Generate random start positions [B, num_spans]
+        max_start = max(1, seq_len - actual_min_span + 1)
+        starts = torch.randint(0, max_start, (batch_size, num_spans), device=device)
+        
+        # Create position indices [seq_len]
+        positions = torch.arange(seq_len, device=device)
+        
+        # Apply spans using broadcasting: for each batch and span, mark positions
+        # positions[None, None, :] is [1, 1, seq_len]
+        # starts[:, :, None] is [B, num_spans, 1]
+        # Check if position >= start AND position < start + span_len
+        in_span = (positions[None, None, :] >= starts[:, :, None]) & \
+                  (positions[None, None, :] < (starts + span_lens)[:, :, None])
+        
+        # Reduce over spans dimension: any span covering this position makes it True
+        masks = in_span.any(dim=1)  # [B, seq_len]
+        
+        return masks
+
+    #@torch.inference_mode()
+    def pitch_to_arrow(self, pitch_seq: Tensor, coarse_masks: Optional[Tensor] = None, 
+                       no_influence_masks: Optional[Tensor] = None,
+                       coarse_ratio: float = 0.0) -> Tensor:
+        """
+        Convert pitch sequence to arrow sequence based on pitch differences.
+        
+        Fine arrow mapping (0-6):
+            a=0: dPitch <= -8 (descending more than 7 semitones)
+            a=1: -7 <= dPitch <= -3 (descend between 3 and 7 semitones)
+            a=2: -2 <= dPitch <= -1 (descends 1 or 2 semitones)
+            a=3: dPitch = 0 (no change) - SHARED with coarse
+            a=4: 1 <= dPitch <= 2 (increases 1 or 2 semitones)
+            a=5: 3 <= dPitch <= 7 (increases between 3 and 7 semitones)
+            a=6: dPitch >= 8 (increases more than 7 semitones)
+        
+        Coarse arrow mapping (7-8, plus shared 3):
+            a=7: any negative dPitch (coarse down)
+            a=3: dPitch = 0 (stay, shared with fine)
+            a=8: any positive dPitch (coarse up)
+        
+        No influence (9):
+            a=9: model decides freely, no conditioning
+        
+        During training, coarse_ratio determines what fraction of the sequence
+        uses coarse arrows. Coarse arrows are applied in contiguous spans to
+        mimic real player behavior (using coarse control for entire phrases).
+        
+        Args:
+            pitch_seq: Tensor of shape [B, T+1] containing pitch values
+            coarse_masks: Optional[Tensor] of shape [B, T] boolean mask where True = coarse arrow
+                          If None, only fine arrows are used (inference mode).
+            no_influence_masks: Optional[Tensor] of shape [B, T] boolean mask where True = no influence
+            coarse_ratio: Fraction of positions to use coarse arrows (0.0-1.0)
+                          Only applied during training when coarse_masks is provided.
+        
+        Returns:
+            arrows: Tensor of shape [B, T] containing arrow indices (0-9)
+        """
+        # Calculate pitch differences: d[t] = pitch[t+1] - pitch[t]
+        d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T-1]
+        
+        # Initialize arrow tensor with zeros
+        arrows = torch.zeros_like(d, dtype=torch.long)
+        
+        # Apply fine arrow mapping based on pitch difference ranges
+        # Note: conditions are mutually exclusive, applied in sequence
+        arrows = torch.where(d <= -8, torch.tensor(0, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= -7) & (d <= -3), torch.tensor(1, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= -2) & (d <= -1), torch.tensor(2, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where(d == 0, torch.tensor(3, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= 1) & (d <= 2), torch.tensor(4, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where((d >= 3) & (d <= 7), torch.tensor(5, dtype=torch.long, device=d.device), arrows)
+        arrows = torch.where(d >= 8, torch.tensor(6, dtype=torch.long, device=d.device), arrows)
+        
+        # Replace fine arrows with coarse arrows in contiguous spans during training
+        if self.training and coarse_ratio > 0 and coarse_masks is not None:
+            # Down arrows (0, 1, 2) → coarse down (7) - batched operation
+            arrows = torch.where(
+                coarse_masks & (arrows <= 2),
+                torch.tensor(7, device=d.device, dtype=torch.long),
+                arrows
+            )
+            # Arrow 3 (stay) remains 3 - it's shared between fine and coarse
+            # Up arrows (4, 5, 6) → coarse up (8) - batched operation
+            arrows = torch.where(
+                coarse_masks & (arrows >= 4),
+                torch.tensor(8, device=d.device, dtype=torch.long),
+                arrows
+            )
+        
+        # Apply no_influence arrows (arrow 9) - overrides everything
+        if self.training and no_influence_masks is not None:
+            arrows = torch.where(
+                no_influence_masks,
+                torch.tensor(9, device=d.device, dtype=torch.long),
+                arrows
+            )
+        
+        return arrows
+ 
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self, 
+            note_tokens: Dict[str, Tensor],
+        temperature: float = 1.0
+    ) -> int:
+        """
+        Generate next pitch token given previous pitches and USER-PROVIDED arrows.
+        
+        The model predicts pitch[T] given:
+        - pitch[0:T]: generated pitches so far
+        - arrow[0:T]: user-provided arrows, where arrow[i] indicates direction from pitch[i] to pitch[i+1]
+        
+        At the last position (T-1), arrow[T-1] tells us where to go FROM pitch[T-1],
+        so the model predicts pitch[T].
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch' [B, T]: generated pitches so far
+                - 'arrow' [B, T]: user-provided arrows (arrow[-1] is direction for next pitch)
+            temperature: Sampling temperature
+        
+        Returns:
+            next_token: Integer pitch value (0-127)
+        """
+        # Arrows are USER-PROVIDED, not derived from pitches
+        # note_tokens['arrow'][:, -1] is the current arrow guiding next pitch generation
+        decoder_context = {
+            'pitch': note_tokens['pitch'],   # [B, T] - generated pitches so far
+            'arrow': note_tokens['arrow']    # [B, T] - user-provided arrows
+        }
+
+        logits, _ = self.decoder(
+                decoder_context,
+            return_intermediates=True,
+            cache=None,
+            seq_start_pos=None
+        )
+        
+        logits = logits[:, -1]  # [B, vocab_size] - get last token logits
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
+
+    @torch.inference_mode()
+    def gen_arrows(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        """
+        Generate arrows from pitch sequence (deterministic extraction).
+        
+        Args:
+            note_tokens: Dict with 'pitch' [B, T]
+        
+        Returns:
+            arrows: Tensor [B, T-1] with arrow indices (0-6)
+        """
+        # B = batch size = 1
+        # note_tokens supposed on gpu
+        # Extract arrows deterministically from pitch differences
+        arrows = self.pitch_to_arrow(note_tokens['pitch'])  # [B, T-1]
+        
+        return arrows
+
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
+
+        acc = num_right / len(labels) 
+        return acc
     
 class Decoder_no_dtime_harmony(nn.Module):
     """
@@ -4597,7 +5287,7 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
                 note_tokens['pitch'],
                 e
             ).mean()
-
+           
         loss_margin = torch.tensor(0.0, device=logits.device)
         if self.cfg.get('loss_margin', 0) > 0:
             loss_margin = margin_loss(e)
@@ -4628,11 +5318,11 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
 
         loss_deviate = torch.tensor(0.0, device=logits.device)
         if self.cfg.get('loss_deviate', 0) > 0:
-            loss_deviate = deviate_loss(
+             loss_deviate = deviate_loss(
                 note_tokens['pitch'],
                 e
-            )
-
+            )          
+ 
         loss_button_held = torch.tensor(0.0, device=logits.device)
         if self.cfg.get('loss_button_held', 0) > 0:
             loss_button_held = button_held_loss(
@@ -4675,7 +5365,7 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
 
         # Combine losses with appropriate weights
         loss_total = loss_recons * self.cfg.get('loss_recons', 1.0)
-
+        
         loss_contour = torch.tensor(0.0, device=logits.device)
         if self.cfg.get('loss_contour', 0) > 0:
             loss_contour = self.cfg['loss_contour'] * (
@@ -4709,7 +5399,7 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
 
         # Compute accuracy
         acc = self.compute_accuracy(logits, target)
-
+        
         loss = {
             'loss_total': loss_total,
             'loss_recons': loss_recons,
@@ -4718,7 +5408,7 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
             'loss_button_held': loss_button_held,
             'loss_norm_pos': loss_norm_pos,
             'loss_pitch_button': loss_pitch_button,
-            'loss_button_concentration': loss_button_concentration,
+            'loss_button_concentration': loss_button_concentration,                        
             'loss_window_corr': loss_window_corr,
             'loss_contour': loss_contour,
             'loss_contour_perc': loss_contour_perc,
@@ -4727,7 +5417,7 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
             'loss_shape_perc': loss_shape_perc,
         }
         return loss, acc
-
+    
     @torch.inference_mode()
     def gen_pitch_token(self, 
             note_tokens: Dict[str, Tensor],
@@ -5046,7 +5736,7 @@ class AutoregressiveAutoencoder_just_harmony(Module):
 
         acc = num_right / len(labels) if len(labels) > 0 else torch.tensor(0.0)
         return acc
-
+    
     @torch.inference_mode()
     def gen_pitch_token(self, 
             note_tokens: Dict[str, Tensor],
@@ -5081,3 +5771,3475 @@ class AutoregressiveAutoencoder_just_harmony(Module):
         next_token = next_token.item()
         
         return next_token
+
+class Decoder_arrows_and_buttons(nn.Module):
+    """
+    Decoder for fused melody+accompaniment generation using role-gated conditioning.
+    
+    Melody events (role=0): conditioned by fine arrows (pitch interval guidance)
+    Accompaniment events (role=1): conditioned by buttons (compressed representation from encoder)
+    
+    Arrow vocabulary (fine arrows only):
+        0: dPitch <= -8 (large descending)
+        1: -7 <= dPitch <= -3 (medium descending)
+        2: -2 <= dPitch <= -1 (small descending)
+        3: dPitch = 0 (stay)
+        4: 1 <= dPitch <= 2 (small ascending)
+        5: 3 <= dPitch <= 7 (medium ascending)
+        6: dPitch >= 8 (large ascending)
+        7: ARROW_NA (not applicable - for accompaniment events)
+    
+    Button conditioning:
+        Continuous values from encoder via STE quantization, projected with valid flag.
+        button_value: float in [-1, 1]
+        button_valid: 0 (invalid/melody) or 1 (valid/accomp)
+    
+    Role-gated combination:
+        x = e_pitch + e_role + mel_mask * e_arrow + acc_mask * e_button
+    """
+    # Constants for roles and arrow tokens
+    ROLE_MELODY: int = 0
+    ROLE_ACCOMP: int = 1
+    ARROW_NA: int = 7  # Not applicable (for accompaniment events)
+    
+    def __init__(
+        self,
+        *,
+        max_seq_len: int,  # SEQ_LEN
+        dim: int,
+        depth: int,
+        heads: int,
+        emb_dropout: float = 0.,
+        pitch_history_dropout: float = 0.0,  # Dropout rate for pitch embeddings (0.0-1.0)
+        post_emb_norm: bool = False,
+        num_memory_tokens: Optional[int] = None,
+        memory_tokens_interspersed_every: Optional[int] = None,
+        rotary_pos_emb: bool = True,
+        attn_flash: bool = True,
+        logits_dim: Optional[int] = None,
+        causal: bool = True  # True for decoder
+    ):
+        super().__init__()
+        
+        self.emb_dim = dim  # 2048
+        self.max_seq_len = max_seq_len
+        self.pitch_history_dropout = pitch_history_dropout
+        
+        # Pitch embedding
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        
+        # Role embedding: MELODY=0, ACCOMP=1
+        self.role_emb = nn.Embedding(2, dim)
+        
+        # Arrow Embedding (8 tokens: 0-6 fine arrows + 7=ARROW_NA)
+        self.arrow_emb = nn.Embedding(8, dim)
+        
+        # Button projection: maps (button_value, button_valid) -> dim
+        # button_value: continuous [-1, 1] from quantizer
+        # button_valid: 0 or 1 indicating if button applies to this event
+        self.button_proj = nn.Linear(2, dim)
+        
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout)
+        
+        # Attention layers
+        self.attn_layers = AttentionLayers(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            rotary_pos_emb=rotary_pos_emb,
+            attn_flash=attn_flash,
+            causal=causal
+        )
+        
+        self.init_()
+        
+        # Output projection to pitch logits
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)        
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+    def init_(self) -> None:
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.role_emb.weight)
+        nn.init.kaiming_normal_(self.arrow_emb.weight)
+        nn.init.kaiming_normal_(self.button_proj.weight)
+        
+        # Initialize ARROW_NA (7) to zeros - no conditioning for accompaniment events
+        with torch.no_grad():
+            self.arrow_emb.weight[7] = torch.zeros_like(self.arrow_emb.weight[0])
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],
+        return_intermediates: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[Tensor] = None,
+        seq_start_pos: Optional[int] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ) -> Tensor:
+        """
+        Full-sequence forward pass with role-gated conditioning.
+        Returns logits of shape [B, T, VOCAB_SIZE_PITCH].
+        
+        Args:
+            past_tokens: Dict with:
+                - 'pitch': LongTensor [B, T] - MIDI pitch values (0-127)
+                - 'role': LongTensor [B, T] - role (0=melody, 1=accomp)
+                - 'arrow': LongTensor [B, T] - arrow indices (0-10)
+                - 'button_value': FloatTensor [B, T] - continuous button values [-1, 1]
+                - 'button_valid': FloatTensor [B, T] - validity flag (0 or 1)
+        
+        Returns:
+            logits: Tensor [B, T, VOCAB_SIZE_PITCH]
+        """
+        B, T = past_tokens['pitch'].shape
+        device = past_tokens['pitch'].device
+        
+        # Embed pitch
+        e_pitch = self.pitch_emb(past_tokens['pitch'])  # [B, T, dim]
+        
+        # PITCH HISTORY DROPOUT: zero out pitch embeddings to force control reliance
+        if self.training and self.pitch_history_dropout > 0:
+            keep_prob = 1.0 - self.pitch_history_dropout
+            keep_mask = (torch.rand(B, T, 1, device=device) < keep_prob).float()
+            e_pitch = e_pitch * keep_mask
+        
+        # Embed role
+        e_role = self.role_emb(past_tokens['role'].long())  # [B, T, dim]
+        
+        # Embed arrows
+        e_arrow = self.arrow_emb(past_tokens['arrow'].long())  # [B, T, dim]
+        
+        # Project buttons: stack (value, valid) -> project to dim
+        button_value = past_tokens['button_value'].float()  # [B, T]
+        button_valid = past_tokens['button_valid'].float()  # [B, T]
+        button_features = torch.stack([button_value, button_valid], dim=-1)  # [B, T, 2]
+        e_button = self.button_proj(button_features)  # [B, T, dim]
+        
+        # Compute role masks for gating
+        mel_mask = (past_tokens['role'] == self.ROLE_MELODY).float().unsqueeze(-1)  # [B, T, 1]
+        acc_mask = (past_tokens['role'] == self.ROLE_ACCOMP).float().unsqueeze(-1)  # [B, T, 1]
+        
+        # Role-gated combination:
+        # Melody events get arrow conditioning, accompaniment events get button conditioning
+        x = e_pitch + e_role + mel_mask * e_arrow + acc_mask * e_button
+        
+        # Apply dropout
+        x = self.emb_dropout(x)
+        
+        # Pass through attention layers
+        x, intermediates = self.attn_layers(
+            x, 
+            mask=mask, 
+            mems=mems, 
+            cache=cache, 
+            return_hiddens=True, 
+            seq_start_pos=seq_start_pos, 
+            **kwargs
+        )
+        
+        # Project to pitch logits
+        logits = self.to_logits(x)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        if return_intermediates:
+            return logits, intermediates
+        
+        return logits
+
+
+class AE_arrows_and_buttons(Module):
+    """
+    Fused Autoencoder for interleaved melody+accompaniment generation.
+    
+    Melody events: controlled by fine arrows (deterministic from pitch differences)
+    Accompaniment events: controlled by buttons (learned via encoder + STE quantization)
+    
+    The input is a single interleaved event stream with:
+        - pitch: MIDI pitch for each event
+        - channel: MIDI channel (0=melody, 10=accompaniment)
+    
+    Training:
+        - For melody events: arrows are extracted from melody-to-melody pitch differences
+        - For accomp events: buttons are learned via encoder compression + contour loss
+    
+    Arrow vocabulary (fine arrows only):
+        0: dPitch <= -8 (large descending)
+        1: -7 <= dPitch <= -3 (medium descending)
+        2: -2 <= dPitch <= -1 (small descending)
+        3: dPitch = 0 (stay)
+        4: 1 <= dPitch <= 2 (small ascending)
+        5: 3 <= dPitch <= 7 (medium ascending)
+        6: dPitch >= 8 (large ascending)
+        7: ARROW_NA (not applicable - for accomp events)
+    
+    Button conditioning:
+        Continuous values [-1, 1] from encoder via STE quantization.
+        Only applied to accompaniment events.
+    """
+    # Constants (same as Decoder)
+    ROLE_MELODY: int = 0
+    ROLE_ACCOMP: int = 1
+    ARROW_NA: int = 7
+    # Channel constants (MIDI channel numbers)
+    CHAN_MELODY: int = 0
+    CHAN_ACCOMP: int = 10
+    
+    def __init__(
+        self,
+        encoder: nn.Module,  # Encoder for accompaniment (e.g., Encoder_no_dtime)
+        decoder: Decoder_arrows_and_buttons,
+        cfg: Optional[Dict] = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        self.encoder = encoder
+        self.quantizer = IntegerQuantizer(cfg.get('num_buttons', 12))
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def extract_melody_arrows(self, pitch: Tensor, role: Tensor) -> Tensor:
+        """
+        Extract fine arrows from melody-to-melody pitch differences.
+        
+        Pitch differences are computed only between consecutive melody tokens,
+        treating melody as its own stream (like compute_contour_loss for accompaniment).
+        
+        Arrow mapping (fine arrows only):
+            0: dPitch <= -8 (large descending)
+            1: -7 <= dPitch <= -3 (medium descending)
+            2: -2 <= dPitch <= -1 (small descending)
+            3: dPitch = 0 (stay)
+            4: 1 <= dPitch <= 2 (small ascending)
+            5: 3 <= dPitch <= 7 (medium ascending)
+            6: dPitch >= 8 (large ascending)
+            7: ARROW_NA (accompaniment events)
+        
+        Args:
+            pitch: [B, T+1] pitch sequence
+            role: [B, T+1] role sequence (0=melody, 1=accomp)
+        
+        Returns:
+            arrows: [B, T] arrow indices (0-6 for melody, 7 for accomp)
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Initialize arrows with ARROW_NA (for accomp events)
+        arrows = torch.full((B, T), self.ARROW_NA, dtype=torch.long, device=device)
+        
+        # Work with target positions (role[:, 1:] and pitch[:, 1:])
+        target_role = role[:, 1:]    # [B, T]
+        target_pitch = pitch[:, 1:]  # [B, T]
+        
+        # Flatten for vectorized processing (same pattern as compute_contour_loss)
+        target_role_flat = target_role.flatten()      # [B*T]
+        target_pitch_flat = target_pitch.flatten()    # [B*T]
+        batch_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, T).flatten()  # [B*T]
+        pos_idx = torch.arange(T, device=device).unsqueeze(0).expand(B, T).flatten()  # [B*T]
+        
+        # Mask for melody tokens only
+        mel_mask = (target_role_flat == self.ROLE_MELODY)
+        
+        if mel_mask.sum() < 2:
+            # Set all melody tokens to "stay" (3) if less than 2
+            arrows.flatten()[mel_mask] = 3
+            return arrows
+        
+        # Extract melody tokens
+        mel_pitch = target_pitch_flat[mel_mask]  # [num_mel_total]
+        mel_batch = batch_idx[mel_mask]          # [num_mel_total]
+        mel_pos = pos_idx[mel_mask]              # [num_mel_total]
+        
+        # Identify consecutive melody pairs within the same batch
+        same_batch_mask = (mel_batch[1:] == mel_batch[:-1])  # [num_mel_total - 1]
+        
+        if not same_batch_mask.any():
+            # Only first melody tokens in each batch, use "stay" (3) for all
+            arrows.flatten()[mel_mask] = 3
+            return arrows
+        
+        # Compute pitch differences between consecutive melody tokens
+        mel_diff = (mel_pitch[1:] - mel_pitch[:-1]).long()  # [num_mel_total - 1]
+        
+        # Map differences to fine arrows (0-6)
+        mel_arrows = torch.full_like(mel_diff, 3, dtype=torch.long)  # default: stay
+        mel_arrows = torch.where(mel_diff <= -8, torch.tensor(0, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= -7) & (mel_diff <= -3), torch.tensor(1, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= -2) & (mel_diff <= -1), torch.tensor(2, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= 1) & (mel_diff <= 2), torch.tensor(4, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= 3) & (mel_diff <= 7), torch.tensor(5, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where(mel_diff >= 8, torch.tensor(6, device=device, dtype=torch.long), mel_arrows)
+        
+        # For pairs crossing batch boundaries, use "stay"
+        mel_arrows = torch.where(same_batch_mask, mel_arrows, torch.tensor(3, device=device, dtype=torch.long))
+        
+        # Scatter arrows back to original positions
+        arrows_flat = arrows.flatten()  # [B*T]
+        
+        # First melody token in each batch gets "stay" (3)
+        first_mel_mask = torch.cat([torch.tensor([True], device=device), ~same_batch_mask])
+        arrows_flat[mel_mask] = torch.where(
+            first_mel_mask,
+            torch.tensor(3, device=device, dtype=torch.long),
+            torch.tensor(0, device=device, dtype=torch.long)  # placeholder
+        )
+        
+        # Scatter computed arrows to positions of "second" melody tokens
+        scatter_positions = mel_pos[1:][same_batch_mask] + mel_batch[1:][same_batch_mask] * T
+        arrows_flat[scatter_positions] = mel_arrows[same_batch_mask]
+        
+        return arrows_flat.view(B, T)
+
+    def encode_accompaniment(
+        self,
+        pitch: Tensor,
+        role: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Encode accompaniment pitches to button values via encoder + STE quantization.
+        
+        Args:
+            pitch: [B, T+1] full pitch sequence
+            role: [B, T+1] role sequence (0=melody, 1=accomp)
+        
+        Returns:
+            button_values: [B, T] continuous button values [-1, 1] (quantized via STE)
+            button_valid: [B, T] validity flag (1 for accomp, 0 for melody)
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Create packed accompaniment sequence per batch
+        # For simplicity, we run encoder on full sequence but only use accomp positions
+        # (Alternative: pack accomp, run encoder, scatter back)
+        
+        # Run encoder on the target pitch sequence (pitch[:, 1:])
+        encoder_context = {'pitch': pitch[:, 1:]}  # [B, T]
+        # Self-attention Mask for accompaniment tokens
+        acc_mask = (role[:, 1:] == self.ROLE_ACCOMP)  # bool [B, T]
+
+        e = self.encoder(encoder_context, mask=acc_mask)  # [B, T] continuous values
+        
+        # Quantize via STE
+        b = self.quantizer(e)  # [B, T] continuous values in [-1, 1]
+        
+        # Create validity mask: 1 for accomp events, 0 for melody
+        button_valid = (role[:, 1:] == self.ROLE_ACCOMP).float()  # [B, T]
+        
+        return b, button_valid, e
+
+    def compute_contour_deviate_losses(
+        self,
+        pitch: Tensor,
+        encoder_output: Tensor,
+        role: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Compute both contour loss and deviate loss for accompaniment button learning.
+        
+        Contour loss: Encourages button intervals to match pitch intervals in direction.
+        Deviate loss: Penalizes button changes when consecutive pitches are the same (held notes).
+        
+        We extract only accompaniment tokens and compute their losses,
+        treating the accompaniment as its own melodic stream independent
+        of interleaved melody events.
+        
+        Args:
+            pitch: [B, T] target pitch sequence
+            encoder_output: [B, T] continuous button values (encoder output)
+            role: [B, T] role sequence
+        
+        Returns:
+            loss_contour: Scalar contour loss
+            loss_deviate: Scalar deviate loss
+        """
+        B, T = pitch.shape
+        device = pitch.device
+        
+        # Flatten tensors for vectorized processing
+        pitch_flat = pitch.float().flatten()      # [B*T]
+        encoder_output_flat = encoder_output.flatten()          # [B*T]
+        role_flat = role.flatten()                # [B*T]
+        
+        # Create batch indices to track which batch each token belongs to
+        batch_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, T).flatten()  # [B*T]
+        
+        # Mask for accompaniment tokens
+        acc_mask = (role_flat == self.ROLE_ACCOMP)
+        
+        if acc_mask.sum() < 2:
+            return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+        
+        # Extract only accompaniment values
+        acc_pitch = pitch_flat[acc_mask]      # [num_acc_total]
+        acc_buttons = encoder_output_flat[acc_mask]  # [num_acc_total]
+        acc_batch = batch_idx[acc_mask]       # [num_acc_total]
+        
+        # Compute differences between consecutive accompaniment tokens
+        # Only valid if consecutive tokens belong to the same batch
+        same_batch_mask = (acc_batch[1:] == acc_batch[:-1])  # [num_acc_total - 1]
+        
+        if not same_batch_mask.any():
+            return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+        
+        # Compute differences within accompaniment stream
+        pitch_diff = acc_pitch[1:] - acc_pitch[:-1]      # [num_acc_total - 1]
+        button_diff = acc_buttons[1:] - acc_buttons[:-1]  # [num_acc_total - 1]
+        
+        # ===== CONTOUR LOSS (SIGN-ONLY VERSION) =====
+        # Sign-only contour loss: count matches between pitch_diff and button_diff signs
+        # Compare signs: [-1, 0, 1] for each difference
+        pitch_sign = torch.sign(pitch_diff)  # [num_acc_total - 1]
+        button_sign = torch.sign(button_diff)  # [num_acc_total - 1]
+        
+        # Count matches: same sign means agreement (match)
+        sign_matches = (pitch_sign == button_sign).float()  # [num_acc_total - 1]
+        
+        # Apply same_batch_mask to only consider valid pairs (consecutive tokens in same batch)
+        masked_matches = sign_matches * same_batch_mask.float()  # [num_acc_total - 1]
+        
+        # Compute match rate: number of matches / number of valid pairs
+        num_valid_pairs = same_batch_mask.float().sum().clamp(min=1)
+        match_rate = masked_matches.sum() / num_valid_pairs
+        
+        # Loss = 1 - match_rate (we want to minimize when signs don't match)
+        loss_contour = 1.0 - match_rate
+        
+        # ===== DEVIATE LOSS =====
+        # Identify held notes: where consecutive pitches are the same
+        # In the flattened accompaniment stream, check if acc_pitch[i+1] == acc_pitch[i]
+        notes_held = (pitch_diff == 0).float()  # [num_acc_total - 1]
+        
+        if notes_held.sum() > 0:
+            # Penalize button changes when notes are held
+            # button_diff already contains the button changes
+            held_button_changes = button_diff * notes_held * same_batch_mask.float()
+            loss_deviate = torch.square(held_button_changes).sum() / (notes_held * same_batch_mask.float()).sum().clamp(min=1e-6)
+        else:
+            # If no held notes, add small penalty to encourage stability
+            loss_deviate = 0.01 * torch.square(button_diff * same_batch_mask.float()).mean()
+        
+        return loss_contour, loss_deviate
+
+    def compute_margin_loss(self, encoder_output: Tensor, role: Tensor) -> Tensor:
+        """
+        Regularize buttons to stay in [-1, 1] range.
+        Only computed for accompaniment events.
+        
+        Args:
+            buttons: [B, T] continuous button values
+            role: [B, T] role sequence
+        
+        Returns:
+            loss: Scalar margin loss
+        """
+        acc_mask = (role == self.ROLE_ACCOMP).float()
+        
+        if acc_mask.sum() == 0:
+            return torch.tensor(0.0, device=encoder_output.device)
+        
+        # Extract only accompaniment encoder outputs
+        acc_encoder_output = encoder_output * acc_mask  # [B, T]
+        
+        # Margin penalty: penalize values outside [-1, 1]
+        margin_penalty = torch.square(
+            torch.maximum(torch.abs(acc_encoder_output) - 1, torch.zeros_like(acc_encoder_output))
+        )
+        
+        # Add range utilization term (encourage using full range, prevent collapse to center)
+        # Compute variance only over accompaniment positions
+        acc_values = encoder_output[acc_mask.bool()]  # Flatten to [num_acc]
+        if acc_values.numel() > 1:
+            range_utilization = 1.0 - torch.var(acc_values)  # Penalize low variance
+        else:
+            range_utilization = torch.tensor(0.0, device=encoder_output.device)
+        
+        # Compute mean margin penalty over accompaniment positions
+        margin_loss_value = margin_penalty.sum() / acc_mask.sum().clamp(min=1)
+        
+        # Combine with range utilization (matching loss_funcs.py structure)
+        loss_margin = margin_loss_value + 0.1 * range_utilization
+        
+        return loss_margin
+
+    def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+        """
+        Training forward pass for interleaved melody+accompaniment.
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch': [B, T+1] pitch sequence
+                - 'channel': [B, T+1] MIDI channel sequence (0=melody, 10=accomp)
+        
+        Returns:
+            loss: Dict with loss components
+            acc: Accuracy tensor
+        
+        Training alignment:
+            - Input: pitch[0:T], role[0:T], arrows[0:T], buttons[0:T]
+            - Target: pitch[1:T+1]
+            
+            For melody events at position t:
+                arrow[t] = direction from previous melody pitch to pitch[t+1]
+            For accomp events at position t:
+                button[t] = encoded representation of accomp context
+        """
+        pitch = note_tokens['pitch']      # [B, T+1]
+        channel = note_tokens['channel']  # [B, T+1] (0=melody, 10=accomp)
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Build role from channel: CHAN_MELODY (0) -> ROLE_MELODY (0), CHAN_ACCOMP (10) -> ROLE_ACCOMP (1)
+        role = (channel == self.CHAN_ACCOMP).long()  # [B, T+1] (0=melody, 1=accomp)
+        
+        # Extract fine arrows for melody events (accomp events get ARROW_NA)
+        arrows = self.extract_melody_arrows(pitch, role)  # [B, T+1], [B, T+1] -> [B, T]
+        
+        # Encode accompaniment to buttons
+        button_values, button_valid, encoder_output = self.encode_accompaniment(pitch, role)  # [B, T+1], [B, T+1] -> [B, T], [B, T], [B, T]
+        
+        # Create decoder context
+        decoder_context = {
+            'pitch': pitch[:, :-1],           # [B, T]
+            'role': role[:, :-1],             # [B, T]
+            'arrow': arrows,                   # [B, T]
+            'button_value': button_values,     # [B, T]
+            'button_valid': button_valid,      # [B, T]
+        }
+        
+        # Get logits from decoder
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        # Target is the next pitch (ground truth)
+        target = pitch[:, 1:]  # [B, T]
+        
+        # Compute reconstruction loss
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+
+        # Compute contour and deviate losses for accompaniment button learning
+        loss_contour = torch.tensor(0.0, device=device)
+        loss_deviate = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_contour', 0) > 0 or self.cfg.get('loss_deviate', 0) > 0:
+            loss_contour, loss_deviate = self.compute_contour_deviate_losses(
+                pitch[:, 1:], encoder_output, role[:, 1:] # contour similarity between pitch ground truth and encoder output
+            )
+        
+        # Compute margin loss for button regularization
+        loss_margin = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_margin', 0) > 0:
+            loss_margin = self.compute_margin_loss(encoder_output, role[:, 1:]) 
+        # Compute arrow consistency loss for melody
+        loss_arrow_consistency = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            predicted_pitches = torch.argmax(logits, dim=-1)  # [B, T]
+            # Create predicted pitch sequence for arrow extraction
+            first_pitch = pitch[:, :1]
+            predicted_pitch_seq = torch.cat([first_pitch, predicted_pitches], dim=1)
+            predicted_arrows = self.extract_melody_arrows(predicted_pitch_seq, role)
+            
+            # Only compare melody positions (exclude ARROW_NA)
+            melody_mask = (role[:, 1:] == self.ROLE_MELODY) & (arrows != self.ARROW_NA)
+            if melody_mask.any():
+                matches = (arrows == predicted_arrows) & melody_mask
+                accuracy = matches.sum().float() / melody_mask.sum().float()
+                loss_arrow_consistency = 1.0 - accuracy
+        
+        # Compute total loss
+        loss_total = loss_recons * self.cfg.get('loss_recons', 1.0)
+        
+        if self.cfg.get('loss_contour', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_contour'] * loss_contour
+        
+        if self.cfg.get('loss_margin', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_margin'] * loss_margin
+        
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
+        
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_deviate'] * loss_deviate
+        
+        # Compute accuracy
+        acc = self.compute_accuracy(logits, target)
+        
+        # Return loss dictionary
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            'loss_contour': loss_contour,
+            'loss_margin': loss_margin,
+            'loss_arrow_consistency': loss_arrow_consistency,
+            # Placeholders for compatibility
+            'loss_coarse_direction': torch.tensor(0.0, device=device),
+            'loss_deviate': torch.tensor(0.0, device=device),
+            'loss_button_held': torch.tensor(0.0, device=device),
+            'loss_norm_pos': torch.tensor(0.0, device=device),
+            'loss_pitch_button': torch.tensor(0.0, device=device),
+            'loss_button_concentration': torch.tensor(0.0, device=device),
+            'loss_window_corr': torch.tensor(0.0, device=device),
+            'loss_contour_perc': torch.tensor(0.0, device=device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=device),
+            'loss_interval_perc': torch.tensor(0.0, device=device),
+            'loss_shape_perc': torch.tensor(0.0, device=device),
+        }
+        return loss, acc
+ 
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self, 
+            note_tokens: Dict[str, Tensor],
+        temperature: float = 1.0
+    ) -> int:
+        """
+        Generate next pitch token given interleaved context.
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch': [B, T] pitches so far
+                - 'role': [B, T] roles for each position
+                - 'arrow': [B, T] user-provided arrows (for melody) or ARROW_NA (for accomp)
+                - 'button_value': [B, T] button values (for accomp)
+                - 'button_valid': [B, T] button validity flags
+            temperature: Sampling temperature
+        
+        Returns:
+            next_token: Integer pitch value (0-127)
+        """
+        logits, _ = self.decoder(
+            note_tokens,
+            return_intermediates=True,
+            cache=None,
+            seq_start_pos=None
+        )
+        
+        logits = logits[:, -1]  # [B, vocab_size]
+        probs = F.softmax(logits / temperature, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+            
+        return next_token.item()
+
+    def compute_accuracy(self, logits: Tensor, labels: Tensor) -> Tensor:
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels).sum().float()
+        acc = num_right / len(labels) if len(labels) > 0 else torch.tensor(0.0)
+
+        return acc
+    
+ 
+class Decoder_arrows_and_buttons_simpler(nn.Module):
+    """
+    Fused Decoder that accepts either Arrows (discrete) or Buttons (continuous)
+    based on the note channel.
+    """
+    def __init__(
+        self,
+        *,
+        max_seq_len,
+        dim,
+        depth,
+        heads,
+        rotary_pos_emb=True,
+        attn_flash=True,
+        causal=True,
+        emb_dropout=0.1
+    ):
+        super().__init__()
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        
+        # 1. Pitch Embedding (Base Input)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+
+        # 2. Arrow Embedding (For Melody)
+        # Discrete lookup for 7 arrow types
+        self.arrow_emb = nn.Embedding(VOCAB_SIZE_ARROWS, dim)
+
+        # 3. Button Projection (For Accompaniment)
+        # Maps continuous scalar [-1, 1] to a dense vector of size 'dim'.
+        # We use an MLP to allow non-linear mappings, similar to how an 
+        # Embedding table allows arbitrary vectors for indices.
+        self.button_proj = nn.Sequential(
+            nn.Linear(1, dim // 2),
+            nn.GELU(),
+            nn.Linear(dim // 2, dim)
+        )
+
+        # Role Embedding (The "Instruction Manual")
+        # Tells the Transformer: "Interpret the control vector as Relative (Arrow) or Absolute (Button)"
+        self.role_emb = nn.Embedding(2, dim) # 0=Melody, 1=Accomp
+
+        self.emb_dropout = nn.Dropout(emb_dropout)
+
+        # Attention Layers (Standard)
+        self.attn_layers = AttentionLayers(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            rotary_pos_emb=rotary_pos_emb,
+            attn_flash=attn_flash,
+            causal=causal
+        )
+
+        self.init_()
+
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
+
+    def init_(self):
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.arrow_emb.weight)
+        nn.init.kaiming_normal_(self.role_emb.weight)
+        #nn.init.kaiming_normal_(self.to_logits.weight)
+        for layer in self.button_proj:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight)
+
+
+    def forward(
+        self,
+        decoder_context: Dict[str, Tensor], # Contains 'pitch', 'arrow', 'button', 'is_melody'
+        return_intermediates: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[Tensor] = None,
+        seq_start_pos: Optional[int] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ) -> Tensor:
+        # Unpack inputs
+        pitch_seq = decoder_context['pitch']     # [B, T]
+        arrow_seq = decoder_context['arrow']     # [B, T] (Indices 0-6)
+        button_seq = decoder_context['button']   # [B, T] (Continuous -1 to 1)
+        role_seq = decoder_context['role']   # [B, T] 
+
+        # --- 1. Compute Embeddings ---
+        
+        # A. Base Pitch Embedding
+        x_pitch = self.pitch_emb(pitch_seq)
+
+        # Melody Path: Lookup Arrow Embedding
+        x_arrow = self.arrow_emb(arrow_seq.long()) # [B, T, dim]
+
+        x_role = self.arrow_emb(role_seq.long()) # [B, T, dim]
+
+        # Accomp Path: Project Continuous Button
+        # button_seq is [B, T] -> needs [B, T, 1] for Linear layer
+        x_button = self.button_proj(button_seq.unsqueeze(-1)) # [B, T, dim]
+
+        # MULTIPLEXING (The Critical Fix)
+        # Create the Unified Control Vector based on the Role
+        # If role==0 (Melody): Pick Arrow Vector
+        # If role==1 (Accomp): Pick Button Vector
+        is_accomp = (role_seq == 1).unsqueeze(-1) # [B, T, 1]
+        
+        # Soft-switch (or hard switch using where)
+        # Since these are mutually exclusive, we can just mask and sum
+        control_vec = torch.where(is_accomp.bool(), x_button, x_arrow)
+
+        # Add Control to Pitch (Additive Conditioning)
+        x = x_pitch + control_vec + x_role
+
+        x = self.emb_dropout(x)
+        
+        x, intermediates = self.attn_layers(
+            x, 
+            mask=mask, 
+            mems=mems, 
+            cache=cache, 
+            return_hiddens=True, 
+            seq_start_pos=seq_start_pos, 
+            **kwargs
+        )   
+        # Project to pitch logits
+        logits = self.to_logits(x)
+
+        if return_intermediates:
+            return logits, intermediates
+        return logits
+
+class AE_arrows_and_buttons_simpler(nn.Module):
+    """
+    Main Architecture fusing:
+    1. Encoder_no_dtime (running on accompaniment)
+    2. Deterministic Arrow Logic (running on melody)
+    3. FusionDecoder (combining them)
+    """
+    def __init__(self, encoder, decoder, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.encoder = encoder      # Your existing Encoder_no_dtime
+        self.quantizer = IntegerQuantizer(cfg['num_buttons'])
+        self.decoder = decoder      # The new FusionDecoder
+        self.ignore_index = PAD_IDX # or whatever your pad index is
+
+    def get_melody_mask(self, note_tokens):
+        # Assuming channel 0 is melody, others are accompaniment
+        # Adjust logic based on your specific dataset format
+        return (note_tokens['channel'] == 0).float()
+
+    def encode_to_buttons(self, pitch: Tensor, role: Tensor) -> Tensor:
+        """
+        Encode only accompaniment pitches to button indices via encoder + quantizer.
+        Processes each batch sequence independently, extracting and encoding only accomp tokens.
+        
+        Returns button indices in range [num_arrows+1, num_arrows+num_buttons] for accompaniment,
+        0 (NA) for melody positions.
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Target pitch and role
+        target_pitch = pitch[:, 1:]  # [B, T]
+        target_role = role[:, 1:]    # [B, T]
+        
+        # Initialize outputs
+        button_keys = torch.zeros(B, T, dtype=torch.long, device=device)  # Will hold button indices
+        encoder_output = torch.zeros(B, T, dtype=torch.float, device=device)  # For loss computation
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract accompaniment mask for this sequence
+            acc_mask_b = (target_role[b] == self.ROLE_ACCOMP)  # [T]
+            num_acc = acc_mask_b.sum().item()
+            
+            if num_acc == 0:
+                # No accompaniment in this sequence, skip
+                continue
+            
+            # Extract accompaniment pitches
+            acc_pitches = target_pitch[b][acc_mask_b]  # [num_acc]
+            
+            # Encode accompaniment sequence
+            encoder_context = {'pitch': acc_pitches.unsqueeze(0)}  # [1, num_acc]
+            e_acc = self.encoder(encoder_context)  # [1, num_acc] continuous values
+            e_acc = e_acc.squeeze(0)  # [num_acc]
+            
+            # Quantize to discrete button indices (0 to num_buttons-1)
+            button_discrete = self.quantizer.real_to_discrete(e_acc)  # [num_acc]
+            
+            # Shift to mixed vocabulary range
+            button_values = button_discrete + self.num_arrows + 1  # +1 because 0 is NA, 1-7 are arrows
+            
+            # Scatter back to original positions
+            acc_indices = torch.where(acc_mask_b)[0]  # Indices where acc_mask_b is True
+            button_keys[b, acc_indices] = button_values
+            encoder_output[b, acc_indices] = e_acc.float()
+        
+        return button_keys, encoder_output
+
+    def pitch_to_arrow(self, pitch_seq: Tensor) -> Tensor:
+        """
+        Convert pitch differences to arrow indices (1-7).
+        Arrow 0 is reserved for NA, so we add 1 to standard arrow indices.
+        
+        Returns arrows in range [1, 7] (shifted by 1 from standard 0-6).
+        """
+        d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T]
+        
+        arrows = torch.zeros_like(d)
+        arrows[d <= -8] = 1   # large descending (was 0, now 1)
+        arrows[(d >= -7) & (d <= -3)] = 2   # medium descending
+        arrows[(d >= -2) & (d <= -1)] = 3   # small descending
+        arrows[d == 0] = 4   # stay
+        arrows[(d >= 1) & (d <= 2)] = 5   # small ascending
+        arrows[(d >= 3) & (d <= 7)] = 6   # medium ascending
+        arrows[d >= 8] = 7   # large ascending
+        
+        return arrows.long()
+
+    def extract_melody_arrows(self, pitch: Tensor, role: Tensor) -> Tensor:
+        """
+        Extract arrows only from consecutive melody notes.
+        Processes each batch sequence independently, extracting and computing arrows only for melody.
+        Returns arrow indices (1-7) for melody, 0 for accompaniment.
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Initialize with 0 (NA)
+        arrows = torch.zeros(B, T, dtype=torch.long, device=device)
+        
+        # Target role and pitch
+        target_role = role[:, 1:]  # [B, T]
+        target_pitch = pitch[:, 1:]  # [B, T]
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract melody mask for this sequence
+            mel_mask_b = (target_role[b] == self.ROLE_MELODY)  # [T]
+            num_mel = mel_mask_b.sum().item()
+            
+            if num_mel < 2:
+                # Need at least 2 melody notes to compute arrows
+                continue
+            
+            # Extract melody pitches (consecutive melody-only sequence)
+            mel_pitches = target_pitch[b][mel_mask_b]  # [num_mel]
+            
+            # Compute arrows for this melody sequence using pitch_to_arrow
+            # pitch_to_arrow expects [B, T] and returns [B, T-1]
+            mel_pitch_seq = mel_pitches.unsqueeze(0)  # [1, num_mel]
+            mel_arrows = self.pitch_to_arrow(mel_pitch_seq)  # [1, num_mel-1]
+            mel_arrows = mel_arrows.squeeze(0)  # [num_mel-1]
+            
+            # Scatter back to original positions
+            # Arrow at position i indicates transition FROM melody[i] TO melody[i+1]
+            # So mel_arrows[i] should be placed at the position of melody[i+1] in the original sequence
+            mel_indices = torch.where(mel_mask_b)[0]  # Indices where mel_mask_b is True
+            
+            if len(mel_indices) > 1:
+                # Place arrows at positions [1:] (skip first melody note, it has no incoming arrow)
+                target_positions = mel_indices[1:]  # Positions of melody notes 1, 2, ..., num_mel-1
+                arrows[b, target_positions] = mel_arrows
+        
+        return arrows
+
+    def build_keys(self, pitch: Tensor, channel: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Build unified 'key' sequence from pitch and channel.
+        
+        Returns:
+            keys: [B, T] mixed vocabulary (1-7 for arrows, 8-31 for buttons, 0 for NA)
+            encoder_output: [B, T] continuous encoder output (for losses)
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Build role from channel
+        role = (channel != self.CHAN_MELODY).long()  # 0=melody, 1=accomp
+        
+        # Get buttons for accompaniment (8-31, 0 for melody positions)
+        buttons, encoder_output = self.encode_to_buttons(pitch, role)  # [B, T], [B, T]
+        
+        # Get arrows for melody (1-7, 0 for accomp positions)
+        arrows = self.extract_melody_arrows(pitch, role)  # [B, T]
+        
+        
+        return buttons, encoder_output, arrows, role
+
+    def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+        """
+        Training Forward Pass with Fully Vectorized "Filter-then-Diff"
+        """
+        # 1. Setup Data & Masks
+        pitch = note_tokens['pitch'] # [B, T+1]
+        channel = note_tokens['channel']
+        batch_size, seq_len_plus_1 = pitch.shape
+        device = pitch.device
+        
+                # Build keys and get encoder output
+        buttons, arrows, encoder_output, role = self.build_keys(pitch, channel)  # [B, T], [B, T], [B, T+1]
+
+        # Decoder context
+        decoder_context = {
+            'pitch': pitch[:, :-1],  # [B, T]
+            'button': buttons,  
+            'arrow': arrows,         # [B, T]
+            'role': role[:, :-1]     # [B, T]
+        }
+        
+        # Get logits
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+      
+        # Target
+        target = pitch[:, 1:]  # [B, T]
+        
+        # Reconstruction loss
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+        
+        # Contour loss for accompaniment buttons
+        loss_contour = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_contour', 0) > 0:
+            loss_contour = self.compute_contour_loss(pitch[:, 1:], encoder_output, role[:, 1:])
+        
+        # Deviate loss for accompaniment
+        loss_deviate = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_deviate = self.compute_deviate_loss(pitch[:, 1:], encoder_output, role[:, 1:])
+
+        # Arrow consistency loss for melody
+        loss_arrow_consistency = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_arrow_consistency = self.compute_arrow_consistency_loss(
+                pitch,           # [B, T+1] full pitch sequence
+                logits,          # [B, T, vocab_size] predicted logits
+                arrows,            # [B, T] input keys (arrows for melody)
+                role             # [B, T+1] role sequence
+            )
+        
+        # Placeholder
+        #loss_button_held = torch.tensor(0.0, device=device)
+        
+        # Total loss
+        loss_total = loss_recons * self.cfg.get('loss_recons', 1.0)
+        if self.cfg.get('loss_contour', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_contour'] * loss_contour
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_deviate'] * loss_deviate
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
+        
+        # Accuracy
+        acc = self.compute_accuracy(logits, target)
+        
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            'loss_contour': loss_contour,
+            # Placeholders for compatibility
+            'loss_margin': torch.tensor(0.0, device=device),
+            'loss_arrow_consistency': loss_arrow_consistency,
+            'loss_deviate': loss_deviate,
+            'loss_coarse_direction': torch.tensor(0.0, device=device),
+            'loss_button_held': torch.tensor(0.0, device=device), # Placeholder for compatibility
+            'loss_norm_pos': torch.tensor(0.0, device=device),
+            'loss_pitch_button': torch.tensor(0.0, device=device),
+            'loss_button_concentration': torch.tensor(0.0, device=device),
+            'loss_window_corr': torch.tensor(0.0, device=device),
+            'loss_contour_perc': torch.tensor(0.0, device=device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=device),
+            'loss_interval_perc': torch.tensor(0.0, device=device),
+            'loss_shape_perc': torch.tensor(0.0, device=device),
+        }
+        return loss, acc
+
+    def compute_contour_loss(self, pitch: Tensor, encoder_output: Tensor, role: Tensor) -> Tensor:
+        """
+        Contour loss for accompaniment only (using multi-step contour loss).
+        Processes each batch sequence independently, extracting only accompaniment tokens.
+        """
+        B, T = pitch.shape
+        device = pitch.device
+        
+        # Import the loss function
+        from loss_funcs import multi_step_contour_loss
+        
+        total_loss = torch.tensor(0.0, device=device)
+        valid_batches = 0
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract accompaniment mask for this sequence
+            acc_mask_b = (role[b] == self.ROLE_ACCOMP)  # [T]
+            num_acc = acc_mask_b.sum().item()
+            
+            if num_acc < 2:
+                # Need at least 2 accompaniment notes for contour loss
+                continue
+            
+            # Extract accompaniment pitches and buttons (consecutive accomp-only sequence)
+            acc_pitches = pitch[b][acc_mask_b]  # [num_acc]
+            acc_buttons = encoder_output[b][acc_mask_b]  # [num_acc]
+            
+            # Compute multi-step contour loss for this accompaniment sequence
+            # multi_step_contour_loss expects [batch, seq_len]
+            acc_pitch_seq = acc_pitches.unsqueeze(0)  # [1, num_acc]
+            acc_button_seq = acc_buttons.unsqueeze(0)  # [1, num_acc]
+            
+            batch_loss = multi_step_contour_loss(
+                acc_pitch_seq, 
+                acc_button_seq, 
+                max_steps=self.cfg.get('contour_max_steps', 5)
+            )
+            
+            total_loss = total_loss + batch_loss
+            valid_batches += 1
+        
+        # Average over valid batches
+        if valid_batches > 0:
+            return total_loss / valid_batches
+        else:
+            return torch.tensor(0.0, device=device)
+
+    def compute_deviate_loss(self, pitch: Tensor, encoder_output: Tensor, role: Tensor) -> Tensor:
+        """
+        Deviate loss for accompaniment only (using multi-step contour loss).
+        Processes each batch sequence independently, extracting only accompaniment tokens.
+        """
+        B, T = pitch.shape
+        device = pitch.device
+        
+        # Import the loss function
+        from loss_funcs import deviate_loss
+        
+        total_loss = torch.tensor(0.0, device=device)
+        valid_batches = 0
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract accompaniment mask for this sequence
+            acc_mask_b = (role[b] == self.ROLE_ACCOMP)  # [T]
+            num_acc = acc_mask_b.sum().item()
+            
+            if num_acc < 2:
+                # Need at least 2 accompaniment notes for contour loss
+                continue
+            
+            # Extract accompaniment pitches and buttons (consecutive accomp-only sequence)
+            acc_pitches = pitch[b][acc_mask_b]  # [num_acc]
+            acc_buttons = encoder_output[b][acc_mask_b]  # [num_acc]
+            
+            # Compute multi-step contour loss for this accompaniment sequence
+            # multi_step_contour_loss expects [batch, seq_len]
+            acc_pitch_seq = acc_pitches.unsqueeze(0)  # [1, num_acc]
+            acc_button_seq = acc_buttons.unsqueeze(0)[:, :-1]  # [1, num_acc]
+            
+            if acc_button_seq.shape[1] >= 1:
+                batch_loss = deviate_loss(
+                    acc_pitch_seq, 
+                    acc_button_seq, 
+                )
+            
+            total_loss = total_loss + batch_loss
+            valid_batches += 1
+        
+        # Average over valid batches
+        if valid_batches > 0:
+            return total_loss / valid_batches
+        else:
+            return torch.tensor(0.0, device=device)
+
+    def compute_arrow_consistency_loss(
+        self, 
+        input_pitch: Tensor,      # [B, T+1] ground truth pitch sequence
+        predicted_logits: Tensor, # [B, T, vocab_size] predicted pitch logits
+        input_arrows: Tensor,     # [B, T] input arrows 
+        role: Tensor              # [B, T+1] role sequence
+    ) -> Tensor:
+        """
+        Arrow consistency loss for melody only.
+        Processes each batch sequence independently, extracting only melody tokens.
+        
+        Compares input arrows with arrows derived from predicted pitches.
+        """
+        B, T_plus_1 = input_pitch.shape
+        T = T_plus_1 - 1
+        device = input_pitch.device
+        
+        total_loss = torch.tensor(0.0, device=device)
+        valid_batches = 0
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract melody mask for target positions [1:]
+            mel_mask_b = (role[b, 1:] == self.ROLE_MELODY)  # [T]
+            num_mel = mel_mask_b.sum().item()
+            
+            if num_mel < 2:
+                # Need at least 2 melody notes to compute arrows
+                continue
+            
+            # Extract melody positions
+            mel_indices = torch.where(mel_mask_b)[0]  # Indices of melody notes
+            
+            # Extract input arrows for melody positions
+            # Keys contain arrows (1-7) for melody, buttons (8+) for accomp
+            input_keys_b = input_arrows[b]  # [T]
+            input_arrows_mel = input_keys_b[mel_indices]  # [num_mel] - arrows at melody positions
+            
+            # Extract ground truth melody pitches (for computing expected arrows)
+            mel_mask_full = (role[b] == self.ROLE_MELODY)  # [T+1]
+            mel_indices_full = torch.where(mel_mask_full)[0]
+            input_pitch_mel = input_pitch[b][mel_indices_full]  # [num_mel] ground truth melody
+            
+            # Extract predicted logits for melody positions
+            predicted_logits_mel = predicted_logits[b, mel_indices, :]  # [num_mel, vocab_size]
+            
+            # Get predicted pitches from logits (argmax for discrete prediction)
+            predicted_pitch_mel = torch.argmax(predicted_logits_mel, dim=-1)  # [num_mel]
+            
+            # Build predicted pitch sequence: first pitch from input, rest from predictions
+            # This matches the decoder's autoregressive structure
+            predicted_pitch_seq = torch.cat([
+                input_pitch_mel[:1],      # First melody pitch (from input)
+                predicted_pitch_mel       # Predicted melody pitches
+            ])  # [num_mel+1]
+            
+            # Compute arrows from predicted pitch sequence
+            predicted_arrows_mel = self.pitch_to_arrow(predicted_pitch_seq.unsqueeze(0))  # [1, num_mel]
+            predicted_arrows_mel = predicted_arrows_mel.squeeze(0)  # [num_mel]
+            
+            # Compare with input arrows
+            # input_arrows_mel has shape [num_mel], representing arrows at each melody position
+            # predicted_arrows_mel has shape [num_mel], arrows from predicted pitches
+            
+            # Compute accuracy: how many arrows match?
+            matches = (input_arrows_mel == predicted_arrows_mel).float()
+            match_rate = matches.mean()
+            
+            # Loss = 1 - match_rate (minimize when arrows don't match)
+            batch_loss = 1.0 - match_rate
+            
+            total_loss = total_loss + batch_loss
+            valid_batches += 1
+        
+        # Average over valid batches
+        if valid_batches > 0:
+            return total_loss / valid_batches
+        else:
+            return torch.tensor(0.0, device=device)
+
+    def pitch_to_arrow(self, note_tokens: dict) -> torch.Tensor:
+        """
+        Derives arrows from pitch differences ONLY between melody tokens.
+        
+        Logic:
+           1. Extract only Melody tokens from the batch.
+           2. Calculate diff = Melody[i] - Melody[i-1].
+           3. Map diff to Arrow ID.
+           4. Place Arrow ID at the position corresponding to Melody[i].
+              (This ensures that when the model is at step i-1 predicting Melody[i],
+               it sees the arrow describing the jump to Melody[i]).
+               
+        Returns:
+           arrows: [B, T] tensor aligned with Decoder inputs (pitch[:, :-1])
+        """
+        pitch = note_tokens['pitch'] # [B, T+1]
+        device = pitch.device
+        B, seq_len_plus_1 = pitch.shape
+        
+        # 1. Get Masks
+        # melody_mask: 1 where token is Melody, 0 where Accompaniment
+        melody_mask = self.get_melody_mask(note_tokens).bool() # [B, T+1]
+        
+        # 2. Prepare for Vectorized Ops
+        # We need original indices to scatter results back later
+        flat_indices = torch.arange(pitch.numel(), device=device)
+        
+        # Batch indices to ensure we don't diff across samples
+        batch_indices = torch.arange(B, device=device).unsqueeze(-1).expand_as(pitch).reshape(-1)
+        
+        # Flatten pitch
+        flat_pitch = pitch.reshape(-1)
+        
+        # 3. Filter: Select ONLY Melody Tokens
+        # m_pitch: [Total_Melody_Notes]
+        m_pitch = torch.masked_select(flat_pitch, melody_mask.reshape(-1))
+        m_batch = torch.masked_select(batch_indices, melody_mask.reshape(-1))
+        m_indices = torch.masked_select(flat_indices, melody_mask.reshape(-1))
+        
+        # 4. Compute Differences (Melody[i] - Melody[i-1])
+        # We need at least 2 notes to have a diff
+        if m_pitch.numel() < 2:
+            return torch.zeros(B, seq_len_plus_1 - 1, device=device, dtype=torch.long)
+
+        d_pitch = m_pitch[1:] - m_pitch[:-1] # [Total_Melody - 1]
+        
+        # 5. Validate Diffs (Check Batch Boundaries)
+        # Check if index i and i-1 belong to the same batch
+        valid_transition = (m_batch[1:] == m_batch[:-1])
+        
+        # Filter invalid transitions (jumps between batches)
+        valid_diffs = d_pitch[valid_transition]
+        
+        # We need the indices of the TARGET notes (Melody[i]) to place the arrows
+        # m_indices[1:] corresponds to the "destination" note of the diff
+        target_indices = m_indices[1:][valid_transition]
+        
+        # 6. Map Differences to Discrete Arrows [0-6]
+        # Initialize with a default (e.g., 3 for stay, or a specific PAD token)
+        # We use a temporary tensor for the values
+        arrow_vals = torch.zeros_like(valid_diffs, dtype=torch.long)
+        
+        # Apply thresholds (Vectorized)
+        arrow_vals = torch.where(valid_diffs <= -8, torch.tensor(0, device=device), arrow_vals)
+        arrow_vals = torch.where((valid_diffs >= -7) & (valid_diffs <= -3), torch.tensor(1, device=device), arrow_vals)
+        arrow_vals = torch.where((valid_diffs >= -2) & (valid_diffs <= -1), torch.tensor(2, device=device), arrow_vals)
+        arrow_vals = torch.where(valid_diffs == 0, torch.tensor(3, device=device), arrow_vals)
+        arrow_vals = torch.where((valid_diffs >= 1) & (valid_diffs <= 2), torch.tensor(4, device=device), arrow_vals)
+        arrow_vals = torch.where((valid_diffs >= 3) & (valid_diffs <= 7), torch.tensor(5, device=device), arrow_vals)
+        arrow_vals = torch.where(valid_diffs >= 8, torch.tensor(6, device=device), arrow_vals)
+
+        # 7. Scatter back to Full Tensor
+        # Create full-sized arrow tensor [B, T+1] (flattened first)
+        arrows_full = torch.zeros(pitch.numel(), device=device, dtype=torch.long)
+        
+        # Scatter values at the TARGET indices
+        # If pitch[k] is a melody note, arrows_full[k] now holds the arrow to reach it
+        arrows_full.scatter_(0, target_indices, arrow_vals)
+        
+        # Reshape back to [B, T+1]
+        arrows_full = arrows_full.view(B, seq_len_plus_1)
+        
+        # 8. Align with Decoder Context
+        # Decoder Context 'pitch' is pitch[:, :-1] (indices 0 to T-1)
+        # We use context[t] to predict target[t] (which is pitch[t+1])
+        # Therefore, if we want the arrow to guide prediction of pitch[t+1], 
+        # we need the arrow to be present at context position t.
+        # Since arrows_full[k] holds the arrow for pitch[k],
+        # arrows_full[t+1] holds the arrow for pitch[t+1].
+        # So we want output[t] = arrows_full[t+1].
+        # This corresponds to slicing arrows_full[:, 1:]
+        
+        arrows_out = arrows_full[:, 1:] # [B, T]
+        
+        # Mask out accompaniment arrows (Optional, but cleaner)
+        # (The FusionDecoder applies masking anyway, but this zeros out unused slots)
+        # Note: arrows_out corresponds to targets pitch[:, 1:]. 
+        # So we use melody_mask[:, 1:]
+        target_melody_mask = melody_mask[:, 1:]
+        arrows_out = arrows_out * target_melody_mask.long()
+        
+        return arrows_out
+
+    def compute_accuracy(self, logits: Tensor, labels: Tensor) -> Tensor:
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels).sum().float()
+        acc = num_right / len(labels) if len(labels) > 0 else torch.tensor(0.0)
+
+        return acc
+
+#===================================================================================================
+# MIXED VOCABULARY APPROACH
+# Arrows (melody) and Buttons (accompaniment) share a single vocabulary:
+#   0: NA (not applicable / padding)
+#   1-7: fine arrows (melody pitch intervals)
+#   8 to 8+num_buttons-1: buttons (accompaniment control)
+#===================================================================================================
+
+class Decoder_mixed_vocab(nn.Module):
+    """
+    Simple decoder using mixed vocabulary for arrows and buttons.
+    
+    Key vocabulary:
+        0: KEY_NA (not applicable)
+        1-7: arrows (fine pitch intervals for melody)
+        8 to 8+num_buttons-1: buttons (for accompaniment)
+    
+    Architecture: Simple embedding addition (like Decoder_melody)
+        x = pitch_emb + key_emb
+    """
+    # Constants
+    KEY_NA: int = 0
+    ARROW_OFFSET: int = 1  # arrows are 1-7
+    BUTTON_OFFSET: int = 8  # buttons start at 8
+    
+    def __init__(
+        self,
+        *,
+        max_seq_len: int,
+        dim: int,
+        depth: int,
+        heads: int,
+        num_buttons: int = 12,  # Number of button values (vocab will be 8 + num_buttons)
+        num_arrows: int = 7,  # Number of arrow values (vocab will be 1-7)
+        emb_dropout: float = 0.,
+        pitch_history_dropout: float = 0.0,
+        rotary_pos_emb: bool = True,
+        attn_flash: bool = True,
+        causal: bool = True
+    ):
+        super().__init__()
+        
+        self.emb_dim = dim
+        self.max_seq_len = max_seq_len
+        self.pitch_history_dropout = pitch_history_dropout
+        self.num_buttons = num_buttons
+        self.num_arrows = num_arrows
+        
+        # Vocabulary size: 0 (NA) + 7 (arrows) + num_buttons
+        self.key_vocab_size = self.num_arrows + 1 + self.num_buttons  # 0=NA, 1-7=arrows, 8-31=buttons (for 24 buttons)
+        
+        # Embeddings
+        self.role_emb = nn.Embedding(2, dim) # role embedding: 0=Melody, 1=Accomp
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        self.key_emb = nn.Embedding(self.key_vocab_size, dim)
+        
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout)
+        
+        # Attention layers
+        self.attn_layers = AttentionLayers(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            rotary_pos_emb=rotary_pos_emb,
+            attn_flash=attn_flash,
+            causal=causal
+        )
+        
+        self.init_()
+        
+        # Output projection to pitch logits
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
+        self.can_cache_kv = True
+
+    def init_(self) -> None:
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.key_emb.weight)
+        # Initialize KEY_NA (0) to zeros - no conditioning
+        with torch.no_grad():
+            self.key_emb.weight[0] = torch.zeros_like(self.key_emb.weight[0])
+
+        # --- ORDERED INITIALIZATION FOR BUTTONS ---
+        # Mimic the continuous scalar behavior of the pre-trained model. This gives the Decoder a "head start," making "Button 19" mathematically "greater" than "Button 8" right from step 0.
+        # We want Button 8 to be "Vector * -1" and Button 19 to be "Vector * +1"
+        with torch.no_grad():
+            # 1. Pick a random "Direction" in the high-dimensional space
+            direction_vector = torch.randn(1, self.emb_dim)
+            direction_vector = F.normalize(direction_vector, dim=1)
+            
+            # 2. Create a Linear Ramp from -1 to 1
+            # shape: [num_buttons, 1]
+            ramp = torch.linspace(-1, 1, self.num_buttons).unsqueeze(1)
+            
+            # 3. Project the ramp along the direction
+            # This creates a set of vectors that are collinear and ordered
+            ordered_embeddings = ramp * direction_vector
+            
+            # 4. Assign to the button section of the embedding table
+            start = self.BUTTON_OFFSET # e.g., 8
+            end = start + self.num_buttons
+            self.key_emb.weight[start:end] = ordered_embeddings
+            
+            # 5. Initialize NA (0) to zero
+            self.key_emb.weight[0].zero_()     
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],
+        return_intermediates: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[Tensor] = None,
+        seq_start_pos: Optional[int] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ) -> Tensor:
+        """
+        Forward pass with simple embedding addition.
+        
+        Args:
+            past_tokens: Dict with:
+                - 'pitch': [B, T] MIDI pitch values
+                - 'key': [B, T] mixed vocabulary indices (0=NA, 1-7=arrows, 8+=buttons)
+        
+        Returns:
+            logits: [B, T, VOCAB_SIZE_PITCH]
+        """
+        B, T = past_tokens['pitch'].shape
+        device = past_tokens['pitch'].device
+        
+        role = past_tokens['role']  # [B, T]
+        # Embed pitch
+        e_pitch = self.pitch_emb(past_tokens['pitch'])  # [B, T, dim]
+        
+        # Role-conditional pitch history dropout (only for accompaniment)
+        if self.training and self.pitch_history_dropout > 0:
+            keep_prob = 1.0 - self.pitch_history_dropout
+            keep_mask = (torch.rand(B, T, 1, device=device) < keep_prob).float()
+            
+            # Only apply dropout to accompaniment positions (role == 1)
+            accomp_mask = (role == 1).unsqueeze(-1).float()  # [B, T, 1]
+            # keep_mask=1 for melody, random for accomp
+            keep_mask = 1.0 - accomp_mask * (1.0 - keep_mask)
+            
+            e_pitch = e_pitch * keep_mask
+        
+        # Embed key (mixed arrows/buttons)
+        e_key = self.key_emb(past_tokens['key'].long())  # [B, T, dim]
+        # Simple addition (like Decoder_melody)
+        x = e_pitch + e_key
+
+        # Embed role
+        e_role = self.role_emb(role.long())  # [B, T, dim]
+        x = x + e_role # Pitch + Key + Role
+        
+        # Dropout
+        x = self.emb_dropout(x)
+        
+        # Attention layers
+        x, intermediates = self.attn_layers(
+            x,
+            mask=mask,
+            mems=mems,
+            cache=cache,
+            return_hiddens=True,
+            seq_start_pos=seq_start_pos,
+            **kwargs
+        )
+        
+        # Output logits
+        logits = self.to_logits(x)
+        
+        if return_intermediates:
+            return logits, intermediates
+        return logits
+
+
+class AE_mixed_vocab(Module):
+    """
+    Autoencoder with mixed vocabulary for arrows and buttons.
+    
+    Uses a single 'key' sequence where:
+        - Melody notes get arrow values (1-7)
+        - Accompaniment notes get button values (8-31)
+        - 0 is NA/padding
+    
+    The pre-trained encoder generates button indices for accompaniment.
+    Arrows are computed deterministically from melody pitch differences.
+    """
+    # Role constants
+    ROLE_MELODY: int = 0
+    ROLE_ACCOMP: int = 1
+    # Channel constants
+    CHAN_MELODY: int = 0
+    
+    def __init__(
+        self,
+        encoder: nn.Module,  # Pre-trained Encoder_no_dtime
+        decoder: Decoder_mixed_vocab,
+        cfg: Optional[Dict] = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        self.encoder = encoder
+        self.quantizer = IntegerQuantizer(cfg.get('num_buttons', 12))
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+        self.num_buttons = cfg.get('num_buttons', 12)
+        self.num_arrows = cfg.get('num_arrows', 7)
+
+    def encode_to_buttons(self, pitch: Tensor, role: Tensor) -> Tensor:
+        """
+        Encode only accompaniment pitches to button indices via encoder + quantizer.
+        Processes each batch sequence independently, extracting and encoding only accomp tokens.
+        
+        Returns button indices in range [num_arrows+1, num_arrows+num_buttons] for accompaniment,
+        0 (NA) for melody positions.
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Target pitch and role
+        target_pitch = pitch[:, 1:]  # [B, T]
+        target_role = role[:, 1:]    # [B, T]
+        
+        # Initialize outputs
+        button_keys = torch.zeros(B, T, dtype=torch.long, device=device)  # Will hold button indices
+        encoder_output = torch.zeros(B, T, dtype=torch.float, device=device)  # For loss computation
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract accompaniment mask for this sequence
+            acc_mask_b = (target_role[b] == self.ROLE_ACCOMP)  # [T]
+            num_acc = acc_mask_b.sum().item()
+            
+            if num_acc == 0:
+                # No accompaniment in this sequence, skip
+                continue
+            
+            # Extract accompaniment pitches
+            acc_pitches = target_pitch[b][acc_mask_b]  # [num_acc]
+            
+            # Encode accompaniment sequence
+            encoder_context = {'pitch': acc_pitches.unsqueeze(0)}  # [1, num_acc]
+            e_acc = self.encoder(encoder_context)  # [1, num_acc] continuous values
+            e_acc = e_acc.squeeze(0)  # [num_acc]
+            
+            # Quantize to discrete button indices (0 to num_buttons-1)
+            button_discrete = self.quantizer.real_to_discrete(e_acc)  # [num_acc]
+            
+            # Shift to mixed vocabulary range
+            button_values = button_discrete + self.num_arrows + 1  # +1 because 0 is NA, 1-7 are arrows
+            
+            # Scatter back to original positions
+            acc_indices = torch.where(acc_mask_b)[0]  # Indices where acc_mask_b is True
+            button_keys[b, acc_indices] = button_values
+            encoder_output[b, acc_indices] = e_acc.float()
+        
+        return button_keys, encoder_output
+
+    def pitch_to_arrow(self, pitch_seq: Tensor) -> Tensor:
+        """
+        Convert pitch differences to arrow indices (1-7).
+        Arrow 0 is reserved for NA, so we add 1 to standard arrow indices.
+        
+        Returns arrows in range [1, 7] (shifted by 1 from standard 0-6).
+        """
+        d = pitch_seq[:, 1:] - pitch_seq[:, :-1]  # [B, T]
+        
+        arrows = torch.zeros_like(d)
+        arrows[d <= -8] = 1   # large descending (was 0, now 1)
+        arrows[(d >= -7) & (d <= -3)] = 2   # medium descending
+        arrows[(d >= -2) & (d <= -1)] = 3   # small descending
+        arrows[d == 0] = 4   # stay
+        arrows[(d >= 1) & (d <= 2)] = 5   # small ascending
+        arrows[(d >= 3) & (d <= 7)] = 6   # medium ascending
+        arrows[d >= 8] = 7   # large ascending
+        
+        return arrows.long()
+
+    def extract_melody_arrows(self, pitch: Tensor, role: Tensor) -> Tensor:
+        """
+        Extract arrows only from consecutive melody notes.
+        Processes each batch sequence independently, extracting and computing arrows only for melody.
+        Returns arrow indices (1-7) for melody, 0 for accompaniment.
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Initialize with 0 (NA)
+        arrows = torch.zeros(B, T, dtype=torch.long, device=device)
+        
+        # Target role and pitch
+        target_role = role[:, 1:]  # [B, T]
+        target_pitch = pitch[:, 1:]  # [B, T]
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract melody mask for this sequence
+            mel_mask_b = (target_role[b] == self.ROLE_MELODY)  # [T]
+            num_mel = mel_mask_b.sum().item()
+            
+            if num_mel < 2:
+                # Need at least 2 melody notes to compute arrows
+                continue
+            
+            # Extract melody pitches (consecutive melody-only sequence)
+            mel_pitches = target_pitch[b][mel_mask_b]  # [num_mel]
+            
+            # Compute arrows for this melody sequence using pitch_to_arrow
+            # pitch_to_arrow expects [B, T] and returns [B, T-1]
+            mel_pitch_seq = mel_pitches.unsqueeze(0)  # [1, num_mel]
+            mel_arrows = self.pitch_to_arrow(mel_pitch_seq)  # [1, num_mel-1]
+            mel_arrows = mel_arrows.squeeze(0)  # [num_mel-1]
+            
+            # Scatter back to original positions
+            # Arrow at position i indicates transition FROM melody[i] TO melody[i+1]
+            # So mel_arrows[i] should be placed at the position of melody[i+1] in the original sequence
+            mel_indices = torch.where(mel_mask_b)[0]  # Indices where mel_mask_b is True
+            
+            if len(mel_indices) > 1:
+                # Place arrows at positions [1:] (skip first melody note, it has no incoming arrow)
+                target_positions = mel_indices[1:]  # Positions of melody notes 1, 2, ..., num_mel-1
+                arrows[b, target_positions] = mel_arrows
+        
+        return arrows
+
+    def build_keys(self, pitch: Tensor, channel: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Build unified 'key' sequence from pitch and channel.
+        
+        Returns:
+            keys: [B, T] mixed vocabulary (1-7 for arrows, 8-31 for buttons, 0 for NA)
+            encoder_output: [B, T] continuous encoder output (for losses)
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Build role from channel
+        role = (channel != self.CHAN_MELODY).long()  # 0=melody, 1=accomp
+        
+        # Get buttons for accompaniment (8-31, 0 for melody positions)
+        button_keys, encoder_output = self.encode_to_buttons(pitch, role)  # [B, T], [B, T]
+        
+        # Get arrows for melody (1-7, 0 for accomp positions)
+        arrows = self.extract_melody_arrows(pitch, role)  # [B, T]
+        
+        # Combine: arrows for melody, buttons for accompaniment
+        keys = arrows + button_keys  # arrows are 1-7 where melody, buttons are 8-19 where accomp
+        
+        return keys, encoder_output, role
+
+    def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+        """
+        Training forward pass.
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch': [B, T+1] pitch sequence
+                - 'channel': [B, T+1] MIDI channel (0=melody, >0=accomp)
+        """
+        pitch = note_tokens['pitch']
+        channel = note_tokens['channel']
+        device = pitch.device
+        
+        # Build keys and get encoder output
+        keys, encoder_output, role = self.build_keys(pitch, channel)  # [B, T], [B, T], [B, T+1]
+        
+        # Decoder context
+        decoder_context = {
+            'pitch': pitch[:, :-1],  # [B, T]
+            'key': keys,              # [B, T]
+            'role': role[:, :-1]     # [B, T]
+        }
+        
+        # Get logits
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        # Target
+        target = pitch[:, 1:]  # [B, T]
+        
+        # Reconstruction loss
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+        
+        # Contour loss for accompaniment buttons
+        loss_contour = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_contour', 0) > 0:
+            loss_contour = self.compute_contour_loss(pitch[:, 1:], encoder_output, role[:, 1:])
+        
+        # Deviate loss for accompaniment
+        loss_deviate = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_deviate = self.compute_deviate_loss(pitch[:, 1:], encoder_output, role[:, 1:])
+        
+        # Predicted contour loss: decoder predictions vs button controls (for accompaniment)
+        loss_pred_contour = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_pred_contour', 0) > 0:
+            loss_pred_contour = self.compute_predicted_contour_loss(
+                logits,          # [B, T, vocab_size]
+                keys,            # [B, T] button values (8-19 for accomp)
+                role[:, 1:]      # [B, T] target role
+            )
+        
+        # Arrow consistency loss for melody
+        loss_arrow_consistency = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_arrow_consistency = self.compute_arrow_consistency_loss(
+                pitch,           # [B, T+1] full pitch sequence
+                logits,          # [B, T, vocab_size] predicted logits
+                keys,            # [B, T] input keys (arrows for melody)
+                role             # [B, T+1] role sequence
+            )
+        
+        # Placeholder
+        #loss_button_held = torch.tensor(0.0, device=device)
+        
+        # Total loss
+        loss_total = loss_recons * self.cfg.get('loss_recons', 1.0)
+        if self.cfg.get('loss_contour', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_contour'] * loss_contour
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_deviate'] * loss_deviate
+        if self.cfg.get('loss_pred_contour', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_pred_contour'] * loss_pred_contour
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
+        
+        # Accuracy
+        acc = self.compute_accuracy(logits, target)
+        
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            'loss_contour': loss_contour,
+            'loss_pred_contour': loss_pred_contour,
+            # Placeholders for compatibility
+            'loss_margin': torch.tensor(0.0, device=device),
+            'loss_arrow_consistency': loss_arrow_consistency,
+            'loss_deviate': loss_deviate,
+            'loss_coarse_direction': torch.tensor(0.0, device=device),
+            'loss_button_held': torch.tensor(0.0, device=device), # Placeholder for compatibility
+            'loss_norm_pos': torch.tensor(0.0, device=device),
+            'loss_pitch_button': torch.tensor(0.0, device=device),
+            'loss_button_concentration': torch.tensor(0.0, device=device),
+            'loss_window_corr': torch.tensor(0.0, device=device),
+            'loss_contour_perc': torch.tensor(0.0, device=device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=device),
+            'loss_interval_perc': torch.tensor(0.0, device=device),
+            'loss_shape_perc': torch.tensor(0.0, device=device),
+        }
+        return loss, acc
+
+    def compute_contour_loss(self, pitch: Tensor, encoder_output: Tensor, role: Tensor) -> Tensor:
+        """
+        Contour loss for accompaniment only (using multi-step contour loss).
+        Processes each batch sequence independently, extracting only accompaniment tokens.
+        """
+        B, T = pitch.shape
+        device = pitch.device
+        
+        # Import the loss function
+        from loss_funcs import multi_step_contour_loss
+        
+        total_loss = torch.tensor(0.0, device=device)
+        valid_batches = 0
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract accompaniment mask for this sequence
+            acc_mask_b = (role[b] == self.ROLE_ACCOMP)  # [T]
+            num_acc = acc_mask_b.sum().item()
+            
+            if num_acc < 2:
+                # Need at least 2 accompaniment notes for contour loss
+                continue
+            
+            # Extract accompaniment pitches and buttons (consecutive accomp-only sequence)
+            acc_pitches = pitch[b][acc_mask_b]  # [num_acc]
+            acc_buttons = encoder_output[b][acc_mask_b]  # [num_acc]
+            
+            # Compute multi-step contour loss for this accompaniment sequence
+            # multi_step_contour_loss expects [batch, seq_len]
+            acc_pitch_seq = acc_pitches.unsqueeze(0)  # [1, num_acc]
+            acc_button_seq = acc_buttons.unsqueeze(0)  # [1, num_acc]
+            
+            batch_loss = multi_step_contour_loss(
+                acc_pitch_seq, 
+                acc_button_seq, 
+                max_steps=self.cfg.get('contour_max_steps', 5)
+            )
+            
+            total_loss = total_loss + batch_loss
+            valid_batches += 1
+        
+        # Average over valid batches
+        if valid_batches > 0:
+            return total_loss / valid_batches
+        else:
+            return torch.tensor(0.0, device=device)
+
+    def compute_deviate_loss(self, pitch: Tensor, encoder_output: Tensor, role: Tensor) -> Tensor:
+        """
+        Deviate loss for accompaniment only (using multi-step contour loss).
+        Processes each batch sequence independently, extracting only accompaniment tokens.
+        """
+        B, T = pitch.shape
+        device = pitch.device
+        
+        # Import the loss function
+        from loss_funcs import deviate_loss
+        
+        total_loss = torch.tensor(0.0, device=device)
+        valid_batches = 0
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract accompaniment mask for this sequence
+            acc_mask_b = (role[b] == self.ROLE_ACCOMP)  # [T]
+            num_acc = acc_mask_b.sum().item()
+            
+            if num_acc < 2:
+                # Need at least 2 accompaniment notes for contour loss
+                continue
+            
+            # Extract accompaniment pitches and buttons (consecutive accomp-only sequence)
+            acc_pitches = pitch[b][acc_mask_b]  # [num_acc]
+            acc_buttons = encoder_output[b][acc_mask_b]  # [num_acc]
+            
+            # Compute multi-step contour loss for this accompaniment sequence
+            # multi_step_contour_loss expects [batch, seq_len]
+            acc_pitch_seq = acc_pitches.unsqueeze(0)  # [1, num_acc]
+            acc_button_seq = acc_buttons.unsqueeze(0)[:, :-1]  # [1, num_acc]
+            
+            if acc_button_seq.shape[1] >= 1:
+                batch_loss = deviate_loss(
+                    acc_pitch_seq, 
+                    acc_button_seq, 
+                )
+            
+            total_loss = total_loss + batch_loss
+            valid_batches += 1
+        
+        # Average over valid batches
+        if valid_batches > 0:
+            return total_loss / valid_batches
+        else:
+            return torch.tensor(0.0, device=device)
+
+    def compute_arrow_consistency_loss(
+        self, 
+        input_pitch: Tensor,      # [B, T+1] ground truth pitch sequence
+        predicted_logits: Tensor, # [B, T, vocab_size] predicted pitch logits
+        input_keys: Tensor,       # [B, T] input keys (includes arrows for melody)
+        role: Tensor              # [B, T+1] role sequence
+    ) -> Tensor:
+        """
+        Arrow consistency loss for melody only.
+        Processes each batch sequence independently, extracting only melody tokens.
+        
+        Compares input arrows with arrows derived from predicted pitches.
+        """
+        B, T_plus_1 = input_pitch.shape
+        T = T_plus_1 - 1
+        device = input_pitch.device
+        
+        total_loss = torch.tensor(0.0, device=device)
+        valid_batches = 0
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract melody mask for target positions [1:]
+            mel_mask_b = (role[b, 1:] == self.ROLE_MELODY)  # [T]
+            num_mel = mel_mask_b.sum().item()
+            
+            if num_mel < 2:
+                # Need at least 2 melody notes to compute arrows
+                continue
+            
+            # Extract melody positions
+            mel_indices = torch.where(mel_mask_b)[0]  # Indices of melody notes
+            
+            # Extract input arrows for melody positions
+            # Keys contain arrows (1-7) for melody, buttons (8+) for accomp
+            input_keys_b = input_keys[b]  # [T]
+            input_arrows_mel = input_keys_b[mel_indices]  # [num_mel] - arrows at melody positions
+            
+            # Extract ground truth melody pitches (for computing expected arrows)
+            mel_mask_full = (role[b] == self.ROLE_MELODY)  # [T+1]
+            mel_indices_full = torch.where(mel_mask_full)[0]
+            input_pitch_mel = input_pitch[b][mel_indices_full]  # [num_mel] ground truth melody
+            
+            # Extract predicted logits for melody positions
+            predicted_logits_mel = predicted_logits[b, mel_indices, :]  # [num_mel, vocab_size]
+            
+            # Get predicted pitches from logits (argmax for discrete prediction)
+            predicted_pitch_mel = torch.argmax(predicted_logits_mel, dim=-1)  # [num_mel]
+            
+            # Build predicted pitch sequence: first pitch from input, rest from predictions
+            # This matches the decoder's autoregressive structure
+            predicted_pitch_seq = torch.cat([
+                input_pitch_mel[:1],      # First melody pitch (from input)
+                predicted_pitch_mel       # Predicted melody pitches
+            ])  # [num_mel+1]
+            
+            # Compute arrows from predicted pitch sequence
+            predicted_arrows_mel = self.pitch_to_arrow(predicted_pitch_seq.unsqueeze(0))  # [1, num_mel]
+            predicted_arrows_mel = predicted_arrows_mel.squeeze(0)  # [num_mel]
+            
+            # Compare with input arrows
+            # input_arrows_mel has shape [num_mel], representing arrows at each melody position
+            # predicted_arrows_mel has shape [num_mel], arrows from predicted pitches
+            
+            # Compute accuracy: how many arrows match?
+            matches = (input_arrows_mel == predicted_arrows_mel).float()
+            match_rate = matches.mean()
+            
+            # Loss = 1 - match_rate (minimize when arrows don't match)
+            batch_loss = 1.0 - match_rate
+            
+            total_loss = total_loss + batch_loss
+            valid_batches += 1
+        
+        # Average over valid batches
+        if valid_batches > 0:
+            return total_loss / valid_batches
+        else:
+            return torch.tensor(0.0, device=device)
+
+    def compute_predicted_contour_loss(
+        self,
+        predicted_logits: Tensor,  # [B, T, vocab_size]
+        keys: Tensor,               # [B, T] mixed keys (arrows 1-7, buttons 8-19)
+        role: Tensor                # [B, T] role sequence
+    ) -> Tensor:
+        """
+        Contour loss on predicted accompaniment pitches vs button controls.
+        This makes the decoder sensitive to button shape by penalizing when
+        predicted pitch intervals don't follow button intervals in direction.
+        """
+        from loss_funcs import expected_pitch_from_logits, predicted_contour_loss
+        
+        B, T, vocab_size = predicted_logits.shape
+        device = predicted_logits.device
+        
+        total_loss = torch.tensor(0.0, device=device)
+        valid_batches = 0
+        
+        # Process each batch sequence individually
+        for b in range(B):
+            # Extract accompaniment mask
+            acc_mask_b = (role[b] == self.ROLE_ACCOMP)  # [T]
+            num_acc = acc_mask_b.sum().item()
+            
+            if num_acc < 2:
+                # Need at least 2 accompaniment notes for contour
+                continue
+            
+            # Extract accompaniment positions
+            acc_indices = torch.where(acc_mask_b)[0]
+            
+            # Extract button values for accompaniment (keys 8-19)
+            keys_b = keys[b]  # [T]
+            button_keys_acc = keys_b[acc_indices]  # [num_acc]
+            
+            # Convert button keys to continuous values (8-19 -> 0-11 normalized)
+            button_values = (button_keys_acc.float() - (self.num_arrows + 1)) / (self.num_buttons - 1)
+            
+            # Extract predicted logits for accompaniment positions
+            logits_acc = predicted_logits[b, acc_indices, :]  # [num_acc, vocab_size]
+            
+            # Compute expected pitch values (differentiable soft argmax)
+            predicted_pitch_acc = expected_pitch_from_logits(logits_acc.unsqueeze(0))  # [1, num_acc]
+            
+            # Compute contour loss
+            batch_loss = predicted_contour_loss(
+                predicted_pitch_acc,  # [1, num_acc]
+                button_values.unsqueeze(0)  # [1, num_acc]
+            )
+            
+            total_loss = total_loss + batch_loss
+            valid_batches += 1
+        
+        # Average over valid batches
+        if valid_batches > 0:
+            return total_loss / valid_batches
+        else:
+            return torch.tensor(0.0, device=device)
+
+    def compute_accuracy(self, logits: Tensor, labels: Tensor) -> Tensor:
+        out = torch.argmax(logits, dim=-1).flatten()
+        labels = labels.flatten()
+        mask = (labels != self.ignore_index)
+        out = out[mask]
+        labels = labels[mask]
+        if len(labels) == 0:
+            return torch.tensor(0.0)
+        return (out == labels).float().sum() / len(labels)
+
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self,
+        note_tokens: Dict[str, Tensor],
+        temperature: float = 1.0
+    ) -> int:
+        """
+        Generate next pitch token.
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch': [B, T] pitches so far
+                - 'key': [B, T] key indices (1-7 for arrows, 8-31 for buttons)
+        """
+        logits, _ = self.decoder(
+            note_tokens,
+            return_intermediates=True,
+            cache=None,
+            seq_start_pos=None
+        )
+        
+        logits = logits[:, -1]  # [B, vocab_size]
+        probs = F.softmax(logits / temperature, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+        
+        return next_token.item()
+
+
+
+
+class Decoder_no_dtime_tester(nn.Module):
+    def __init__(
+        self,
+        *,
+        max_seq_len, # SEQ_LEN
+        dim,
+        depth,
+        heads,
+        #attn_layers, # Decoder(dim, depth, heads, rotary_pos_emb = True, attn_flash = True)
+        emb_dropout = 0.,
+        post_emb_norm = False,
+        num_memory_tokens = None,
+        memory_tokens_interspersed_every = None,
+        rotary_pos_emb = True,
+        attn_flash = True,
+        logits_dim = None,
+        causal = True  # True for decoder
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        super().__init__()
+
+        self.emb_dim = dim # 2048
+
+        self.max_seq_len = max_seq_len # 1024
+
+        # Embeddings
+        # Token embeddings for each feature type
+        #self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        #self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
+        #self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
+
+        # For the concatenation approach (like original Piano Genie)
+        # Input projection for concatenated features (pitch one-hot + continuous values)
+        input_dim = dim + 1  # one-hot pitch + dur + button (all continuous)
+        self.input_proj = nn.Linear(input_dim, dim)
+ 
+       # positional embeddings is inside the attention layers
+        #self.pos_emb = nn.Embedding(seq_len, d_model) if rotary_pos_emb else None
+
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout) # Dropout function
+
+        # Attention layers
+        self.attn_layers  = AttentionLayers(
+                          dim = dim,
+                          depth = depth,
+                          heads = heads,
+                          rotary_pos_emb = rotary_pos_emb,
+                          attn_flash = attn_flash,
+                          causal = causal
+                         )
+
+        self.init_()
+
+        #logits_dim = default(logits_dim, num_tokens) # 385
+        # Linear layer
+        #self.to_logits = nn.Linear(dim, logits_dim) # if not tie_embedding else lambda t: t @ self.token_emb.emb.weight.t()
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+
+ 
+    def init_(self):
+#       nn.init.kaiming_normal_(self.token_emb.emb.weight)
+        #nn.init.kaiming_normal_(self.dtime_emb.weight)
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        #nn.init.kaiming_normal_(self.dur_emb.weight)
+        #nn.init.kaiming_normal_(self.button_emb.weight)
+        nn.init.kaiming_normal_(self.input_proj.weight)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],  # Contains past dtime, vel, pitch, dur, button
+        return_intermediates = False,
+        mask = None,
+        mems = None,
+        seq_start_pos = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        # One-hot encode pitch for concatenation
+        #pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        pitch = self.pitch_emb(past_tokens['pitch'])
+        #dtime = self.dtime_emb(past_tokens['dtime'])
+        # Handle button, dtime, dur as continuous values
+        #dtime= past_tokens['dtime'].float().unsqueeze(-1)
+        #dur= past_tokens['dur'].float().unsqueeze(-1)
+        button= past_tokens['button'].float().unsqueeze(-1)
+        
+        # Concatenate all features as in original Piano Genie
+        concat_inputs = torch.cat([pitch, button], dim=-1)
+
+        # Project concatenated inputs to embedding dimension
+        x = self.input_proj(concat_inputs)
+        
+
+        '''
+        # Embed past notes, sum all embedding values, 
+        x = ( # (1,4,768)
+            self.dtime_emb(past_tokens['dtime']) + # past_notes['dtime'] (1,1024) [1:]
+            self.pitch_emb(past_tokens['pitch']) + # [:-1]
+            self.dur_emb(past_tokens['dur']) + # [:-1]
+            self.button_emb(past_tokens['button']) # [:]
+        )  # [B, T, emb_dim] (dtime_emb + pitch_emb + dur_emb + but_emb) -> note embeddings
+        '''
+    
+        # embedding dropout
+        x = self.emb_dropout(x)
+
+        # positional embeddings is inside the attention layers
+        # x = x + self.pos_emb(positions)  # [B, T, d_model]
+
+        # ¿? Create a causal mask or supply your custom mask if needed
+        x, intermediates = self.attn_layers(x, mask = mask, mems = mems, cache = cache, return_hiddens = True, seq_start_pos = seq_start_pos, **kwargs)
+
+        logits = self.to_logits(x) # (B, T (seq_len), Pitch_Vocab_size) (20, 1024, 128)
+
+        if return_intermediates:
+            return logits, intermediates
+
+        return logits
+
+
+# autoregressive wrapper class
+class AutoregressiveAutoencoder_no_dtime_tester(Module):
+    def __init__(
+        self,
+        encoder,
+        decoder,
+        cfg = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        self.encoder = encoder
+        self.quantizer = IntegerQuantizer(self.cfg['num_buttons'])
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+        #seq, ignore_index = x.shape[1], self.ignore_index
+
+        # Create encoder context (excluding the first position)
+        # as note_tokens['dtime'] (B, T+1)
+        encoder_context = {
+            #'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, 1:], # includes current pitch
+        } # (B, T)
+        e = self.encoder(encoder_context) # encoder output (batch, seq_len) (2, 1024)
+        b = self.quantizer(e) # generate buttons (batch, seq_len) (2, 1024), continuous values
+
+        # Get current tokens (the last note_token)
+        #current_dtime = note_tokens['dtime'][:,-1].unsqueeze(1)
+        #current_button = b[:,-1].unsqueeze(1)
+        #e = e.unsqueeze(1)
+
+        # Create decoder context
+        # note_tokens['dtime'][:,-1] is the current dtime
+        # b[:,-1] is the current button 
+        decoder_context = {
+            #'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, :-1], # no current pitch 
+            #'dur': note_tokens['dur'][:, :-1], # no current dur
+            'button': b[:, :] # b.shape = (B, T) # includes current button
+        } # (B, T)
+
+        logits = self.decoder(decoder_context) # (B, T (seq_len), VOCAB_SIZE_PITCH) (2, 1024, 128)
+
+        # Target should be the pitch at the current (last) position
+        target = note_tokens['pitch'][:,1:]
+
+        # Compute reconstruction loss (cross entropy between predicted and true pitches)
+        #loss_recons = loss.forward(y, tgt)
+        # Compute losses and update params
+        # loss_recons = cross entropy loss between predicted pitch sample list and true pitch sample list
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index = self.ignore_index # 128 vocab_pitch_size
+        )
+        
+        # flat all batches ??
+        #loss_recons = F.cross_entropy(y.view(-1, PIANO_NUM_KEYS), tgt.view(-1)) 
+
+        
+        # Calculate contour penalty
+        #"We also contribute a musically motivated regularization strategy which gives the model an 
+        # awareness of melodic contour. By comparing the finite differences (musical intervals in semitones) 
+        # of the input ∆x to the finite differences of the real-valued encoder output ∆encs(x), 
+        # the Lcontour term encourages the encoder to produce "button contours" that match the shape 
+        # of the input melodic contours."
+            
+        # This implements Lcontour = Σ max(1 − ∆x∆encs(x), 0)²:
+        # Encourages button intervals to match piano note intervals in direction
+
+        # Calculate differences between consecutive notes/latents
+        # torch.diff(e, dim=1) = ∆encs(x) = e[:, 1:] - e[:, :-1]  # Button intervals
+        # torch.diff(k, dim=1) = ∆x = (k[:, 1:] - k[:, :-1]).float()  # Piano note intervals
+        
+        # Penalizes when the product/quotient is less than the margin
+        loss_contour_perc = 0
+        if self.cfg['loss_contour_perc'] > 0: 
+            loss_contour_perc = simple_contour_loss(
+                note_tokens['pitch'],
+                e
+            ).mean()
+           
+        loss_margin = 0
+        if self.cfg['loss_margin'] > 0:
+            loss_margin = margin_loss( e)
+
+        loss_multi_step_perc = 0
+        if self.cfg['loss_multi_step_perc'] > 0:
+            # Add multi-step contour losses
+            loss_multi_step_perc = multi_step_contour_loss(
+                note_tokens['pitch'][:,1:], 
+                e,
+                max_steps=5
+            ).mean()
+
+        loss_interval_perc = 0
+        if self.cfg['loss_interval_perc'] > 0:
+            loss_interval_perc = interval_preservation_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                max_steps=5
+            ).mean()
+
+        loss_shape_perc = 0
+        if self.cfg['loss_shape_perc'] > 0:
+            loss_shape_perc = melodic_shape_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                window_size=5
+            ).mean()
+
+       # Improved Deviate Penalty
+        loss_deviate = 0
+        if self.cfg['loss_deviate'] > 0:
+             loss_deviate = deviate_loss(
+                note_tokens['pitch'],
+                e
+            )          
+ 
+        loss_button_held = 0
+        if self.cfg['loss_button_held'] > 0:
+            # Soft button-held penalty using continuous e (keeps gradients)
+            loss_button_held = button_held_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                self.cfg['num_buttons']
+            )
+
+        # Calculate normalized position loss
+        loss_norm_pos = 0
+        if self.cfg['loss_norm_pos'] > 0:
+            loss_norm_pos = normalized_position_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                num_buttons=self.cfg['num_buttons'],
+                window_size=5,
+            )
+
+        # Calculate pitch-button correlation loss
+        loss_pitch_button = 0
+        if self.cfg['loss_pitch_button'] > 0:
+            loss_pitch_button = pitch_button_correlation_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                window_size=5
+            )
+
+        # Calculate button concentration loss
+        loss_button_concentration = 0
+        if self.cfg['loss_button_concentration'] > 0:
+            loss_button_concentration = button_concentration_loss(
+                e,
+                note_tokens,
+                self.cfg['num_buttons']
+            )
+
+        # Windowed Pearson correlation between local pitch shape and e
+        loss_window_corr = 0
+        if self.cfg['loss_window_corr'] > 0:
+            loss_window_corr = windowed_correlation_loss(
+                note_tokens['pitch'][:,1:],
+                e
+            )
+
+        # Combine losses with appropriate weights
+        loss_total = torch.zeros_like(loss_recons)
+        loss_total += loss_recons * self.cfg['loss_recons'] 
+        
+        loss_contour = 0
+        if self.cfg['loss_contour'] > 0:
+            loss_contour = self.cfg['loss_contour'] * (
+                self.cfg['loss_contour_perc'] * loss_contour_perc +
+                self.cfg['loss_multi_step_perc'] * loss_multi_step_perc +
+                self.cfg['loss_interval_perc'] * loss_interval_perc +
+                self.cfg['loss_shape_perc'] * loss_shape_perc
+            )
+            loss_total += loss_contour
+
+        if self.cfg['loss_margin'] > 0:
+            loss_total += self.cfg['loss_margin'] * loss_margin
+            # Total loss
+        
+        if self.cfg['loss_deviate'] > 0:
+            loss_total += self.cfg['loss_deviate'] * loss_deviate
+        
+        if self.cfg['loss_button_held'] > 0:
+            loss_total += self.cfg['loss_button_held'] * loss_button_held
+
+        # Add normalized position loss
+        if self.cfg['loss_norm_pos'] > 0:
+            loss_total += self.cfg['loss_norm_pos'] * loss_norm_pos
+
+        # Add pitch-button correlation loss
+        if self.cfg['loss_pitch_button'] > 0:
+            loss_total += self.cfg['loss_pitch_button'] * loss_pitch_button
+
+
+        # Add button concentration loss
+        if self.cfg['loss_button_concentration'] > 0:
+            loss_total += self.cfg['loss_button_concentration'] * loss_button_concentration
+
+        # Add windowed correlation loss (maximize corr -> minimize 1-corr)
+        if self.cfg['loss_window_corr'] > 0:
+            loss_total += self.cfg['loss_window_corr'] * loss_window_corr
+
+        #loss_total = loss_recons
+        acc = self.compute_accuracy(logits, target)
+        
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+
+            'loss_margin': loss_margin,
+            'loss_deviate': loss_deviate,
+            'loss_button_held': loss_button_held,
+            'loss_norm_pos': loss_norm_pos,
+            'loss_pitch_button': loss_pitch_button,
+            'loss_button_concentration': loss_button_concentration,                        
+            'loss_window_corr': loss_window_corr,
+            'loss_contour': loss_contour,
+
+            'loss_contour_perc': loss_contour_perc,
+            'loss_multi_step_perc': loss_multi_step_perc,
+            'loss_interval_perc': loss_interval_perc,
+            'loss_shape_perc': loss_shape_perc,
+        }
+        return loss, acc
+
+        #return loss_total, acc
+ 
+    @torch.inference_mode()
+    def real_to_discrete(self, x, eps=1e-6):
+        return self.quantizer.real_to_discrete(x, eps)
+    
+    @torch.inference_mode()
+    def gen_pitch_token(self, 
+            note_tokens: Dict[str, Tensor],
+            temperature = 1.0
+            ):
+
+        device = note_tokens['pitch'].device
+        b = self.quantizer.discrete_to_real( note_tokens['button'])
+
+        # B = batch size = 1
+        # note_tokens suposed on gpu
+        # Create encoder context (excluding the first position)
+        # as note_tokens['dtime'] (B, T+1)
+
+        # Create decoder context
+        # note_tokens['dtime'][:,-1] is the current dtime
+        # b[:,-1] is the current button 
+        decoder_context = {
+            #'dtime': note_tokens['dtime'][:, 1:],
+            'pitch': note_tokens['pitch'][:, :-1],
+            #'dur': note_tokens['dur'][:, :-1],
+            'button': b[:, 1:]
+        } # (B, T)
+
+        logits, _ = self.decoder(
+                decoder_context,
+                return_intermediates = True,
+                cache = None,
+                seq_start_pos = None
+        )
+
+        logits = logits[:, -1]  # [B, 1, vocab_size]
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
+
+    @torch.inference_mode()
+    def gen_buttons(self, note_tokens: Dict[str, Tensor])  -> Tensor:
+        
+        # B = batch size = 1
+        # note_tokens suposed on gpu
+        # get:
+        #    'dtime': note_tokens['dtime'][:, :] -> (B=1, T)
+        #    'pitch': note_tokens['pitch'][:, :] -> (B=1, T)
+                
+        e = self.encoder(note_tokens) # encoder output (batch, seq_len)
+        b = self.real_to_discrete(e) # generate buttons (batch, seq_len)
+
+        #b = b[:, -1] # (B=1, 1)
+        #b = b.unsqueeze(1).item()
+        return b
+
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
+
+        acc = num_right / len(labels) 
+        return acc
+
+class Decoder_no_conditioning(nn.Module):
+    def __init__(
+        self,
+        *,
+        max_seq_len, # SEQ_LEN
+        dim,
+        depth,
+        heads,
+        #attn_layers, # Decoder(dim, depth, heads, rotary_pos_emb = True, attn_flash = True)
+        emb_dropout = 0.,
+        post_emb_norm = False,
+        num_memory_tokens = None,
+        memory_tokens_interspersed_every = None,
+        rotary_pos_emb = True,
+        attn_flash = True,
+        logits_dim = None,
+        causal = True  # True for decoder
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        super().__init__()
+
+        self.emb_dim = dim # 2048
+
+        self.max_seq_len = max_seq_len # 1024
+
+        # Embeddings
+        # Token embeddings for each feature type
+        #self.dtime_emb = nn.Embedding(VOCAB_SIZE_DTIME, dim)
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        #self.dur_emb = nn.Embedding(VOCAB_SIZE_DUR, dim)
+        #self.button_emb = nn.Embedding(VOCAB_SIZE_BUTTONS, dim)        
+
+        # For the concatenation approach (like original Piano Genie)
+        # Input projection for concatenated features (pitch one-hot + continuous values)
+        #input_dim = dim + 1  # one-hot pitch + dur + button (all continuous)
+        #self.input_proj = nn.Linear(input_dim, dim)
+ 
+       # positional embeddings is inside the attention layers
+        #self.pos_emb = nn.Embedding(seq_len, d_model) if rotary_pos_emb else None
+
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout) # Dropout function
+
+        # Attention layers
+        self.attn_layers  = AttentionLayers(
+                          dim = dim,
+                          depth = depth,
+                          heads = heads,
+                          rotary_pos_emb = rotary_pos_emb,
+                          attn_flash = attn_flash,
+                          causal = causal
+                         )
+
+        self.init_()
+
+        #logits_dim = default(logits_dim, num_tokens) # 385
+        # Linear layer
+        #self.to_logits = nn.Linear(dim, logits_dim) # if not tie_embedding else lambda t: t @ self.token_emb.emb.weight.t()
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+
+ 
+    def init_(self):
+#       nn.init.kaiming_normal_(self.token_emb.emb.weight)
+        #nn.init.kaiming_normal_(self.dtime_emb.weight)
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        #nn.init.kaiming_normal_(self.dur_emb.weight)
+        #nn.init.kaiming_normal_(self.button_emb.weight)
+        #nn.init.kaiming_normal_(self.input_proj.weight)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],  # Contains past dtime, vel, pitch, dur, button
+        return_intermediates = False,
+        mask = None,
+        mems = None,
+        seq_start_pos = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        """
+        Full-sequence forward:
+        Returns logits of shape [B, T, vocab_size_pitch],
+        predicting the pitch at every time step.
+        """
+        # One-hot encode pitch for concatenation
+        #pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
+        x = self.pitch_emb(past_tokens['pitch'])
+        #dtime = self.dtime_emb(past_tokens['dtime'])
+        # Handle button, dtime, dur as continuous values
+        #dtime= past_tokens['dtime'].float().unsqueeze(-1)
+        #dur= past_tokens['dur'].float().unsqueeze(-1)
+        #button= past_tokens['button'].float().unsqueeze(-1)
+        
+        # Concatenate all features as in original Piano Genie
+        #concat_inputs = torch.cat([pitch, button], dim=-1)
+
+        # Project concatenated inputs to embedding dimension
+        #x = self.input_proj(concat_inputs)
+        
+    
+        # embedding dropout
+        x = self.emb_dropout(x)
+
+        # positional embeddings is inside the attention layers
+        # x = x + self.pos_emb(positions)  # [B, T, d_model]
+
+        # ¿? Create a causal mask or supply your custom mask if needed
+        x, intermediates = self.attn_layers(x, mask = mask, mems = mems, cache = cache, return_hiddens = True, seq_start_pos = seq_start_pos, **kwargs)
+
+        logits = self.to_logits(x) # (B, T (seq_len), Pitch_Vocab_size) (20, 1024, 128)
+
+        if return_intermediates:
+            return logits, intermediates
+
+        return logits
+
+
+# autoregressive wrapper class
+class AE_no_conditioning(Module):
+    def __init__(
+        self,
+        decoder,
+        cfg = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+        #seq, ignore_index = x.shape[1], self.ignore_index
+
+        decoder_context = {
+            #'dtime': note_tokens['dtime'][:, 1:], # includes current dtime
+            'pitch': note_tokens['pitch'][:, :-1], # no current pitch 
+        } # (B, T)
+
+        logits = self.decoder(decoder_context) # (B, T (seq_len), VOCAB_SIZE_PITCH) (2, 1024, 128)
+
+        # Target should be the pitch at the current (last) position
+        target = note_tokens['pitch'][:,1:]
+
+        # Compute reconstruction loss (cross entropy between predicted and true pitches)
+        #loss_recons = loss.forward(y, tgt)
+        # Compute losses and update params
+        # loss_recons = cross entropy loss between predicted pitch sample list and true pitch sample list
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index = self.ignore_index # 128 vocab_pitch_size
+        )
+        
+        # Combine losses with appropriate weights
+        loss_total = torch.zeros_like(loss_recons)
+        loss_total += loss_recons * self.cfg['loss_recons'] 
+        
+        #loss_total = loss_recons
+        acc = self.compute_accuracy(logits, target)
+        
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+
+            'loss_margin': torch.tensor(0.0, device=loss_total.device),
+            'loss_deviate': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_held': torch.tensor(0.0, device=loss_total.device),
+            'loss_norm_pos': torch.tensor(0.0, device=loss_total.device),
+            'loss_pitch_button': torch.tensor(0.0, device=loss_total.device),
+            'loss_button_concentration': torch.tensor(0.0, device=loss_total.device),                        
+            'loss_window_corr': torch.tensor(0.0, device=loss_total.device),
+            'loss_contour': torch.tensor(0.0, device=loss_total.device),
+
+            'loss_contour_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_interval_perc': torch.tensor(0.0, device=loss_total.device),
+            'loss_shape_perc': torch.tensor(0.0, device=loss_total.device),
+        }
+        return loss, acc
+
+    @torch.inference_mode()
+    def gen_pitch_token(self, 
+            note_tokens: Dict[str, Tensor],
+            temperature = 1.0
+            ):
+
+        device = note_tokens['pitch'].device
+        b = self.quantizer.discrete_to_real( note_tokens['button'])
+
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1],
+        } # (B, T)
+
+        logits, _ = self.decoder(
+                decoder_context,
+                return_intermediates = True,
+                cache = None,
+                seq_start_pos = None
+        )
+
+        logits = logits[:, -1]  # [B, 1, vocab_size]
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
+
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
+
+        acc = num_right / len(labels) 
+        return acc
+
+
+
+class Decoder_arrows_and_buttons_concatenated(nn.Module):
+    """
+    Decoder for fused melody+accompaniment generation using CONCATENATION conditioning.
+    
+    Unlike additive conditioning which can "wash out" control signals, concatenation
+    explicitly preserves all embeddings and lets a learned projection combine them.
+    
+    Melody events (role=0): conditioned by fine arrows (pitch interval guidance)
+    Accompaniment events (role=1): conditioned by buttons (compressed representation from encoder)
+    
+    Arrow vocabulary (fine arrows only):
+        0: dPitch <= -8 (large descending)
+        1: -7 <= dPitch <= -3 (medium descending)
+        2: -2 <= dPitch <= -1 (small descending)
+        3: dPitch = 0 (stay)
+        4: 1 <= dPitch <= 2 (small ascending)
+        5: 3 <= dPitch <= 7 (medium ascending)
+        6: dPitch >= 8 (large ascending)
+        7: ARROW_NA (not applicable - for accompaniment events)
+    
+    Button conditioning:
+        Continuous values from encoder via STE quantization, projected with valid flag.
+        button_value: float in [-1, 1]
+        button_valid: 0 (invalid/melody) or 1 (valid/accomp)
+    
+    Concatenation combination:
+        control_vector = mel_mask * e_arrow + acc_mask * e_button
+        x_concat = cat([e_pitch, e_role, control_vector], dim=-1)  # [B, T, dim*3]
+        x = fuse_proj(x_concat)  # [B, T, dim]
+    """
+    # Constants for roles and arrow tokens
+    ROLE_MELODY: int = 0
+    ROLE_ACCOMP: int = 1
+    ARROW_NA: int = 7  # Not applicable (for accompaniment events)
+    
+    def __init__(
+        self,
+        *,
+        max_seq_len: int,  # SEQ_LEN
+        dim: int,
+        depth: int,
+        heads: int,
+        emb_dropout: float = 0.,
+        pitch_history_dropout: float = 0.0,  # Dropout rate for pitch embeddings (0.0-1.0)
+        post_emb_norm: bool = False,
+        num_memory_tokens: Optional[int] = None,
+        memory_tokens_interspersed_every: Optional[int] = None,
+        rotary_pos_emb: bool = True,
+        attn_flash: bool = True,
+        logits_dim: Optional[int] = None,
+        causal: bool = True  # True for decoder
+    ):
+        super().__init__()
+        
+        self.emb_dim = dim  # 2048
+        self.max_seq_len = max_seq_len
+        self.pitch_history_dropout = pitch_history_dropout
+        
+        # Pitch embedding
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        
+        # Role embedding: MELODY=0, ACCOMP=1
+        self.role_emb = nn.Embedding(2, dim)
+        
+        # Arrow Embedding (8 tokens: 0-6 fine arrows + 7=ARROW_NA)
+        self.arrow_emb = nn.Embedding(8, dim)
+        
+        # Button projection: maps (button_value, button_valid) -> dim
+        # button_value: continuous [-1, 1] from quantizer
+        # button_valid: 0 or 1 indicating if button applies to this event
+        self.button_proj = nn.Linear(2, dim)
+        
+        # Fusion projection: concatenated embeddings -> dim
+        # e_pitch (dim) + e_role (dim) + control_vector (dim) = dim * 3
+        self.fuse_proj = nn.Linear(dim * 3, dim)
+        
+        # Dropout
+        self.emb_dropout = nn.Dropout(emb_dropout)
+        
+        # Attention layers
+        self.attn_layers = AttentionLayers(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            rotary_pos_emb=rotary_pos_emb,
+            attn_flash=attn_flash,
+            causal=causal
+        )
+        
+        self.init_()
+        
+        # Output projection to pitch logits
+        self.to_logits = nn.Linear(dim, VOCAB_SIZE_PITCH, bias=False)        
+        # whether can do cached kv decoding
+        self.can_cache_kv = True
+
+    def init_(self) -> None:
+        nn.init.kaiming_normal_(self.pitch_emb.weight)
+        nn.init.kaiming_normal_(self.role_emb.weight)
+        nn.init.kaiming_normal_(self.arrow_emb.weight)
+        nn.init.kaiming_normal_(self.button_proj.weight)
+        nn.init.kaiming_normal_(self.fuse_proj.weight)
+        
+        # Initialize ARROW_NA (7) to zeros - no conditioning for accompaniment events
+        with torch.no_grad():
+            self.arrow_emb.weight[7] = torch.zeros_like(self.arrow_emb.weight[0])
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],
+        return_intermediates: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[Tensor] = None,
+        seq_start_pos: Optional[int] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ) -> Tensor:
+        """
+        Full-sequence forward pass with CONCATENATION conditioning.
+        Returns logits of shape [B, T, VOCAB_SIZE_PITCH].
+        
+        Args:
+            past_tokens: Dict with:
+                - 'pitch': LongTensor [B, T] - MIDI pitch values (0-127)
+                - 'role': LongTensor [B, T] - role (0=melody, 1=accomp)
+                - 'arrow': LongTensor [B, T] - arrow indices (0-7)
+                - 'button_value': FloatTensor [B, T] - continuous button values [-1, 1]
+                - 'button_valid': FloatTensor [B, T] - validity flag (0 or 1)
+        
+        Returns:
+            logits: Tensor [B, T, VOCAB_SIZE_PITCH]
+        """
+        B, T = past_tokens['pitch'].shape
+        device = past_tokens['pitch'].device
+        
+        # Embed pitch
+        e_pitch = self.pitch_emb(past_tokens['pitch'])  # [B, T, dim]
+        
+        # PITCH HISTORY DROPOUT: zero out pitch embeddings to force control reliance
+        if self.training and self.pitch_history_dropout > 0:
+            keep_prob = 1.0 - self.pitch_history_dropout
+            keep_mask = (torch.rand(B, T, 1, device=device) < keep_prob).float()
+            e_pitch = e_pitch * keep_mask
+        
+        # Embed role
+        e_role = self.role_emb(past_tokens['role'].long())  # [B, T, dim]
+        
+        # Embed arrows
+        e_arrow = self.arrow_emb(past_tokens['arrow'].long())  # [B, T, dim]
+        
+        # Project buttons: stack (value, valid) -> project to dim
+        button_value = past_tokens['button_value'].float()  # [B, T]
+        button_valid = past_tokens['button_valid'].float()  # [B, T]
+        button_features = torch.stack([button_value, button_valid], dim=-1)  # [B, T, 2]
+        e_button = self.button_proj(button_features)  # [B, T, dim]
+        
+        # Compute role masks for gating control vector
+        mel_mask = (past_tokens['role'] == self.ROLE_MELODY).float().unsqueeze(-1)  # [B, T, 1]
+        acc_mask = (past_tokens['role'] == self.ROLE_ACCOMP).float().unsqueeze(-1)  # [B, T, 1]
+        
+        # Role-gated control vector: arrow for melody, button for accomp
+        control_vector = mel_mask * e_arrow + acc_mask * e_button  # [B, T, dim]
+        
+        # CONCATENATION: Explicitly preserve all signals for the model to learn how to combine
+        # This prevents the control signal from being "washed out" by dominant pitch features
+        x_concat = torch.cat([e_pitch, e_role, control_vector], dim=-1)  # [B, T, dim*3]
+        x = self.fuse_proj(x_concat)  # [B, T, dim]
+        
+        # Apply dropout
+        x = self.emb_dropout(x)
+        
+        # Pass through attention layers
+        x, intermediates = self.attn_layers(
+            x, 
+            mask=mask, 
+            mems=mems, 
+            cache=cache, 
+            return_hiddens=True, 
+            seq_start_pos=seq_start_pos, 
+            **kwargs
+        )
+        
+        # Project to pitch logits
+        logits = self.to_logits(x)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        if return_intermediates:
+            return logits, intermediates
+        
+        return logits
+
+
+class AE_arrows_and_buttons_concatenated(Module):
+    """
+    Fused Autoencoder for interleaved melody+accompaniment generation.
+    
+    Melody events: controlled by fine arrows (deterministic from pitch differences)
+    Accompaniment events: controlled by buttons (learned via encoder + STE quantization)
+    
+    The input is a single interleaved event stream with:
+        - pitch: MIDI pitch for each event
+        - channel: MIDI channel (0=melody, 10=accompaniment)
+    
+    Training:
+        - For melody events: arrows are extracted from melody-to-melody pitch differences
+        - For accomp events: buttons are learned via encoder compression + contour loss
+    
+    Arrow vocabulary (fine arrows only):
+        0: dPitch <= -8 (large descending)
+        1: -7 <= dPitch <= -3 (medium descending)
+        2: -2 <= dPitch <= -1 (small descending)
+        3: dPitch = 0 (stay)
+        4: 1 <= dPitch <= 2 (small ascending)
+        5: 3 <= dPitch <= 7 (medium ascending)
+        6: dPitch >= 8 (large ascending)
+        7: ARROW_NA (not applicable - for accomp events)
+    
+    Button conditioning:
+        Continuous values [-1, 1] from encoder via STE quantization.
+        Only applied to accompaniment events.
+    """
+    # Constants (same as Decoder)
+    ROLE_MELODY: int = 0
+    ROLE_ACCOMP: int = 1
+    ARROW_NA: int = 7
+    # Channel constants (MIDI channel numbers)
+    CHAN_MELODY: int = 0
+    CHAN_ACCOMP: int = 10
+    
+    def __init__(
+        self,
+        encoder: nn.Module,  # Encoder for accompaniment (e.g., Encoder_no_dtime)
+        decoder: Decoder_arrows_and_buttons,
+        cfg: Optional[Dict] = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        self.encoder = encoder
+        self.quantizer = IntegerQuantizer(cfg.get('num_buttons', 12))
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def extract_melody_arrows(self, pitch: Tensor, role: Tensor) -> Tensor:
+        """
+        Extract fine arrows from melody-to-melody pitch differences.
+        
+        Pitch differences are computed only between consecutive melody tokens,
+        treating melody as its own stream (like compute_contour_loss for accompaniment).
+        
+        Arrow mapping (fine arrows only):
+            0: dPitch <= -8 (large descending)
+            1: -7 <= dPitch <= -3 (medium descending)
+            2: -2 <= dPitch <= -1 (small descending)
+            3: dPitch = 0 (stay)
+            4: 1 <= dPitch <= 2 (small ascending)
+            5: 3 <= dPitch <= 7 (medium ascending)
+            6: dPitch >= 8 (large ascending)
+            7: ARROW_NA (accompaniment events)
+        
+        Args:
+            pitch: [B, T+1] pitch sequence
+            role: [B, T+1] role sequence (0=melody, 1=accomp)
+        
+        Returns:
+            arrows: [B, T] arrow indices (0-6 for melody, 7 for accomp)
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Initialize arrows with ARROW_NA (for accomp events)
+        arrows = torch.full((B, T), self.ARROW_NA, dtype=torch.long, device=device)
+        
+        # Work with target positions (role[:, 1:] and pitch[:, 1:])
+        target_role = role[:, 1:]    # [B, T]
+        target_pitch = pitch[:, 1:]  # [B, T]
+        
+        # Flatten for vectorized processing (same pattern as compute_contour_loss)
+        target_role_flat = target_role.flatten()      # [B*T]
+        target_pitch_flat = target_pitch.flatten()    # [B*T]
+        batch_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, T).flatten()  # [B*T]
+        pos_idx = torch.arange(T, device=device).unsqueeze(0).expand(B, T).flatten()  # [B*T]
+        
+        # Mask for melody tokens only
+        mel_mask = (target_role_flat == self.ROLE_MELODY)
+        
+        if mel_mask.sum() < 2:
+            # Set all melody tokens to "stay" (3) if less than 2
+            arrows.flatten()[mel_mask] = 3
+            return arrows
+        
+        # Extract melody tokens
+        mel_pitch = target_pitch_flat[mel_mask]  # [num_mel_total]
+        mel_batch = batch_idx[mel_mask]          # [num_mel_total]
+        mel_pos = pos_idx[mel_mask]              # [num_mel_total]
+        
+        # Identify consecutive melody pairs within the same batch
+        same_batch_mask = (mel_batch[1:] == mel_batch[:-1])  # [num_mel_total - 1]
+        
+        if not same_batch_mask.any():
+            # Only first melody tokens in each batch, use "stay" (3) for all
+            arrows.flatten()[mel_mask] = 3
+            return arrows
+        
+        # Compute pitch differences between consecutive melody tokens
+        mel_diff = (mel_pitch[1:] - mel_pitch[:-1]).long()  # [num_mel_total - 1]
+        
+        # Map differences to fine arrows (0-6)
+        mel_arrows = torch.full_like(mel_diff, 3, dtype=torch.long)  # default: stay
+        mel_arrows = torch.where(mel_diff <= -8, torch.tensor(0, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= -7) & (mel_diff <= -3), torch.tensor(1, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= -2) & (mel_diff <= -1), torch.tensor(2, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= 1) & (mel_diff <= 2), torch.tensor(4, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where((mel_diff >= 3) & (mel_diff <= 7), torch.tensor(5, device=device, dtype=torch.long), mel_arrows)
+        mel_arrows = torch.where(mel_diff >= 8, torch.tensor(6, device=device, dtype=torch.long), mel_arrows)
+        
+        # For pairs crossing batch boundaries, use "stay"
+        mel_arrows = torch.where(same_batch_mask, mel_arrows, torch.tensor(3, device=device, dtype=torch.long))
+        
+        # Scatter arrows back to original positions
+        arrows_flat = arrows.flatten()  # [B*T]
+        
+        # First melody token in each batch gets "stay" (3)
+        first_mel_mask = torch.cat([torch.tensor([True], device=device), ~same_batch_mask])
+        arrows_flat[mel_mask] = torch.where(
+            first_mel_mask,
+            torch.tensor(3, device=device, dtype=torch.long),
+            torch.tensor(0, device=device, dtype=torch.long)  # placeholder
+        )
+        
+        # Scatter computed arrows to positions of "second" melody tokens
+        scatter_positions = mel_pos[1:][same_batch_mask] + mel_batch[1:][same_batch_mask] * T
+        arrows_flat[scatter_positions] = mel_arrows[same_batch_mask]
+        
+        return arrows_flat.view(B, T)
+
+    def encode_accompaniment(
+        self,
+        pitch: Tensor,
+        role: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Encode accompaniment pitches to button values via encoder + STE quantization.
+        
+        Args:
+            pitch: [B, T+1] full pitch sequence
+            role: [B, T+1] role sequence (0=melody, 1=accomp)
+        
+        Returns:
+            button_values: [B, T] continuous button values [-1, 1] (quantized via STE)
+            button_valid: [B, T] validity flag (1 for accomp, 0 for melody)
+        """
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+        
+        # Create packed accompaniment sequence per batch
+        # For simplicity, we run encoder on full sequence but only use accomp positions
+        # (Alternative: pack accomp, run encoder, scatter back)
+        
+        # Run encoder on the target pitch sequence (pitch[:, 1:])
+        encoder_context = {'pitch': pitch[:, 1:]}  # [B, T]
+        # Self-attention Mask for accompaniment tokens
+        acc_mask = (role[:, 1:] == self.ROLE_ACCOMP)  # bool [B, T]
+
+        e = self.encoder(encoder_context, mask=acc_mask)  # [B, T] continuous values
+        
+        # Quantize via STE
+        b = self.quantizer(e)  # [B, T] continuous values in [-1, 1]
+        
+        # Create validity mask: 1 for accomp events, 0 for melody
+        button_valid = (role[:, 1:] == self.ROLE_ACCOMP).float()  # [B, T]
+        
+        return b, button_valid, e
+
+    def compute_contour_deviate_losses(
+        self,
+        pitch: Tensor,
+        encoder_output: Tensor,
+        role: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Compute both contour loss and deviate loss for accompaniment button learning.
+        
+        Contour loss: Encourages button intervals to match pitch intervals in direction.
+        Deviate loss: Penalizes button changes when consecutive pitches are the same (held notes).
+        
+        We extract only accompaniment tokens and compute their losses,
+        treating the accompaniment as its own melodic stream independent
+        of interleaved melody events.
+        
+        Args:
+            pitch: [B, T] target pitch sequence
+            encoder_output: [B, T] continuous button values (encoder output)
+            role: [B, T] role sequence
+        
+        Returns:
+            loss_contour: Scalar contour loss
+            loss_deviate: Scalar deviate loss
+        """
+        B, T = pitch.shape
+        device = pitch.device
+        
+        # Flatten tensors for vectorized processing
+        pitch_flat = pitch.float().flatten()      # [B*T]
+        encoder_output_flat = encoder_output.flatten()          # [B*T]
+        role_flat = role.flatten()                # [B*T]
+        
+        # Create batch indices to track which batch each token belongs to
+        batch_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, T).flatten()  # [B*T]
+        
+        # Mask for accompaniment tokens
+        acc_mask = (role_flat == self.ROLE_ACCOMP)
+        
+        if acc_mask.sum() < 2:
+            return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+        
+        # Extract only accompaniment values
+        acc_pitch = pitch_flat[acc_mask]      # [num_acc_total]
+        acc_buttons = encoder_output_flat[acc_mask]  # [num_acc_total]
+        acc_batch = batch_idx[acc_mask]       # [num_acc_total]
+        
+        # Compute differences between consecutive accompaniment tokens
+        # Only valid if consecutive tokens belong to the same batch
+        same_batch_mask = (acc_batch[1:] == acc_batch[:-1])  # [num_acc_total - 1]
+        
+        if not same_batch_mask.any():
+            return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+        
+        # Compute differences within accompaniment stream
+        pitch_diff = acc_pitch[1:] - acc_pitch[:-1]      # [num_acc_total - 1]
+        button_diff = acc_buttons[1:] - acc_buttons[:-1]  # [num_acc_total - 1]
+        
+        # ===== CONTOUR LOSS (SIGN-ONLY VERSION) =====
+        # Sign-only contour loss: count matches between pitch_diff and button_diff signs
+        # Compare signs: [-1, 0, 1] for each difference
+        pitch_sign = torch.sign(pitch_diff)  # [num_acc_total - 1]
+        button_sign = torch.sign(button_diff)  # [num_acc_total - 1]
+        
+        # Count matches: same sign means agreement (match)
+        sign_matches = (pitch_sign == button_sign).float()  # [num_acc_total - 1]
+        
+        # Apply same_batch_mask to only consider valid pairs (consecutive tokens in same batch)
+        masked_matches = sign_matches * same_batch_mask.float()  # [num_acc_total - 1]
+        
+        # Compute match rate: number of matches / number of valid pairs
+        num_valid_pairs = same_batch_mask.float().sum().clamp(min=1)
+        match_rate = masked_matches.sum() / num_valid_pairs
+        
+        # Loss = 1 - match_rate (we want to minimize when signs don't match)
+        loss_contour = 1.0 - match_rate
+        
+        # ===== DEVIATE LOSS =====
+        # Identify held notes: where consecutive pitches are the same
+        # In the flattened accompaniment stream, check if acc_pitch[i+1] == acc_pitch[i]
+        notes_held = (pitch_diff == 0).float()  # [num_acc_total - 1]
+        
+        if notes_held.sum() > 0:
+            # Penalize button changes when notes are held
+            # button_diff already contains the button changes
+            held_button_changes = button_diff * notes_held * same_batch_mask.float()
+            loss_deviate = torch.square(held_button_changes).sum() / (notes_held * same_batch_mask.float()).sum().clamp(min=1e-6)
+        else:
+            # If no held notes, add small penalty to encourage stability
+            loss_deviate = 0.01 * torch.square(button_diff * same_batch_mask.float()).mean()
+        
+        return loss_contour, loss_deviate
+
+    def compute_margin_loss(self, encoder_output: Tensor, role: Tensor) -> Tensor:
+        """
+        Regularize buttons to stay in [-1, 1] range.
+        Only computed for accompaniment events.
+        
+        Args:
+            buttons: [B, T] continuous button values
+            role: [B, T] role sequence
+        
+        Returns:
+            loss: Scalar margin loss
+        """
+        acc_mask = (role == self.ROLE_ACCOMP).float()
+        
+        if acc_mask.sum() == 0:
+            return torch.tensor(0.0, device=encoder_output.device)
+        
+        # Extract only accompaniment encoder outputs
+        acc_encoder_output = encoder_output * acc_mask  # [B, T]
+        
+        # Margin penalty: penalize values outside [-1, 1]
+        margin_penalty = torch.square(
+            torch.maximum(torch.abs(acc_encoder_output) - 1, torch.zeros_like(acc_encoder_output))
+        )
+        
+        # Add range utilization term (encourage using full range, prevent collapse to center)
+        # Compute variance only over accompaniment positions
+        acc_values = encoder_output[acc_mask.bool()]  # Flatten to [num_acc]
+        if acc_values.numel() > 1:
+            range_utilization = 1.0 - torch.var(acc_values)  # Penalize low variance
+        else:
+            range_utilization = torch.tensor(0.0, device=encoder_output.device)
+        
+        # Compute mean margin penalty over accompaniment positions
+        margin_loss_value = margin_penalty.sum() / acc_mask.sum().clamp(min=1)
+        
+        # Combine with range utilization (matching loss_funcs.py structure)
+        loss_margin = margin_loss_value + 0.1 * range_utilization
+        
+        return loss_margin
+
+    def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+        """
+        Training forward pass for interleaved melody+accompaniment.
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch': [B, T+1] pitch sequence
+                - 'channel': [B, T+1] MIDI channel sequence (0=melody, 10=accomp)
+        
+        Returns:
+            loss: Dict with loss components
+            acc: Accuracy tensor
+        
+        Training alignment:
+            - Input: pitch[0:T], role[0:T], arrows[0:T], buttons[0:T]
+            - Target: pitch[1:T+1]
+            
+            For melody events at position t:
+                arrow[t] = direction from previous melody pitch to pitch[t+1]
+            For accomp events at position t:
+                button[t] = encoded representation of accomp context
+        """
+        pitch = note_tokens['pitch']      # [B, T+1]
+        channel = note_tokens['channel']  # [B, T+1] (0=melody, 10=accomp)
+        B, T_plus_1 = pitch.shape
+        T = T_plus_1 - 1
+        device = pitch.device
+                
+        # Build role from channel: CHAN_MELODY (0) -> ROLE_MELODY (0), CHAN_ACCOMP (10) -> ROLE_ACCOMP (1)
+        role = (channel > self.CHAN_MELODY).long()  # [B, T+1] (0=melody, 1=accomp)
+        
+        # Extract fine arrows for melody events (accomp events get ARROW_NA)
+        arrows = self.extract_melody_arrows(pitch, role)  # [B, T+1], [B, T+1] -> [B, T]
+        
+        # Encode accompaniment to buttons
+        button_values, button_valid, encoder_output = self.encode_accompaniment(pitch, role)  # [B, T+1], [B, T+1] -> [B, T], [B, T], [B, T]
+        
+        # Create decoder context
+        decoder_context = {
+            'pitch': pitch[:, :-1],           # [B, T]
+            'role': role[:, :-1],             # [B, T]
+            'arrow': arrows,                   # [B, T]
+            'button_value': button_values,     # [B, T]
+            'button_valid': button_valid,      # [B, T]
+        }
+        
+        # Get logits from decoder
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+        
+        # Target is the next pitch (ground truth)
+        target = pitch[:, 1:]  # [B, T]
+        
+        # Compute reconstruction loss
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+
+        # Compute contour and deviate losses for accompaniment button learning
+        loss_contour = torch.tensor(0.0, device=device)
+        loss_deviate = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_contour', 0) > 0 or self.cfg.get('loss_deviate', 0) > 0:
+            loss_contour, loss_deviate = self.compute_contour_deviate_losses(
+                pitch[:, 1:], encoder_output, role[:, 1:] # contour similarity between pitch ground truth and encoder output
+            )
+        
+        # Compute margin loss for button regularization
+        loss_margin = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_margin', 0) > 0:
+            loss_margin = self.compute_margin_loss(encoder_output, role[:, 1:]) 
+        # Compute arrow consistency loss for melody
+        loss_arrow_consistency = torch.tensor(0.0, device=device)
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            predicted_pitches = torch.argmax(logits, dim=-1)  # [B, T]
+            # Create predicted pitch sequence for arrow extraction
+            first_pitch = pitch[:, :1]
+            predicted_pitch_seq = torch.cat([first_pitch, predicted_pitches], dim=1)
+            predicted_arrows = self.extract_melody_arrows(predicted_pitch_seq, role)
+            
+            # Only compare melody positions (exclude ARROW_NA)
+            melody_mask = (role[:, 1:] == self.ROLE_MELODY) & (arrows != self.ARROW_NA)
+            if melody_mask.any():
+                matches = (arrows == predicted_arrows) & melody_mask
+                accuracy = matches.sum().float() / melody_mask.sum().float()
+                loss_arrow_consistency = 1.0 - accuracy
+        
+        # Compute total loss
+        loss_total = loss_recons * self.cfg.get('loss_recons', 1.0)
+        
+        if self.cfg.get('loss_contour', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_contour'] * loss_contour
+        
+        if self.cfg.get('loss_margin', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_margin'] * loss_margin
+        
+        if self.cfg.get('loss_arrow_consistency', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_arrow_consistency'] * loss_arrow_consistency
+        
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_deviate'] * loss_deviate
+        
+        # Compute accuracy
+        acc = self.compute_accuracy(logits, target)
+        
+        # Return loss dictionary
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            'loss_contour': loss_contour,
+            'loss_margin': loss_margin,
+            'loss_arrow_consistency': loss_arrow_consistency,
+            # Placeholders for compatibility
+            'loss_coarse_direction': torch.tensor(0.0, device=device),
+            'loss_deviate': torch.tensor(0.0, device=device),
+            'loss_button_held': torch.tensor(0.0, device=device),
+            'loss_norm_pos': torch.tensor(0.0, device=device),
+            'loss_pitch_button': torch.tensor(0.0, device=device),
+            'loss_button_concentration': torch.tensor(0.0, device=device),
+            'loss_window_corr': torch.tensor(0.0, device=device),
+            'loss_contour_perc': torch.tensor(0.0, device=device),
+            'loss_multi_step_perc': torch.tensor(0.0, device=device),
+            'loss_interval_perc': torch.tensor(0.0, device=device),
+            'loss_shape_perc': torch.tensor(0.0, device=device),
+        }
+        return loss, acc
+ 
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self, 
+            note_tokens: Dict[str, Tensor],
+        temperature: float = 1.0
+    ) -> int:
+        """
+        Generate next pitch token given interleaved context.
+        
+        Args:
+            note_tokens: Dict with:
+                - 'pitch': [B, T] pitches so far
+                - 'role': [B, T] roles for each position
+                - 'arrow': [B, T] user-provided arrows (for melody) or ARROW_NA (for accomp)
+                - 'button_value': [B, T] button values (for accomp)
+                - 'button_valid': [B, T] button validity flags
+            temperature: Sampling temperature
+        
+        Returns:
+            next_token: Integer pitch value (0-127)
+        """
+
+        pitch = note_tokens['pitch']      # [B, T+1]
+        channel = note_tokens['channel']  # [B, T+1] (0=melody, 10=accomp)
+
+        # Build role from channel: CHAN_MELODY (0) -> ROLE_MELODY (0), CHAN_ACCOMP (10) -> ROLE_ACCOMP (1)
+        role = (channel > self.CHAN_MELODY).long()  # [B, T+1] (0=melody, 1=accomp)
+        
+        # Extract fine arrows for melody events (accomp events get ARROW_NA)
+        arrows = self.extract_melody_arrows(pitch, role)  # [B, T+1], [B, T+1] -> [B, T]
+        
+        # Encode accompaniment to buttons
+        button_values, button_valid, encoder_output = self.encode_accompaniment(pitch, role)  # [B, T+1], [B, T+1] -> [B, T], [B, T], [B, T]
+        
+        # Create decoder context
+        decoder_context = {
+            'pitch': pitch[:, :-1],           # [B, T]
+            'role': role[:, :-1],             # [B, T]
+            'arrow': arrows,                   # [B, T]
+            'button_value': button_values,     # [B, T]
+            'button_valid': button_valid,      # [B, T]
+        }
+        
+        # Get logits from decoder
+        logits = self.decoder(decoder_context)  # [B, T, VOCAB_SIZE_PITCH]
+
+        logits, _ = self.decoder(
+            note_tokens,
+            return_intermediates=True,
+            cache=None,
+            seq_start_pos=None
+        )
+        
+        logits = logits[:, -1]  # [B, vocab_size]
+        probs = F.softmax(logits / temperature, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+            
+        return next_token.item()
+
+    def compute_accuracy(self, logits: Tensor, labels: Tensor) -> Tensor:
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels).sum().float()
+        acc = num_right / len(labels) if len(labels) > 0 else torch.tensor(0.0)
+
+        return acc
+    

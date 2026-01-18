@@ -162,12 +162,23 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'autoencoder_no_dtime'
-    model_name = 'no_dtime_button_concentration_v1'
+    # Load pretrained model on buttons only
+    pretraining_model_name = 'no_dtime_good_reference_pretrain_tester'
+    cfg = get_model_hparams(pretraining_model_name)
+    pretraining_model = load_model(model_name=pretraining_model_name, cfg=cfg, set_only=True)  
+    pretraining_model.to(device)
+
+    # Load model with arrows and buttons guidance
+    project_name = 'AE_arrows_and_buttons'
+    model_name = 'AE_mixed_vocab_tester_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
+
+    # Copy encoder weights from pretrained only buttons model
+    model.encoder.load_state_dict(pretraining_model.encoder.state_dict())
+    model.quantizer.load_state_dict(pretraining_model.quantizer.state_dict())
     model.to(device)
-    #print(model)
+
     
     #==========================================================================
 
@@ -194,10 +205,10 @@ def main():
     train_dataset = MusicSamplerDataset(data_train, cfg['seq_len'], cfg=cfg) # train in chunks of SEQ_LEN
     print(f"BATCH_SIZE: {cfg['batch_size']}")
     print(f"Dataset size: {len(train_dataset)}")
-    train_loader  = DataLoader(train_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=True)
+    train_loader  = DataLoader(train_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=True, persistent_workers=True)
     print(f"Number of batches: {len(train_loader)}")
     val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True, cfg=cfg) # train in chunks of SEQ_LEN
-    val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False)
+    val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False, persistent_workers=True)
 
     # Right after val_loader is created and before model definition, add a reusable iterator for streaming validation
     val_iter = iter(val_loader)  # will be cycled through inside training loop
@@ -221,6 +232,15 @@ def main():
     for ep in range(cfg['epochs']):
         print('Epoch #', ep)
         
+        # Freeze encoder for first N epochs
+        if ep > cfg['unfreeze_encoder_after_n_epochs']:
+            for param in model.encoder.parameters():
+                param.requires_grad = True
+            print(f"Epoch {ep}: Unfreezing encoder")
+        else:
+            for param in model.encoder.parameters():
+                param.requires_grad = False
+
         model.train()
         with tqdm.tqdm(total=len(train_loader)) as bar_train:
             for i, batch in enumerate(train_loader):            
@@ -257,6 +277,9 @@ def main():
 
                         if cfg['loss_contour']>0 and 'loss_contour' in loss:
                             wandb.log({"loss_contour_all": cfg['loss_contour']*loss['loss_contour'].item()}, step=nsteps)
+                        
+                        if cfg.get('loss_pred_contour', 0)>0 and 'loss_pred_contour' in loss:
+                            wandb.log({"loss_pred_contour": cfg['loss_pred_contour']*loss['loss_pred_contour'].item()}, step=nsteps)
                         
                             if cfg['loss_contour_perc']>0 and 'loss_contour_perc' in loss:
                                 wandb.log({"loss_contour_perc": cfg['loss_contour']*cfg['loss_contour_perc']*loss['loss_contour_perc'].item()}, step=nsteps)

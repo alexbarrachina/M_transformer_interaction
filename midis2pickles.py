@@ -40,7 +40,7 @@ def time2quant(time):
 def dur2quant(dur):
     return int(dur/20)
 
-melody_only = True # if True, only process melody notes (channel 0)
+melody_only = False # if True, only process melody notes (channel 0)
 sorted_or_random_file_loading_order = False # Sorted order is NOT usually recommended
 dataset_ratio = 1 # Change this if you need more or less % of the dataset
 
@@ -49,11 +49,13 @@ train_and_test_ratio = 0.8 # 80% for training, 20% for testing
 
 # Melody channel filter
 MELODY_CHANNEL = 0  # Channel 0 is melody
+ACCOMP_CHANNEL = 10  # Channel 10 is accompaniment
+MELODY_ONLY = 0
+ACCOMP_ONLY = 1
+MELODY_AND_ACCOMP = 2
+ALL_CHANNELS = 3 # we will use all channels
 
-if melody_only:
-    print(f'Processing MIDI files for MELODY ONLY (channel {MELODY_CHANNEL}). Please wait...')
-else:
-    print('Processing MIDI files for ALL CHANNELS. Please wait...')
+useful_channels = ACCOMP_ONLY 
 
 ###########
 
@@ -63,6 +65,11 @@ gfiles = []
 
 train_data1 = []
 test_data1 = []
+
+# Channel statistics
+total_notes = 0
+channel_0_notes = 0
+channel_10_notes = 0
 
 ###########
 
@@ -119,9 +126,15 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
 
           # Filter for melody notes BEFORE timing recalculation
           # This ensures delta times are calculated between consecutive melody notes
-          if melody_only:
+          if useful_channels == MELODY_ONLY:
             # event format: ['note', start_time, duration, channel, pitch, velocity]
             filtered_events_matrix = [e for e in events_matrix if e[3] == MELODY_CHANNEL]
+          elif useful_channels == ACCOMP_ONLY:
+            # event format: ['note', start_time, duration, channel, pitch, velocity]
+            filtered_events_matrix = [e for e in events_matrix if e[3] == ACCOMP_CHANNEL]
+          elif useful_channels == MELODY_AND_ACCOMP:
+            # event format: ['note', start_time, duration, channel, pitch, velocity]
+            filtered_events_matrix = [e for e in events_matrix if (e[3] == MELODY_CHANNEL or e[3] == ACCOMP_CHANNEL)]
           else:
             filtered_events_matrix = events_matrix
           
@@ -153,6 +166,13 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
               # 5 tokens per note: dtime, dur, pitch, vel, chan (no offsets)
               target_data.extend([time, dur, ptc, vel, chan])
 
+              # Update channel statistics
+              total_notes += 1
+              if e[3] == MELODY_CHANNEL:
+                  channel_0_notes += 1
+              elif e[3] == ACCOMP_CHANNEL:
+                  channel_10_notes += 1
+
               pe = e
 
           files_count += 1
@@ -181,5 +201,17 @@ if train_and_test_ratio < 1.:
     print(f'Test data saved to {output_path}.pickle')
     print(f'{len(test_data1)} tokens ({len(test_data1)//5} notes)')
     print('=' * 70)
+
+# Display channel statistics
+print('Channel Statistics:')
+print(f'Total notes processed: {total_notes}')
+if total_notes > 0:
+    channel_0_pct = (channel_0_notes / total_notes) * 100
+    channel_10_pct = (channel_10_notes / total_notes) * 100
+    print(f'Channel 0 (melody) notes: {channel_0_notes} ({channel_0_pct:.2f}%)')
+    print(f'Channel 10 (accompaniment) notes: {channel_10_notes} ({channel_10_pct:.2f}%)')
+else:
+    print('No notes processed')
+print('=' * 70)
 
 print('Done!')

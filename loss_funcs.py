@@ -9,6 +9,7 @@
 
 import torch
 from torch import Tensor
+from torch.nn import functional as F
 
 ''' LOSS FUNCTIONS '''
 
@@ -217,7 +218,7 @@ def normalized_position_loss(pitches, buttons, num_buttons, window_size=15):
 
 
 
-def pitch_button_correlation_loss(pitches, e, window_size=15, tendency_distance=40):
+def pitch_button_correlation_loss(pitches, e, window_size=6, tendency_distance=1):
     """
     Calculates loss that correlates pitch tendencies with button concentrations.
     
@@ -281,78 +282,118 @@ def pitch_button_correlation_loss(pitches, e, window_size=15, tendency_distance=
     
     return loss
 
-def button_concentration_loss(e, note_tokens, num_buttons, window_size=15, tendency_distance=40, button_concentration_window_size=12):
+def button_concentration_loss(
+    e: Tensor,
+    note_tokens: dict,
+    num_buttons: int,
+    window_size: int = 16,
+    tendency_distance: int = 32,
+    eps: float = 1e-6
+) -> Tensor:
     """
-    Calculates loss that enforces button concentration in a BUTTON_CONCENTRATION_WINDOW_SIZE window
-    that shifts based on pitch tendency.
+    Calculates loss that correlates average button position with pitch tendency.
+    
+    When the performer plays buttons close to the higher button (e close to +1),
+    force the model to generate higher pitches (ascending tendency).
+    When buttons are low (e close to -1), force descending pitch tendency.
+    
+    Uses sliding windows to compute:
+    - Average button position (mean of e values in window)
+    - Pitch tendency (difference between current and earlier pitch window means)
+    
+    Penalizes when:
+    - High average buttons don't correspond with ascending pitch tendencies
+    - Low average buttons don't correspond with descending pitch tendencies
     
     Args:
         e: Tensor of shape [batch, seq_len] containing encoder outputs in [-1,1] range
         note_tokens: Dictionary containing pitch tokens
-        window_size: Size of window to calculate local pitch means
-        tendency_distance: Distance between tokens to calculate pitch tendency
+        num_buttons: Number of buttons (unused, kept for API compatibility)
+        window_size: Size of sliding window for averaging
+        tendency_distance: Distance between windows to calculate pitch tendency
+        eps: Small constant for numerical stability
     
     Returns:
         A differentiable loss tensor
     """
-
     batch_size, seq_len = e.shape
     pitches = note_tokens['pitch'][:, 1:]  # Use same pitch slice as in other functions
     
-    # Convert to float for calculations
-    pitches = pitches.float()
-    e = e.float()
+    # Ensure shapes match
+    min_len = min(seq_len, pitches.size(1))
+    pitches = pitches[:, :min_len].float()
+    e = e[:, :min_len].float()
     
-    # Calculate pitch means for each position using sliding window (unfold keeps grad)
+    # Need enough length for windowed operations
+    if min_len < window_size + tendency_distance:
+        return torch.zeros((), device=e.device, dtype=e.dtype, requires_grad=True)
+    
+    # Calculate sliding window means for buttons (e values)
+    # Vectorized using unfold
     pad = window_size // 2
-    padded = F.pad(pitches, (pad, pad), mode='reflect')
-    frames = padded.unfold(1, window_size, 1)
-    pitch_means = frames.mean(dim=2)
+    padded_e = F.pad(e, (pad, pad), mode='reflect')
+    e_windows = padded_e.unfold(1, window_size, 1)  # [B, T, W]
+    button_means = e_windows.mean(dim=2)  # [B, T] average button position per step
     
-    # Calculate pitch tendencies by comparing current pitch_mean with earlier pitch_mean
-    pitch_tendencies = torch.zeros_like(pitches)
+    # Calculate sliding window means for pitches
+    padded_pitches = F.pad(pitches, (pad, pad), mode='reflect')
+    pitch_windows = padded_pitches.unfold(1, window_size, 1)  # [B, T, W]
+    pitch_means = pitch_windows.mean(dim=2)  # [B, T] average pitch per step
     
-    for i in range(tendency_distance, seq_len):
-        # Compare current pitch_mean with pitch_mean from tendency_distance steps ago
-        current_pitch_mean = pitch_means[:, i:i+1]
-        earlier_pitch_mean = pitch_means[:, i-tendency_distance:i-tendency_distance+1]
-        pitch_tendencies[:, i:i+1] = current_pitch_mean - earlier_pitch_mean
+    # Calculate pitch tendency: difference between current and earlier pitch means
+    # Positive tendency = pitch going up, negative = pitch going down
+    # Vectorized: compare windows separated by tendency_distance
+    current_pitch_means = pitch_means[:, tendency_distance:]  # [B, T-tendency_distance]
+    earlier_pitch_means = pitch_means[:, :-tendency_distance]  # [B, T-tendency_distance]
+    pitch_tendency = current_pitch_means - earlier_pitch_means  # [B, T-tendency_distance]
     
-    # Scale pitch tendencies to control window shift
-    # Use tanh to bound the tendencies and scale appropriately
-    scaled_tendency = torch.tanh(pitch_tendencies / 10.0)  # Normalize pitch differences
+    # Get corresponding button means (aligned with the current window position)
+    button_means_aligned = button_means[:, tendency_distance:]  # [B, T-tendency_distance]
     
-    # Calculate target center for button concentration window
-    # e range [-1,1] equivalent to button range [0-18]
-    # BUTTON_CONCENTRATION_WINDOW_SIZE (12) in e space = 12/19*2 = 1.263
-    window_size_e = button_concentration_window_size / num_buttons * 2  # 1.263
-    max_shift = (2 - window_size_e) / 2  # Maximum shift from center = (2-1.263)/2 = 0.368
+    # Normalize pitch tendency to [-1, 1] range using tanh
+    # Scale factor controls sensitivity (smaller = more sensitive to small pitch changes)
+    pitch_tendency_normalized = torch.tanh(pitch_tendency / 6.0)
     
-    # For positive tendency: shift toward +1 (high buttons)
-    # For negative tendency: shift toward -1 (low buttons)
-    # For neutral tendency: center at 0
-    target_center = scaled_tendency * max_shift
+    # The core idea:
+    # - button_means_aligned is in [-1, 1]: high values = high buttons, low = low buttons
+    # - pitch_tendency_normalized is in [-1, 1]: positive = ascending, negative = descending
+    # 
+    # We want them to agree in sign and roughly in magnitude:
+    # - High buttons (positive e) should correlate with ascending pitch (positive tendency)
+    # - Low buttons (negative e) should correlate with descending pitch (negative tendency)
+    #
+    # The product button_means * pitch_tendency should be positive when they agree.
+    # We penalize when the product is negative (disagreement) or when there's a mismatch.
     
-    # Calculate how far e values are from their target center
-    distance_from_center = torch.abs(e - target_center)
+    # Calculate extremeness weight: buttons near ±1 get disproportionately stronger force
+    # Use squared absolute value to create quadratic weighting:
+    # - At e=0 (center): weight ≈ 0
+    # - At e=±0.5: weight = 0.25
+    # - At e=±1.0 (extremes): weight = 1.0
+    # This gives 4x more weight at extremes compared to halfway points
+    extremeness_weight = torch.square(torch.abs(button_means_aligned))  # [B, T-tendency_distance]
     
-    # Penalize when e values are too far from their target center
-    # Allow for half the window size on each side
-    allowed_distance = window_size_e / 2  # 1.263/2 = 0.632
+    # Alternative: even more aggressive cubic weighting (uncomment to use)
+    # extremeness_weight = torch.pow(torch.abs(button_means_aligned), 3)
     
-    # Only consider positions where we have valid pitch tendencies
-    valid_mask = torch.zeros_like(pitch_tendencies)
-    valid_mask[:, tendency_distance:] = 1.0
+    agreement = button_means_aligned * pitch_tendency_normalized  # [B, T-tendency_distance]
     
-    # Calculate loss only for valid positions
-    violations = torch.maximum(
-        distance_from_center - allowed_distance,
-        torch.zeros_like(distance_from_center)
-    ) * valid_mask
+    # Penalize disagreement (when signs don't match)
+    # Apply extremeness weighting: violations at extreme buttons are penalized much more
+    disagreement_loss = torch.relu(-agreement) * (1.0 + 2.0 * extremeness_weight)
     
-    loss = torch.square(violations).sum() / valid_mask.sum().clamp(min=1e-6)
+    # Additional loss: penalize when button magnitude doesn't correlate with tendency magnitude
+    # High |button| should correspond to high |tendency|
+    magnitude_diff = torch.abs(button_means_aligned) - torch.abs(pitch_tendency_normalized)
+    # Penalize only when buttons are extreme but pitch tendency is weak
+    # Apply stronger extremeness weighting here since this specifically targets extreme positions
+    magnitude_mismatch = torch.relu(magnitude_diff) * (1.0 + 3.0 * extremeness_weight)
     
-    return loss
+    # Combine losses
+    # Weight disagreement more heavily than magnitude mismatch
+    total_loss = disagreement_loss.mean() + 0.5 * magnitude_mismatch.mean()
+    
+    return total_loss
 
 #===================================================
 def windowed_correlation_loss(
@@ -431,4 +472,42 @@ def button_held_loss(
     bin_size = 2.0 / (num_buttons - 1) # the size of one button bin, which is 2/(num_buttons−1)
     margin = 0.8 * bin_size #  minimum desired movement threshold 80% of one bin
     loss = ((margin - delta_e).clamp_min(0.0) * notes_diff).mean() #Penalizes steps where the pitch changed but e moved less than margin. Averages over batch and time to get a scalar.
+    return loss
+
+def expected_pitch_from_logits(logits):
+    """
+    Compute expected pitch value from logits (differentiable soft argmax).
+    
+    Args:
+        logits: [B, T, vocab_size] pitch prediction logits
+    
+    Returns:
+        [B, T] expected pitch values
+    """
+    probs = F.softmax(logits, dim=-1)
+    values = torch.arange(logits.size(-1), device=logits.device, dtype=probs.dtype)
+    return (probs * values).sum(dim=-1)
+
+def predicted_contour_loss(predicted_pitch, buttons):
+    """
+    Contour loss on predicted pitches vs button controls.
+    Encourages predicted pitch intervals to follow button intervals in direction.
+    
+    Args:
+        predicted_pitch: [B, T] predicted/expected pitch values (differentiable)
+        buttons: [B, T] button values (continuous)
+    
+    Returns:
+        Scalar loss
+    """
+    if predicted_pitch.size(1) < 2:
+        return torch.tensor(0.0, device=predicted_pitch.device)
+    
+    # Compute differences
+    dp = torch.diff(predicted_pitch, dim=1)  # [B, T-1]
+    db = torch.diff(buttons, dim=1)  # [B, T-1]
+    
+    # Penalize when directions don't match (sign disagreement)
+    # Loss is 0 when dp*db > 1, increases when they disagree
+    loss = torch.square(torch.relu(1.0 - dp * db)).mean()
     return loss

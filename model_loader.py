@@ -192,6 +192,96 @@ def load_model(model_name='default',
                 attn_flash = True
             )
         )
+    elif cfg['model_type'] == 'AE_arrows_and_buttons':
+        # Autoencoder with arrows and buttons guidance 
+        mpt_model = AE_arrows_and_buttons(
+            cfg = cfg,
+            decoder = Decoder_arrows_and_buttons(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                pitch_history_dropout = cfg['pitch_history_dropout'],  # Zero out pitch embeddings to force arrow reliance
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
+        )
+    elif cfg['model_type'] == 'AE_arrows_and_buttons_concatenated':
+        # Autoencoder with arrows and buttons guidance 
+        mpt_model = AE_arrows_and_buttons_concatenated(
+            cfg = cfg,
+            decoder = Decoder_arrows_and_buttons_concatenated(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                pitch_history_dropout = cfg['pitch_history_dropout'],  # Zero out pitch embeddings to force arrow reliance
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
+        )
+    elif cfg['model_type'] == 'AE_arrows_and_buttons_simpler':
+        # Autoencoder with arrows and buttons guidance 
+        mpt_model = AE_arrows_and_buttons_simpler(
+            cfg = cfg,
+            decoder = Decoder_arrows_and_buttons_simpler(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                #pitch_history_dropout = cfg['pitch_history_dropout'],  # Zero out pitch embeddings to force arrow reliance
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
+        )
+    elif cfg['model_type'] == 'AE_mixed_vocab':
+        # Mixed vocabulary autoencoder: arrows (1-7) + buttons (8-31) in single key sequence
+        mpt_model = AE_mixed_vocab(
+            cfg = cfg,
+            decoder = Decoder_mixed_vocab(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                num_buttons = cfg.get('num_buttons', 12),
+                num_arrows = cfg.get('num_arrows', 7),
+                pitch_history_dropout = cfg.get('pitch_history_dropout', 0.0),
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
+        )
     elif cfg['model_type'] == 'autoencoder_no_dtime_harmony':
         # Autoencoder with Tonnetz harmony conditioning (decoder-only)
         mpt_model = AutoregressiveAutoencoder_no_dtime_harmony(
@@ -218,6 +308,20 @@ def load_model(model_name='default',
         mpt_model = AutoregressiveAutoencoder_just_harmony(
             cfg = cfg,
             decoder = Decoder_just_harmony(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+
+        )
+    elif cfg['model_type'] == 'AE_no_conditioning':
+        # Autoencoder with Tonnetz harmony conditioning (decoder-only)
+        mpt_model = AE_no_conditioning(
+            cfg = cfg,
+            decoder = Decoder_no_conditioning(
                 max_seq_len = cfg['seq_len'],
                 dim = cfg['emb_dim'],
                 depth = cfg['num_layers'],

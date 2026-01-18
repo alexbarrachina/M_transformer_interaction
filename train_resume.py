@@ -1,6 +1,6 @@
 #===================================================================================================
-# Monster Genie train_resume.py Python module
-# Resume training from checkpointt
+# Monster Genie train_selection.py Python module
+# Training with GIANTsel dataset
 # 
 # Copyright 2025 Alex Barrachina
 #
@@ -31,9 +31,8 @@ import time
 import tqdm
 import glob
 import re
-#from torch.utils.tensorboard import SummaryWriter
+#from params import *
 
-#!set USE_FLASH_ATTENTION=1
 os.environ['USE_FLASH_ATTENTION'] = '1'
 
 from random import randint, random
@@ -43,10 +42,10 @@ from torch.utils.data import DataLoader, Dataset
 
 from datasets import load_dataset, load_from_disk
 
-from params import *
 from midiUtils import Any_Pickle_File_Reader
 from model_loader import load_model
 from models import get_model_hparams
+from params import *
 from x_transformer import *
 
 #==========================================================================
@@ -57,13 +56,13 @@ class MusicSamplerDataset(Dataset):
 
         self.data = data
         self.seq_len = seq_len
-        self.tokens_per_note = 5  # dtime, dur, pitch, vel, chan (no offsets)
-        self.seq_tot_tokens = self.seq_len * self.tokens_per_note + self.tokens_per_note
+        self.tokens_per_note = 5  # dtime, dur, chan, pitch, vel
+        self.seq_tot_tokens = self.seq_len * self.tokens_per_note + self.tokens_per_note  # 5 tokens per note + 5 for the current note
         self.cfg = cfg if cfg is not None else {}
 
 
     def __len__(self):
-        return int(self.data.size(0) / self.seq_tot_tokens)
+        return int(self.data.size(0) / self.seq_tot_tokens)  #  self.seq_len if you want exact training time per epoch
 
     def __getitem__(self, index): # TODO concatenates all data, end of files with begining of files
         seq_tot_tokens = self.seq_tot_tokens
@@ -250,14 +249,17 @@ def main():
     #==========================================================================
 
 
+    NSTEPS_INIT = 0
+
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'monsterGenie_melody'
-    model_name = 'melody_arrow_v4'
+    project_name = 'autoencoder_no_dtime'
+    model_name = 'no_dtime_button_concentration_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
     #print(model)
 
+  
     #==========================================================================
 
     ''' WANDB '''
@@ -293,6 +295,7 @@ def main():
 
     #==========================================================================
  
+    
     ''' PRECISION/OPTIMIZER/SCALER '''
 
     dtype = torch.bfloat16
@@ -317,16 +320,14 @@ def main():
         start_steps = 0
         print("Starting training from scratch (no checkpoint found)")
 
-  
-
     #==========================================================================
 
     ''' TRAINING '''
 
-    nsteps = start_steps
+    nsteps = NSTEPS_INIT
 
-    for ep in range(start_epoch, cfg['epochs']):
-        print(f'Epoch #{ep} (resuming from step {nsteps})')
+    for ep in range(cfg['epochs']):
+        print('Epoch #', ep)
         
         model.train()
         with tqdm.tqdm(total=len(train_loader)) as bar_train:
@@ -380,6 +381,8 @@ def main():
                             wandb.log({"loss_recons": cfg['loss_recons']*loss['loss_recons'].item()}, step=nsteps)
                         if cfg.get('loss_arrow_consistency', 0)>0 and 'loss_arrow_consistency' in loss: 
                             wandb.log({"loss_arrow_consistency": cfg['loss_arrow_consistency']*loss['loss_arrow_consistency'].item()}, step=nsteps)
+                        if cfg.get('loss_coarse_direction', 0)>0 and 'loss_coarse_direction' in loss: 
+                            wandb.log({"loss_coarse_direction": cfg['loss_coarse_direction']*loss['loss_coarse_direction'].item()}, step=nsteps)
                         
                         nsteps += 1
 
@@ -389,15 +392,16 @@ def main():
                 scaler.step(optim)
                 scaler.update()
 
-                bar_train.set_description(f'Epoch: {ep} Loss: {float(loss["loss_total"]):.4}')
+
+                bar_train.set_description(f'Epoch: {ep} Loss: {float(loss["loss_total"]):.4}')# LR: {float(lr):.8}')
                 bar_train.update(1)
 
-                if (i % cfg['print_stats_every'] == 0) or TESTING:
+                if (i % cfg['validate_every'] == 0) or TESTING:
                     try:
                         val_batch = next(val_iter) # extract batches from test dataloader
                     except StopIteration:
                         val_iter = iter(val_loader)
-                        val_batch = next(iter(val_iter)) # extract batches from test dataloader           
+                        val_batch = next(val_iter) # extract batches from test dataloader           
                     model.eval()
                     with torch.no_grad():
                         with torch.amp.autocast(device_type=device_type, dtype=dtype):
@@ -414,10 +418,10 @@ def main():
                         if(cfg['use_logs']):                
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
                             wandb.log({"val_acc": val_acc.item()}, step=nsteps)
-
                     model.train()
                     del val_batch, vx
                     torch.cuda.empty_cache()
+
         
         if ep % cfg['save_every'] == 0:
             fname = './save_models/' + cfg['model_name'] + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
@@ -426,4 +430,5 @@ def main():
 
 if __name__ == '__main__':
     mp.freeze_support()
-    main() 
+    main()
+

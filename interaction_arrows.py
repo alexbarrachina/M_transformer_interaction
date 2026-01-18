@@ -41,8 +41,9 @@ from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
 
-TRACES = False
+TRACES = True
 AUTOMATIC_ARROWS = False # if True, use original midi file arrows for guidance
+
 
 ''' DEVICE '''
 #device = torch.device('cpu') 
@@ -76,13 +77,22 @@ visualizer = Visualizer()
 KEY_MAPPING = {
     # Fine arrows (specific intervals)
     # Row 1: v=large_down, c=medium_down, x=small_down, w=stay, e=small_up, r=medium_up, t=large_up
-    K_v: 0, K_c: 1, K_x: 2, K_w: 3, K_e: 4, K_r: 5, K_t: 6,
-    # Row 2: alternative keys (f, d, s, 2, 3, 4, 5)
-    K_f: 0, K_d: 1, K_s: 2, K_2: 3, K_3: 4, K_4: 5, K_5: 6,
+    K_SPACE: 3,
+    # up keys
+    K_e: 6, K_r: 5, K_t: 4,
+    # Row 2: alternative keys for up
+    K_3: 6, K_4: 5, K_5: 4, 
+    # down keys
+    K_d: 0, K_f: 1, K_g: 2, 
+    # Row 2: alternative keys for down
+    K_c: 0, K_v: 1, K_b: 2, 
     # Coarse arrows (direction only, no specific interval)
-    K_a: 7,  K_z: 7, # Coarse down: any negative pitch change
-    K_q: 8,  K_1: 8, # Coarse up: any positive pitch change
+    K_x: 7,  K_s: 7, # Coarse down: any negative pitch change
+    K_w: 8,  K_2: 8, # Coarse up: any positive pitch change
     # Note: K_w / K_2 already map to 3 (stay) - shared between fine and coarse
+    # No influence (model decides freely)
+    #K_g: 9, K_b: 9, # No influence: model generates freely from pitch history
+
 }
 
 """# FLUIDSYNTH INIT """
@@ -334,10 +344,10 @@ try:
                     print("saving performance")
                     save_performance()
                     os._exit(1)                              
-                elif event.key == K_SPACE: # Reset
-                    if TRACES:
-                        print("resetting context")
-                    reset_context(dict_input_tokens)
+                #elif event.key == K_SPACE: # Reset
+                #    if TRACES:
+                #        print("resetting context")
+                #    reset_context(dict_input_tokens)
                 elif event.key == 1073742051: # Reset
                     if TRACES:
                         print("resetting context")

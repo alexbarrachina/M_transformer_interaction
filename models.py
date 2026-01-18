@@ -795,7 +795,7 @@ MODELS_PARAMETERS = {
 
 'melody_arrow_v11': {
     'model_type': 'AE_melody_w_coarse_arrows',
-    'description': 'High accuracy attempt: dropout 0%, coarse arrows 30%',
+    'description': 'Options A+B+D: semantic init, direction loss, coarse direction aux loss',
     'train_log': '',
     'ckpt_file_name': '',
     'seq_len': 1024,
@@ -804,10 +804,34 @@ MODELS_PARAMETERS = {
     'num_layers': 4,           
     'heads': 32,
     'loss_recons': 1.0,
-    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'loss_arrow_consistency': 0.1,  # Direction-based comparison (Option B)
+    'loss_coarse_direction': 0.5,   # Explicit coarse direction supervision (Option D)
     'arrow_soft_temp': 2.0,         # Sharp boundaries
-    'pitch_history_dropout': 0.0,   # 10% dropout (full context)
-    'coarse_arrow_ratio': 0.3,      # 100% coarse arrows (easier task)
+    'pitch_history_dropout': 0.0,   # Full context
+    'coarse_arrow_ratio': 0.3,      # 30% coarse arrows
+    'no_influence_ratio': 0.0,      # No "no influence" arrows
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
+    "save_every": 15,
+    },
+
+'melody_arrow_v12': {
+    'model_type': 'AE_melody_w_coarse_arrows',
+    'description': 'Full arrow palette: 45% fine, 30% coarse, 25% no-influence',
+    'train_log': '',
+    'ckpt_file_name': './save_models/melody_arrow_v12_225_eps_452_steps_0.3688_loss_0.967_acc.pth',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,           
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Direction-based comparison (Option B)
+    'loss_coarse_direction': 0.1,   # Explicit coarse direction supervision (Option D)
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    'coarse_arrow_ratio': 0.3,      # 30% coarse arrows
+    'no_influence_ratio': 0.25,     # 25% no-influence arrows (model decides freely)
     "dataset_train_path": "./Training-Data/giantmidi_full_melody_train",
     "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
     "save_every": 15,
@@ -891,6 +915,489 @@ MODELS_PARAMETERS = {
     "save_every": 5,
     "batch_size": 24,
     "num_workers": 10,
+    },
+
+'AE_arrows_and_buttons_v1': {
+    'model_type': 'AE_arrows_and_buttons',
+    'description': ' with arrows and buttons guidance.',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048, 
+    'num_layers': 4,
+    'heads': 32,
+    # Loss weights
+    'loss_recons': 1.0,
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    'loss_arrow_consistency': 0.1,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    "loss_multi_step_perc": 1.,
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 24,
+    "num_workers": 10,
+    },
+'AE_arrows_and_buttons_v2': {
+    'model_type': 'AE_arrows_and_buttons',
+    'description': ' with arrows and buttons guidance. 8 buttons.',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    'loss_button_held': 0.,
+    "loss_multi_step_perc": 0.,
+    "loss_contour_perc": 1., # original genie contour loss
+    "loss_window_corr": 0.,
+    "loss_recons": 1., # 1., original # Reconstruction loss
+    'loss_arrow_consistency': 0.1,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    "loss_multi_step_perc": 1.,
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 20,
+    "num_workers": 8,
+    },
+
+'AE_arrows_and_buttons_light_v1': {
+    'model_type': 'AE_arrows_and_buttons',
+    'description': 'just reconstruction loss, light model',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'emb_dim': 512, 
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.0,
+    'loss_contour': 0.0,
+    'loss_deviate': 0.0,
+    "loss_recons": 1., # 1., original # Reconstruction loss
+    'loss_arrow_consistency': 0.0,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 24,
+    "num_workers": 8,
+    },
+'AE_arrows_and_buttons_light_v2': {
+    'model_type': 'AE_arrows_and_buttons',
+    'description': ' recons+contour loss, light model',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'emb_dim': 512, 
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.0,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.0,
+    "loss_recons": 0.5, # 1., original # Reconstruction loss
+    'loss_arrow_consistency': 0.0,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 105, # just testing. No savings needed.
+    "batch_size": 24,
+    "num_workers": 8,
+    },
+'AE_arrows_and_buttons_light_v3': {
+    'model_type': 'AE_arrows_and_buttons',
+    'description': ' recons+contour+arrow consistency loss, light model',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'emb_dim': 512, 
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.0,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.0,
+    "loss_recons": 1.0, # 1., original # Reconstruction loss
+    'loss_arrow_consistency': 0.1,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 105, # just testing. No savings needed.
+    "batch_size": 24,
+    "num_workers": 8,
+    },
+'AE_arrows_and_buttons_light_v4': {
+    'model_type': 'AE_arrows_and_buttons',
+    'description': ' recons+contour+arrow consistency loss, light model',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 1024,
+    'emb_dim': 2048, 
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.0,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.0,
+    "loss_recons": 1.0, # 1., original # Reconstruction loss
+    'loss_arrow_consistency': 0.1,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 105, # just testing. No savings needed.
+    "batch_size": 16,
+    "num_workers": 8,
+    },
+
+'AE_arrows_and_buttons_simpler_v1': {
+    'model_type': 'AE_arrows_and_buttons_simpler',
+    'description': ' simpler model',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'emb_dim': 512, 
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.0,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.0,
+    "loss_recons": 1.0, # 1., original # Reconstruction loss
+    'loss_arrow_consistency': 0.1,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 105, # just testing. No savings needed.
+    "batch_size": 24,
+    "num_workers": 8,
+    },
+'no_dtime_good_reference_pretrain': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'full model, autoencoder, no encoder, no button loss, full dataset',
+        'train_log': '2860_eps_20027_steps_0.13_loss_0.959_acc',
+        'ckpt_file_name': './save_models/no_dtime_good_reference_pretrain_85_eps_344_steps_0.5602_loss_0.8237_acc.pth',
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_test.pickle",
+        # Training settings
+        "save_every": 5, 
+        "batch_size": 16,
+        "num_workers": 8,
+        "num_buttons": 24,
+    },
+'AE_no_conditioning_tester': {
+        'model_type': 'AE_no_conditioning',
+        'description': 'full model, autoencoder, no encoder, no button loss, full dataset',
+        'train_log': '',
+        'ckpt_file_name': '',
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+        "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+        # Training settings
+        "save_every": 10005, # just testing. No savings needed.
+        "batch_size": 24,
+        "num_workers": 10,
+    },
+
+'melody_arrow_v7_light': {
+    'model_type': 'autoencoder_melody',
+    'description': 'High accuracy attempt: dropout 10%, fine arrows only light model',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 6,           # Increased depth
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 1.0,         # Sharper boundaries
+    'pitch_history_dropout': 0.1,   # 10% dropout (full context)
+    'coarse_arrow_ratio': 0.0,      # Fine arrows only (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_only_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_only_test",
+    "save_every": 10005, # just testing. No savings needed.
+    "batch_size": 24,
+    "num_workers": 10,
+    },
+'AE_arrows_and_buttons_concatenated': {
+    'model_type': 'AE_arrows_and_buttons_concatenated',
+    'description': 'concatenated arrows and buttons model',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 1048,
+    'pad_idx': 128,
+    'emb_dim': 2028,
+    'num_layers': 4,           # Increased depth
+    'heads': 32,
+    'loss_recons': 1.0,
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    'loss_arrow_consistency': 0.1,  # Minimal arrow constraint
+    'arrow_soft_temp': 2.0,         # Sharper boundaries
+    'pitch_history_dropout': 0.1,   # 10% dropout (full context)
+    'coarse_arrow_ratio': 0.0,      # Fine arrows only (easier task)
+    "dataset_train_path": "./Training-Data/giantmidi_full_accom_only_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_accom_only_test",
+    "save_every": 10, # just testing. No savings needed.
+    "batch_size": 8,
+    "num_workers": 4,
+    },
+'AE_arrows_and_buttons_pretrained_v1': {
+    'model_type': 'AE_arrows_and_buttons',
+    'description': ' recons+contour+arrow consistency loss, full model, pretrained encoder',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_arrows_and_buttons_pretrained_v1_162_eps_652_steps_0.3209_loss_0.9013_acc.pth',
+    'seq_len': 1024,
+    'emb_dim': 2048, 
+    'num_layers': 4,           # Increased depth
+    'heads': 32,
+    # Loss weights
+    'loss_margin': 0.0,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.0,
+    "loss_recons": 1.0, # 1., original # Reconstruction loss
+    'loss_arrow_consistency': 0.1,  # Arrow consistency loss
+    'arrow_soft_temp': 2.0,         # Sharp boundaries
+    'pitch_history_dropout': 0.0,   # Full context
+    # Dataset paths (harmony-augmented pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 3, 
+    "batch_size": 16,
+    "num_workers": 8,
+    "num_buttons": 24,
+    "unfreeze_encoder_after_n_epochs": 3000000, # never unfreeze
+    },
+
+'AE_mixed_vocab_v1': {
+    'model_type': 'AE_mixed_vocab',
+    'description': 'Mixed vocabulary: arrows (1-7) + buttons (8-19) in single key sequence',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_mixed_vocab_v1_70_eps_284_steps_1.2954_loss_0.7118_acc.pth',
+    'seq_len': 1024,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 12,  # Buttons will use indices 8-19
+    'num_arrows': 7,
+    # Loss weights
+    'loss_recons': 1.0,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    'loss_arrow_consistency': 0.1,
+    'contour_max_steps': 5,  # Multi-step contour loss lookback
+    'pitch_history_dropout': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 16,
+    "num_workers": 8,
+    "unfreeze_encoder_after_n_epochs": 3000000,  # never unfreeze (encoder pretrained)
+    },
+'AE_mixed_vocab_tester_v1': {
+    'model_type': 'AE_mixed_vocab',
+    'description': 'Mixed vocabulary: light model, smart initialization for buttons',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_mixed_vocab_tester_v1_135_eps_952_steps_1.4543_loss_0.7025_acc.pth',
+    'seq_len': 512,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 12,  # Buttons will use indices 8-19
+    'num_arrows': 7,
+    # Loss weights
+    'loss_recons': 1.0,
+    'loss_contour': 0,  # Reduced (encoder-based, constant)
+    'loss_deviate': 0,
+    'loss_pred_contour': 2.0,  # NEW: trains decoder to follow button shape
+    'loss_arrow_consistency': 0.1,
+    'contour_max_steps': 5,  # Multi-step contour loss lookback
+    'pitch_history_dropout': 0.3,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 16,
+    "num_workers": 8,
+    "unfreeze_encoder_after_n_epochs": 3000000,  # never unfreeze (encoder pretrained)
+    },
+'AE_mixed_vocab_v2': {
+    'model_type': 'AE_mixed_vocab',
+    'description': 'Mixed vocabulary: more contour loss + predicted contour',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_mixed_vocab_v2_70_eps_284_steps_1.8114_loss_0.7069_acc.pth',
+    'seq_len': 1024,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 12,  # Buttons will use indices 8-19
+    'num_arrows': 7,
+    # Loss weights
+    'loss_recons': 1.0,
+    'loss_contour': 0,  # Reduced (encoder-based, constant)
+    'loss_deviate': 0,
+    'loss_pred_contour': 2.0,  # NEW: trains decoder to follow button shape
+    'loss_arrow_consistency': 0.1,
+    'contour_max_steps': 5,  # Multi-step contour loss lookback
+    'pitch_history_dropout': 0.3,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_melody_acc_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_melody_acc_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 16,
+    "num_workers": 8,
+    "unfreeze_encoder_after_n_epochs": 3000000,  # never unfreeze (encoder pretrained)
+    },
+'no_dtime_good_reference_pretrain_tester': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'full model, autoencoder, light model, to extract encoder weights',
+        'train_log': '',
+        'ckpt_file_name': './save_models/no_dtime_good_reference_pretrain_tester_45_eps_230_steps_1.844_loss_0.7385_acc.pth',
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        "dataset_train_path": "./Training-Data/giantmidi_full_accom_only_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_accom_only_test.pickle",
+        # Training settings
+        "save_every": 15, 
+        "batch_size": 24,
+        "num_workers": 10,
+        "num_buttons": 12,
+    },
+'no_dtime_button_concentration_tester': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'light model, autoencoder, button concentration loss',
+        'train_log': '',
+        'ckpt_file_name': './save_models/no_dtime_button_concentration_tester_15_eps_96_steps_1.7993_loss_0.7272_acc.pth',
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'loss_button_concentration': 0.1,
+        "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_test.pickle",
+        # Training settings
+        "save_every": 15, 
+        "batch_size": 24,
+        "num_workers": 10,
+        "num_buttons": 12,
+    },
+'no_dtime_button_concentration_tester_v2': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'light model, autoencoder, button concentration loss 2.0',
+        'train_log': '',
+        'ckpt_file_name': './save_models/no_dtime_button_concentration_tester_v2_15_eps_96_steps_1.2784_loss_0.7177_acc.pth',
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'loss_button_concentration': 2.0,
+        "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_test.pickle",
+        # Training settings
+        "save_every": 15, 
+        "batch_size": 24,
+        "num_workers": 10,
+        "num_buttons": 12,
+    },
+'no_dtime_button_concentration_tester_v3': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'light model, autoencoder, button concentration extremes',
+        'train_log': '',
+        'ckpt_file_name': './save_models/no_dtime_button_concentration_tester_v3_30_eps_186_steps_1.7027_loss_0.7318_acc.pth',
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'loss_button_concentration': 1.,
+        "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_test.pickle",
+        # Training settings
+        "save_every": 15, 
+        "batch_size": 24,
+        "num_workers": 10,
+        "num_buttons": 12,
+    },
+
+'no_dtime_button_concentration_v1': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'full model, autoencoder, button concentration extremes',
+        'train_log': '',
+        'ckpt_file_name': '',
+        'seq_len': 1048,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'loss_button_concentration': 1.,
+        "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_test.pickle",
+        # Training settings
+        "save_every": 5, 
+        "batch_size": 16,
+        "num_workers": 8,
+        "num_buttons": 12,
     },
     }
 
