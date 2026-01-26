@@ -162,8 +162,8 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'autoencoder_no_dtime'
-    model_name = 'no_dtime_button_concentration_v1'
+    project_name = 'autoencoder_no_dtime_saturation'
+    model_name = 'AE_LSTM_behavior_tester_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
@@ -254,6 +254,10 @@ def main():
                             wandb.log({"loss_button_concentration": cfg['loss_button_concentration']*loss['loss_button_concentration'].item()}, step=nsteps)
                         if cfg['loss_window_corr']>0 and 'loss_window_corr' in loss:
                             wandb.log({"loss_window_corr": cfg['loss_window_corr']*loss['loss_window_corr'].item()}, step=nsteps)
+                        if cfg.get('loss_latent_velocity', 0)>0 and 'loss_latent_velocity' in loss:
+                            wandb.log({"loss_latent_velocity": cfg['loss_latent_velocity']*loss['loss_latent_velocity'].item()}, step=nsteps)
+                        if cfg.get('loss_drift', 0)>0 and 'loss_drift' in loss:
+                            wandb.log({"loss_drift": cfg['loss_drift']*loss['loss_drift'].item()}, step=nsteps)
 
                         if cfg['loss_contour']>0 and 'loss_contour' in loss:
                             wandb.log({"loss_contour_all": cfg['loss_contour']*loss['loss_contour'].item()}, step=nsteps)

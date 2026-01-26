@@ -511,3 +511,487 @@ def predicted_contour_loss(predicted_pitch, buttons):
     # Loss is 0 when dp*db > 1, increases when they disagree
     loss = torch.square(torch.relu(1.0 - dp * db)).mean()
     return loss
+
+def saturated_contour_loss(
+    pitches: Tensor,          # [B, T+1] like you pass to simple_contour_loss
+    e: Tensor,                # [B, T] encoder output (should be roughly in [-1, 1])
+    num_buttons: int,
+    sat_bin_frac: float = 0.5,    # how deep into the extreme bin before we "allow saturation"
+    tau: float = 0.05,            # softness of the saturation gate
+    hold_weight: float = 0.05,    # optional: discourage changing e when pitch is flat
+    min_dp: float = 0.5           # minimum pitch interval for scaling (prevents division issues)
+) -> Tensor:
+    """
+    Saturated contour loss that scales with pitch interval magnitude (like simple_contour_loss)
+    but allows saturation at button extremes.
+    
+    In the middle range: behaves like simple_contour_loss, wanting dp * de >= 1
+    Near extremes: relaxes the requirement, allowing buttons to saturate (repeat top/bottom)
+    
+    Args:
+        pitches: [B, T+1] pitch sequence
+        e: [B, T] encoder output in [-1, 1]
+        num_buttons: number of discrete buttons
+        sat_bin_frac: how deep into extreme bin before saturation is allowed
+        tau: softness of saturation gate transition
+        hold_weight: weight for penalizing button changes when pitch is held
+        min_dp: minimum pitch interval for scaling (prevents division by very small values)
+    """
+    # Align pitches to e length: pitches[:, 1:] is [B, T]
+    p = pitches[:, 1:].float()
+
+    # Differences: [B, T-1]
+    dp = torch.diff(p, dim=1)
+    de = torch.diff(e.float(), dim=1)
+
+    dir_up = (dp > 0).float()
+    dir_dn = (dp < 0).float()
+    dir_eq = 1.0 - dir_up - dir_dn
+
+    # One discrete button bin width in e-space ([-1, 1] split into num_buttons bins)
+    bin_size = 2.0 / float(num_buttons - 1)
+
+    # Use midpoint between consecutive e's to decide "near extreme"
+    e_mid = 0.5 * (e[:, 1:] + e[:, :-1])
+
+    # Thresholds: consider "saturated" when already inside the top/bottom bin region
+    hi_thresh = 1.0 - sat_bin_frac * bin_size
+    lo_thresh = -1.0 + sat_bin_frac * bin_size
+
+    # Soft gates in [0,1]
+    sat_up = torch.sigmoid((e_mid - hi_thresh) / tau)     # high when near +1
+    sat_dn = torch.sigmoid((lo_thresh - e_mid) / tau)     # high when near -1
+
+    # Only allow saturation when pitch is trying to go outward
+    sat_mask = dir_up * sat_up + dir_dn * sat_dn
+
+    # Scale required movement with pitch interval (like simple_contour_loss)
+    # simple_contour_loss wants: dp * de >= 1, i.e., de >= 1/dp
+    # We use the same scaling but apply saturation mask to reduce/eliminate at extremes
+    dp_abs = dp.abs().clamp(min=min_dp)
+    req = (1.0 / dp_abs) * (1.0 - sat_mask)
+
+    # Upward pitch: want de >= req
+    loss_up = F.relu(req - de) * dir_up
+
+    # Downward pitch: want de <= -req  <=>  req + de <= 0
+    loss_dn = F.relu(req + de) * dir_dn
+
+    # Square the losses for smoother gradients (like simple_contour_loss)
+    loss_contour = torch.square(loss_up + loss_dn)
+
+    # Optional stability when pitch is held
+    loss_hold = torch.square(de) * dir_eq
+
+    return loss_contour.mean() + hold_weight * loss_hold.mean()
+
+
+def pitch_extreme_anchoring_loss(
+    pitches: Tensor,          # [B, T+1] or [B, T] pitch sequence
+    e: Tensor,                # [B, T] encoder output (should be in [-1, 1])
+    high_pitch_thresh: float = 84.0,    # MIDI pitch above which is considered "high" (C6)
+    low_pitch_thresh: float = 36.0,     # MIDI pitch below which is considered "low" (C2)
+    transition_width: float = 12.0,     # Semitones over which the sigmoid transition occurs
+    target_extreme: float = 0.95,       # Target e value at extremes (±0.95 instead of ±1.0 for stability)
+) -> Tensor:
+    """
+    Explicitly anchors extreme pitches to extreme button values.
+    
+    - Very high pitches (above high_pitch_thresh) should map to e ≈ +target_extreme
+    - Very low pitches (below low_pitch_thresh) should map to e ≈ -target_extreme
+    
+    This helps the model learn the semantics of button 0 (lowest) and button N-1 (highest)
+    faster, and complements the saturated_contour_loss.
+    
+    Args:
+        pitches: [B, T+1] or [B, T] pitch sequence (MIDI note numbers 0-127)
+        e: [B, T] encoder output in [-1, 1] range
+        high_pitch_thresh: Pitch value above which we want e ≈ +1
+        low_pitch_thresh: Pitch value below which we want e ≈ -1
+        transition_width: Width of sigmoid transition (in semitones)
+        target_extreme: Target value at extremes (use <1.0 for margin safety)
+    
+    Returns:
+        Scalar loss tensor
+    """
+    # Align shapes: if pitches is [B, T+1], use pitches[:, 1:] to match e's [B, T]
+    if pitches.size(1) == e.size(1) + 1:
+        p = pitches[:, 1:].float()
+    else:
+        p = pitches.float()
+    
+    # Soft weights for "how much is this pitch in the high/low extreme?"
+    # sigmoid((p - thresh) / width) gives smooth 0→1 transition
+    tau = transition_width / 6.0  # Scale factor for sigmoid steepness
+    
+    # High pitch weight: 0 for p << high_thresh, 1 for p >> high_thresh
+    w_high = torch.sigmoid((p - high_pitch_thresh) / tau)
+    
+    # Low pitch weight: 1 for p << low_thresh, 0 for p >> low_thresh
+    w_low = torch.sigmoid((low_pitch_thresh - p) / tau)
+    
+    # Target e values for high/low pitches
+    # For high pitches: want e ≈ +target_extreme
+    # For low pitches: want e ≈ -target_extreme
+    target_high = target_extreme
+    target_low = -target_extreme
+    
+    # Weighted squared errors
+    # Only penalize high pitches that don't map to high e values
+    loss_high = w_high * torch.square(e - target_high)
+    
+    # Only penalize low pitches that don't map to low e values
+    loss_low = w_low * torch.square(e - target_low)
+    
+    # Total loss: mean over batch and time
+    # Only positions with significant weights contribute meaningfully
+    total_loss = (loss_high + loss_low).mean()
+    
+    return total_loss
+
+
+def non_linear_compression_loss(
+    pitches: Tensor,          # [B, T+1] or [B, T] pitch sequence
+    e: Tensor,                # [B, T] encoder output in [-1, 1]
+    steepness: float = 6.0,   # Controls compression: higher = more compression at extremes
+    use_local_norm: bool = True,  # Use local window for normalization vs global
+    window_size: int = 128,   # Window size for local normalization
+    contour_weight: float = 0.5,  # Weight for contour matching (direction preservation)
+) -> Tensor:
+    """
+    Non-linear compression loss that creates an asymmetric pitch-to-button mapping:
+    
+    - EXTREME buttons (near ±1): Many pitches compressed into few buttons
+      → User has less control, model has more freedom to choose pitches
+    - MIDDLE buttons (near 0): Fewer pitches spread across more buttons  
+      → User has more fine-grained control over pitch contour
+    
+    This is achieved by applying a sigmoid-like transformation that:
+    - Flattens at extremes (compresses many pitch values together)
+    - Is steep in the middle (expands fewer pitch values apart)
+    
+    Args:
+        pitches: [B, T+1] or [B, T] pitch sequence (MIDI note numbers)
+        e: [B, T] encoder output in [-1, 1]
+        steepness: Controls the S-curve steepness (higher = more extreme compression)
+        use_local_norm: If True, normalize pitches within local windows
+        window_size: Size of local normalization window
+        contour_weight: Weight for contour matching loss (0 = position only, 1 = equal weight)
+    
+    Returns:
+        Loss tensor
+    """
+    # Align shapes
+    if pitches.size(1) == e.size(1) + 1:
+        p = pitches[:, 1:].float()
+    else:
+        p = pitches.float()
+    
+    batch_size, seq_len = p.shape
+    
+    # Normalize pitches to [0, 1]
+    if use_local_norm:
+        # Use sliding window for local normalization
+        # This adapts to local pitch range, making the mapping context-aware
+        p_norm = torch.zeros_like(p)
+        for i in range(seq_len):
+            start = max(0, i - window_size // 2)
+            end = min(seq_len, i + window_size // 2 + 1)
+            window = p[:, start:end]
+            p_min = window.min(dim=1, keepdim=True)[0]
+            p_max = window.max(dim=1, keepdim=True)[0]
+            range_size = (p_max - p_min).clamp(min=1.0)  # Avoid division by zero
+            p_norm[:, i:i+1] = (p[:, i:i+1] - p_min) / range_size
+    else:
+        # Global normalization (entire sequence)
+        p_min = p.min(dim=1, keepdim=True)[0]
+        p_max = p.max(dim=1, keepdim=True)[0]
+        range_size = (p_max - p_min).clamp(min=1.0)
+        p_norm = (p - p_min) / range_size
+    
+    # Apply non-linear compression using sigmoid
+    # sigmoid((x - 0.5) * steepness) creates an S-curve that:
+    # - Is flat near x=0 and x=1 (compresses extremes)
+    # - Is steep near x=0.5 (expands middle)
+    p_compressed = torch.sigmoid((p_norm - 0.5) * steepness)
+    
+    # Renormalize to [0, 1] after sigmoid (sigmoid output is already in (0,1) but not exactly [0,1])
+    # This ensures we use the full button range
+    p_comp_min = torch.sigmoid(torch.tensor(-0.5 * steepness))
+    p_comp_max = torch.sigmoid(torch.tensor(0.5 * steepness))
+    p_compressed = (p_compressed - p_comp_min) / (p_comp_max - p_comp_min)
+    
+    # Map to e-space [-1, 1]
+    target_e = p_compressed * 2.0 - 1.0
+    
+    # Position loss: encourage e to match the non-linearly compressed target
+    loss_position = torch.square(e - target_e)
+    
+    # Contour loss: encourage e contour to match target contour (direction preservation)
+    if contour_weight > 0:
+        de = torch.diff(e, dim=1)
+        dt = torch.diff(target_e, dim=1)
+        # Penalize when directions don't match
+        loss_contour = torch.square(torch.relu(1.0 - de * dt))
+        # Combine with position loss
+        total_loss = loss_position.mean() + contour_weight * loss_contour.mean()
+    else:
+        total_loss = loss_position.mean()
+    
+    return total_loss
+
+
+def non_linear_compression_loss_vectorized(
+    pitches: Tensor,          # [B, T+1] or [B, T] pitch sequence
+    e: Tensor,                # [B, T] encoder output in [-1, 1]
+    steepness: float = 6.0,   # Controls compression: higher = more compression at extremes
+    window_size: int = 128,   # Window size for local normalization
+    contour_weight: float = 0.5,  # Weight for contour matching
+) -> Tensor:
+    """
+    Vectorized version of non_linear_compression_loss (faster, no Python loop).
+    Uses unfold for efficient sliding window operations.
+    """
+    # Align shapes
+    if pitches.size(1) == e.size(1) + 1:
+        p = pitches[:, 1:].float()
+    else:
+        p = pitches.float()
+    
+    batch_size, seq_len = p.shape
+    
+    # Pad for sliding window
+    pad_size = window_size // 2
+    p_padded = F.pad(p, (pad_size, pad_size), mode='replicate')
+    
+    # Unfold to get all windows: [B, num_windows, window_size]
+    windows = p_padded.unfold(dimension=1, size=window_size, step=1)
+    
+    # Unfold produces num_windows = padded_len - window_size + 1 = seq_len + 1
+    # We need to slice to match seq_len exactly
+    if windows.size(1) > seq_len:
+        windows = windows[:, :seq_len, :]
+    
+    # Get min/max per window
+    p_min = windows.min(dim=2, keepdim=True)[0].squeeze(-1)  # [B, seq_len]
+    p_max = windows.max(dim=2, keepdim=True)[0].squeeze(-1)  # [B, seq_len]
+    range_size = (p_max - p_min).clamp(min=1.0)
+    
+    # Normalize
+    p_norm = (p - p_min) / range_size
+    
+    # Apply non-linear compression
+    p_compressed = torch.sigmoid((p_norm - 0.5) * steepness)
+    
+    # Renormalize to full [0, 1] range
+    p_comp_min = torch.sigmoid(torch.tensor(-0.5 * steepness, device=p.device))
+    p_comp_max = torch.sigmoid(torch.tensor(0.5 * steepness, device=p.device))
+    p_compressed = (p_compressed - p_comp_min) / (p_comp_max - p_comp_min)
+    
+    # Map to e-space [-1, 1]
+    target_e = p_compressed * 2.0 - 1.0
+    
+    # Position loss
+    loss_position = torch.square(e - target_e)
+    
+    # Contour loss
+    if contour_weight > 0:
+        de = torch.diff(e, dim=1)
+        dt = torch.diff(target_e, dim=1)
+        loss_contour = torch.square(torch.relu(1.0 - de * dt))
+        total_loss = loss_position.mean() + contour_weight * loss_contour.mean()
+    else:
+        total_loss = loss_position.mean()
+    
+    return total_loss
+
+
+def latent_velocity_loss(
+    pitches: Tensor,          # [B, T+1] or [B, T] pitch sequence (MIDI note numbers)
+    e: Tensor,                # [B, T] encoder output (latent z) in [-1, 1]
+    alpha: float = 12.0,      # Slope strength: how much pitch change per unit latent
+    normalize_pitch: bool = True,  # Normalize pitch changes to similar scale as e
+    pitch_range: float = 88.0,     # Range of pitches for normalization (88 piano keys)
+) -> Tensor:
+    """
+    Latent-to-velocity coupling loss.
+    
+    This loss forces the encoder latent (z/e) to act as a pitch velocity controller:
+    - High latent (e ≈ +1) → should produce positive pitch changes (ascending)
+    - Low latent (e ≈ -1) → should produce negative pitch changes (descending)
+    - Middle latent (e ≈ 0) → should produce small/no pitch changes
+    
+    Loss: L_vel = ||Δx_t - α * z_t||²
+    
+    Where:
+    - Δx_t is the pitch change (x_t - x_{t-1})
+    - z_t is the encoder latent (e value)
+    - α controls the expected slope magnitude
+    
+    This recreates the LSTM's implicit "button = velocity" behavior that emerges
+    naturally in recurrent networks but not in Transformers.
+    
+    Args:
+        pitches: [B, T+1] or [B, T] pitch sequence
+        e: [B, T] encoder latent values in [-1, 1]
+        alpha: Expected pitch change per unit latent. Higher = steeper slopes.
+               Default 12.0 means e=+1 expects pitch to rise by ~12 semitones per step,
+               e=-1 expects pitch to fall by ~12 semitones.
+        normalize_pitch: If True, normalize pitch changes to [-1, 1] range
+        pitch_range: Range for normalization (default 88 for piano)
+    
+    Returns:
+        Loss tensor (scalar)
+    """
+    # Align shapes: we need pitches to have same length as e for diff calculation
+    if pitches.size(1) == e.size(1) + 1:
+        # pitches is [B, T+1], e is [B, T]
+        # Use pitches[:, 1:] to align with e, then compute diff
+        p = pitches.float()
+        # Pitch changes: Δx_t = x_t - x_{t-1}, where t aligns with e indices
+        # pitches[:, 1:] corresponds to e positions, pitches[:, :-1] is previous
+        delta_pitch = p[:, 1:] - p[:, :-1]  # [B, T]
+    else:
+        # pitches is [B, T], same as e
+        p = pitches.float()
+        # We can only compute T-1 deltas
+        delta_pitch = torch.diff(p, dim=1)  # [B, T-1]
+        e = e[:, :-1]  # Align e to match delta_pitch length
+    
+    # Optionally normalize pitch changes to similar scale as e (which is in [-1, 1])
+    if normalize_pitch:
+        # Normalize: a change of pitch_range maps to 2.0 (full -1 to +1 swing)
+        delta_pitch_norm = delta_pitch / (pitch_range / 2.0)
+    else:
+        delta_pitch_norm = delta_pitch
+    
+    # Target: pitch velocity should match latent * alpha
+    # If e = +1, we want delta_pitch_norm ≈ +alpha (in normalized space)
+    # If normalize_pitch is True, alpha should be in normalized space too
+    if normalize_pitch:
+        # Alpha in normalized space: alpha=1.0 means e=+1 expects max pitch change
+        target_velocity = e * alpha
+    else:
+        target_velocity = e * alpha
+    
+    # Loss: squared difference between actual and target velocity
+    loss = torch.square(delta_pitch_norm - target_velocity)
+    
+    return loss.mean()
+
+
+def drift_regularization_loss(
+    pitches: Tensor,          # [B, T+1] or [B, T] pitch sequence
+    e: Tensor,                # [B, T] encoder latent in [-1, 1]
+    drift_window: int = 8,    # How far back to look for cumulative drift
+    normalize_pitch: bool = True,
+    pitch_range: float = 88.0,
+) -> Tensor:
+    """
+    Drift regularization loss.
+    
+    Encourages cumulative pitch motion in the direction of the latent.
+    This rewards long-term movement, not just local step-to-step changes.
+    
+    Loss: L_drift = -E[z_t * (x_t - x_{t-k})]
+    
+    The negative sign means we're MAXIMIZING the correlation between:
+    - The latent direction (z_t)
+    - The cumulative pitch change over the last k steps
+    
+    So if z_t > 0 (high button), we want (x_t - x_{t-k}) > 0 (pitch went up)
+    If z_t < 0 (low button), we want (x_t - x_{t-k}) < 0 (pitch went down)
+    
+    Args:
+        pitches: [B, T+1] or [B, T] pitch sequence
+        e: [B, T] encoder latent
+        drift_window: How many steps back to measure cumulative drift (k)
+        normalize_pitch: Normalize pitch drift to [-1, 1] scale
+        pitch_range: Range for normalization
+    
+    Returns:
+        Loss tensor (scalar) - minimize this to maximize drift alignment
+    """
+    # Align shapes
+    if pitches.size(1) == e.size(1) + 1:
+        p = pitches[:, 1:].float()  # [B, T]
+    else:
+        p = pitches.float()
+    
+    batch_size, seq_len = p.shape
+    
+    # We need at least drift_window + 1 elements to compute drift
+    if seq_len <= drift_window:
+        return torch.tensor(0.0, device=e.device)
+    
+    # Cumulative drift: x_t - x_{t-k}
+    # For each position t >= drift_window, compute p[:, t] - p[:, t - drift_window]
+    current_pitch = p[:, drift_window:]  # [B, T - drift_window]
+    past_pitch = p[:, :-drift_window]     # [B, T - drift_window]
+    drift = current_pitch - past_pitch     # [B, T - drift_window]
+    
+    # Align e to match drift positions
+    e_aligned = e[:, drift_window:]  # [B, T - drift_window]
+    
+    # Normalize drift if requested
+    if normalize_pitch:
+        # A drift of pitch_range maps to 2.0
+        drift_norm = drift / (pitch_range / 2.0)
+    else:
+        drift_norm = drift
+    
+    # Loss: -E[z * drift]
+    # We want to maximize z * drift, so minimize -z * drift
+    # When z > 0 and drift > 0: product positive, loss negative (good)
+    # When z < 0 and drift < 0: product positive, loss negative (good)
+    # When signs disagree: product negative, loss positive (bad)
+    correlation = e_aligned * drift_norm
+    
+    # Return negative mean (we want to maximize correlation)
+    return -correlation.mean()
+
+
+def latent_velocity_and_drift_loss(
+    pitches: Tensor,
+    e: Tensor,
+    alpha: float = 1.0,           # Velocity coupling strength
+    drift_window: int = 8,        # Drift lookback window
+    drift_weight: float = 0.5,    # Weight for drift term relative to velocity term
+    normalize_pitch: bool = True,
+    pitch_range: float = 88.0,
+) -> Tensor:
+    """
+    Combined latent velocity and drift loss.
+    
+    This combines both:
+    1. Local velocity coupling: pitch changes should match latent direction
+    2. Cumulative drift: long-term pitch movement should align with latent
+    
+    Together, these recreate the LSTM's implicit stateful dynamics in Transformers,
+    making extreme buttons (1 and 8) act as pitch velocity controllers:
+    - Button 8 (high latent) → ascending pitch sequences
+    - Button 1 (low latent) → descending pitch sequences
+    
+    Args:
+        pitches: [B, T+1] or [B, T] pitch sequence
+        e: [B, T] encoder latent
+        alpha: Velocity coupling strength (how much pitch change per unit latent)
+        drift_window: Steps to look back for cumulative drift
+        drift_weight: Weight of drift term relative to velocity term
+        normalize_pitch: Normalize pitch to [-1, 1] scale
+        pitch_range: Range for normalization
+    
+    Returns:
+        Combined loss tensor
+    """
+    loss_vel = latent_velocity_loss(
+        pitches, e, alpha=alpha, 
+        normalize_pitch=normalize_pitch, pitch_range=pitch_range
+    )
+    
+    loss_drift = drift_regularization_loss(
+        pitches, e, drift_window=drift_window,
+        normalize_pitch=normalize_pitch, pitch_range=pitch_range
+    )
+    
+    return loss_vel + drift_weight * loss_drift

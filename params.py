@@ -50,6 +50,11 @@ DEFAULT_HPARAMS = {
     "loss_pitch_button": 0.0, #0.01 #  correlates pitch tendencies with button concentrations
     "loss_button_concentration": 0.0, #0.01 # Multiplier for button concentration loss
     "loss_window_corr": 0.0, # weight for windowed Pearson correlation loss (1-corr)
+    "loss_saturated_contour": 0.0, #0.1 # Saturated contour loss (allows button saturation at extremes)
+    "loss_pitch_extreme_anchoring": 0.0, #0.01 # Anchors extreme pitches to extreme buttons
+    "loss_nonlinear_compression": 0.0, #0.1 # Non-linear compression: more control in middle, less at extremes
+    "loss_latent_velocity": 0.0, #0.1 # Latent→velocity coupling: makes buttons control pitch direction
+    "loss_drift": 0.0, #0.1 # Drift regularization: rewards cumulative motion in latent direction
     # % of every component in loss contour
     "loss_contour_perc": 0., # 0.4, original genie # encourage button intervals to match piano note intervals (in direction, not magnitude, -1,+1)
     "loss_multi_step_perc": 1., # 0.3, original # considers relationships between the current note and multiple previous notes (in directions, not magnitude, -1,+1)

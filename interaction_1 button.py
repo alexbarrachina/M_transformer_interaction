@@ -31,6 +31,7 @@ import rtmidi
 # pip install python-rtmidi
 from threading import Lock
 
+from sympy import false
 import torch
 
 from params import *
@@ -46,10 +47,7 @@ TRACES = False
 device = torch.device('mps') 
 
 ''' MODEL '''
-#model_name = 'no_dtime_good_reference' # original Genie
-#model_name = 'no_dtime_button_concentration_tester_v3' # the button extremes pushes the pitch up/down
-#model_name = 'AE_no_dtime_saturation_v1' # button saturation at extremes, more free pitch generation
-model_name = 'AE_non_linear_compression_v1' # non-linear compression: more control in middle, less at extremes
+model_name = 'Dec_no_conditioning_v1'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -168,20 +166,15 @@ dict_input_tokens, num_notes = midi_to_dict(sample_midi_path) # tokens, without 
 
 dict_output_tokens = dict_input_tokens.copy()
 
+b = torch.zeros(len(dict_input_tokens['pitch']), dtype=torch.long)
+
 if TRACES:  
     print("num_notes", num_notes)
 # Build context tokens
 context = {
-    'dtime': torch.tensor(dict_input_tokens['dtime'], dtype=torch.long).unsqueeze(0),
     'pitch': torch.tensor(dict_input_tokens['pitch'], dtype=torch.long).unsqueeze(0),
-    'dur': torch.tensor(dict_input_tokens['dur'], dtype=torch.long).unsqueeze(0)
     }
 context = to_device(context, device)
-  
-with torch.inference_mode():
-    e = model.encoder(context) # encoder output (batch, seq_len)
-    b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
-    b = b.clone().detach().tolist()
 
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN ], b[:CTX_LEN])
 
@@ -216,10 +209,7 @@ def manageNote(note, velocity):
     except:
         print("ERROR", b[i+CTX_LEN])
     context = {
-      'dtime': torch.tensor(dict_output_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
       'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'dur': torch.tensor(dict_output_tokens['dur'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
     }
     context = to_device(context, device)
                  
@@ -229,7 +219,7 @@ def manageNote(note, velocity):
 
     playNote(new_pitch_token, velocity) 
     visualizer.get_note(new_pitch_token, velocity)
-    visualizer.get_button(but, velocity)
+    visualizer.get_button(0, velocity) # button is 0. No button influence, no button visualization
 
     # add (user_note, pitch, time) to dictionary
     noteOn_dict[but] = (new_pitch_token, timeNew)

@@ -252,8 +252,8 @@ def main():
     NSTEPS_INIT = 0
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'autoencoder_no_dtime'
-    model_name = 'no_dtime_button_concentration_v1'
+    project_name = 'decoder_no_conditioning'
+    model_name = 'Dec_no_conditioning_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)

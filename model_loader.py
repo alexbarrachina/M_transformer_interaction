@@ -317,9 +317,9 @@ def load_model(model_name='default',
             ),
 
         )
-    elif cfg['model_type'] == 'AE_no_conditioning':
+    elif cfg['model_type'] == 'AutoregressiveDecoder_no_conditioning':
         # Autoencoder with Tonnetz harmony conditioning (decoder-only)
-        mpt_model = AE_no_conditioning(
+        mpt_model = AutoregressiveDecoder_no_conditioning(
             cfg = cfg,
             decoder = Decoder_no_conditioning(
                 max_seq_len = cfg['seq_len'],

@@ -1682,6 +1682,47 @@ class AutoregressiveAutoencoder(Module):
                 e
             )
 
+        # Saturated contour loss (allows button saturation at extremes)
+        loss_saturated_contour = 0
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_saturated_contour = saturated_contour_loss(
+                note_tokens['pitch'],
+                e,
+                self.cfg['num_buttons']
+            )
+
+        # Pitch extreme anchoring loss (ties high pitches to high buttons, low to low)
+        loss_pitch_extreme_anchoring = 0
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_pitch_extreme_anchoring = pitch_extreme_anchoring_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Non-linear compression loss (more control in middle, less at extremes)
+        loss_nonlinear_compression = 0
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_nonlinear_compression = non_linear_compression_loss_vectorized(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Latent velocity loss (makes buttons control pitch direction like LSTM)
+        loss_latent_velocity = 0
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_latent_velocity = latent_velocity_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Drift regularization loss (rewards cumulative pitch motion in latent direction)
+        loss_drift = 0
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_drift = drift_regularization_loss(
+                note_tokens['pitch'],
+                e
+            )
+
         # Combine losses with appropriate weights
         loss_total = torch.zeros_like(loss_recons)
         loss_total += loss_recons * self.cfg['loss_recons'] 
@@ -1734,6 +1775,11 @@ class AutoregressiveAutoencoder(Module):
             'loss_pitch_button': loss_pitch_button,
             'loss_button_concentration': loss_button_concentration,                        
             'loss_window_corr': loss_window_corr,
+            'loss_saturated_contour': loss_saturated_contour,
+            'loss_pitch_extreme_anchoring': loss_pitch_extreme_anchoring,
+            'loss_nonlinear_compression': loss_nonlinear_compression,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
             'loss_contour': loss_contour,
 
             'loss_contour_perc': loss_contour_perc,
@@ -1951,6 +1997,47 @@ class EncoderOnly(Module):
                 e
             )
 
+        # Saturated contour loss (allows button saturation at extremes)
+        loss_saturated_contour = 0
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_saturated_contour = saturated_contour_loss(
+                note_tokens['pitch'],
+                e,
+                self.cfg['num_buttons']
+            )
+
+        # Pitch extreme anchoring loss (ties high pitches to high buttons, low to low)
+        loss_pitch_extreme_anchoring = 0
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_pitch_extreme_anchoring = pitch_extreme_anchoring_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Non-linear compression loss (more control in middle, less at extremes)
+        loss_nonlinear_compression = 0
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_nonlinear_compression = non_linear_compression_loss_vectorized(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Latent velocity loss (makes buttons control pitch direction like LSTM)
+        loss_latent_velocity = 0
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_latent_velocity = latent_velocity_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Drift regularization loss (rewards cumulative pitch motion in latent direction)
+        loss_drift = 0
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_drift = drift_regularization_loss(
+                note_tokens['pitch'],
+                e
+            )
+
         loss_contour = 0
         if self.cfg['loss_contour'] > 0:
             loss_contour = self.cfg['loss_contour'] * (
@@ -1986,6 +2073,18 @@ class EncoderOnly(Module):
         if self.cfg['loss_window_corr'] > 0:
             loss_total += self.cfg['loss_window_corr'] * loss_window_corr
 
+        # Add non-linear compression loss
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_total += self.cfg['loss_nonlinear_compression'] * loss_nonlinear_compression
+
+        # Add latent velocity loss
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_total += self.cfg['loss_latent_velocity'] * loss_latent_velocity
+
+        # Add drift regularization loss
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_total += self.cfg['loss_drift'] * loss_drift
+
         
         loss = {
             'loss_total': loss_total,
@@ -1997,6 +2096,11 @@ class EncoderOnly(Module):
             'loss_pitch_button': loss_pitch_button,
             'loss_button_concentration': loss_button_concentration,                        
             'loss_window_corr': loss_window_corr,
+            'loss_saturated_contour': loss_saturated_contour,
+            'loss_pitch_extreme_anchoring': loss_pitch_extreme_anchoring,
+            'loss_nonlinear_compression': loss_nonlinear_compression,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
             'loss_contour': loss_contour,
 
             'loss_contour_perc': loss_contour_perc,
@@ -2951,6 +3055,47 @@ class AutoregressiveAutoencoder_no_dtime(Module):
                 e
             )
 
+        # Saturated contour loss (allows button saturation at extremes)
+        loss_saturated_contour = 0
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_saturated_contour = saturated_contour_loss(
+                note_tokens['pitch'],
+                e,
+                self.cfg['num_buttons']
+            )
+
+        # Pitch extreme anchoring loss (ties high pitches to high buttons, low to low)
+        loss_pitch_extreme_anchoring = 0
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_pitch_extreme_anchoring = pitch_extreme_anchoring_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Non-linear compression loss (more control in middle, less at extremes)
+        loss_nonlinear_compression = 0
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_nonlinear_compression = non_linear_compression_loss_vectorized(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Latent velocity loss (makes buttons control pitch direction like LSTM)
+        loss_latent_velocity = 0
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_latent_velocity = latent_velocity_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Drift regularization loss (rewards cumulative pitch motion in latent direction)
+        loss_drift = 0
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_drift = drift_regularization_loss(
+                note_tokens['pitch'],
+                e
+            )
+
         # Combine losses with appropriate weights
         loss_total = torch.zeros_like(loss_recons)
         loss_total += loss_recons * self.cfg['loss_recons'] 
@@ -2992,6 +3137,26 @@ class AutoregressiveAutoencoder_no_dtime(Module):
         if self.cfg['loss_window_corr'] > 0:
             loss_total += self.cfg['loss_window_corr'] * loss_window_corr
 
+        # Add saturated contour loss
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_total += self.cfg['loss_saturated_contour'] * loss_saturated_contour
+
+        # Add pitch extreme anchoring loss
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_total += self.cfg['loss_pitch_extreme_anchoring'] * loss_pitch_extreme_anchoring
+
+        # Add non-linear compression loss
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_total += self.cfg['loss_nonlinear_compression'] * loss_nonlinear_compression
+
+        # Add latent velocity loss
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_total += self.cfg['loss_latent_velocity'] * loss_latent_velocity
+
+        # Add drift regularization loss
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_total += self.cfg['loss_drift'] * loss_drift
+
         #loss_total = loss_recons
         acc = self.compute_accuracy(logits, target)
         
@@ -3006,6 +3171,11 @@ class AutoregressiveAutoencoder_no_dtime(Module):
             'loss_pitch_button': loss_pitch_button,
             'loss_button_concentration': loss_button_concentration,                        
             'loss_window_corr': loss_window_corr,
+            'loss_saturated_contour': loss_saturated_contour,
+            'loss_pitch_extreme_anchoring': loss_pitch_extreme_anchoring,
+            'loss_nonlinear_compression': loss_nonlinear_compression,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
             'loss_contour': loss_contour,
 
             'loss_contour_perc': loss_contour_perc,
@@ -3078,6 +3248,107 @@ class AutoregressiveAutoencoder_no_dtime(Module):
         #b = b[:, -1] # (B=1, 1)
         #b = b.unsqueeze(1).item()
         return b
+
+    def compute_accuracy(self, logits, labels): 
+        out = torch.argmax(logits, dim=-1) 
+        out = out.flatten() 
+        labels = labels.flatten() 
+
+        mask = (labels != self.ignore_index) # can also be self.pad_value (your choice)
+        out = out[mask] 
+        labels = labels[mask] 
+
+        num_right = (out == labels)
+        num_right = torch.sum(num_right).type(torch.float32)
+
+        acc = num_right / len(labels) 
+        return acc
+
+class Decoder_only_no_dtime(Module):
+    def __init__(
+        self,
+        decoder, # Decoder_no_dtime
+        cfg = None,
+    ):
+        super().__init__()
+        self.ignore_index = PAD_IDX
+        self.cfg = cfg
+        self.decoder = decoder
+        self.max_seq_len = decoder.max_seq_len
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+        #seq, ignore_index = x.shape[1], self.ignore_index
+
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1], # no current pitch 
+        } # (B, T)
+
+        logits = self.decoder(decoder_context) # (B, T (seq_len), VOCAB_SIZE_PITCH) (2, 1024, 128)
+
+        # Target should be the pitch at the current (last) position
+        target = note_tokens['pitch'][:,1:]
+
+        # Compute reconstruction loss (cross entropy between predicted and true pitches)
+        #loss_recons = loss.forward(y, tgt)
+        # Compute losses and update params
+        # loss_recons = cross entropy loss between predicted pitch sample list and true pitch sample list
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index = self.ignore_index # 128 vocab_pitch_size
+        )
+        
+        # Combine losses with appropriate weights
+        loss_total = torch.zeros_like(loss_recons)
+        loss_total += loss_recons 
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+
+            'loss_margin': torch.tensor(0.0),
+            'loss_deviate': torch.tensor(0.0),
+            'loss_button_held': torch.tensor(0.0),
+            'loss_norm_pos': torch.tensor(0.0),
+            'loss_pitch_button': torch.tensor(0.0),
+            'loss_button_concentration': torch.tensor(0.0),                        
+            'loss_window_corr': torch.tensor(0.0),
+            'loss_contour': torch.tensor(0.0),
+        }
+        #loss_total = loss_recons
+        acc = self.compute_accuracy(logits, target)
+        
+        return loss, acc
+
+        #return loss_total, acc
+ 
+    @torch.inference_mode()
+    def gen_pitch_token(self, 
+            note_tokens: Dict[str, Tensor],
+            temperature = 1.0
+            ):
+
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1],
+        } # (B, T)
+
+        logits, _ = self.decoder(
+                decoder_context,
+                return_intermediates = True,
+                cache = None,
+                seq_start_pos = None
+        )
+
+        logits = logits[:, -1]  # [B, 1, vocab_size]
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        # Use multinomial sampling for all devices, including MPS
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        return next_token
 
     def compute_accuracy(self, logits, labels): 
         out = torch.argmax(logits, dim=-1) 
@@ -5363,6 +5634,44 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
                 e
             )
 
+        loss_saturated_contour = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_saturated_contour = saturated_contour_loss(
+                note_tokens['pitch'],
+                e,
+                self.cfg.get('num_buttons', 12)
+            )
+
+        loss_pitch_extreme_anchoring = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_pitch_extreme_anchoring = pitch_extreme_anchoring_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        loss_nonlinear_compression = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_nonlinear_compression = non_linear_compression_loss_vectorized(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Latent velocity loss (makes buttons control pitch direction like LSTM)
+        loss_latent_velocity = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_latent_velocity = latent_velocity_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Drift regularization loss (rewards cumulative pitch motion in latent direction)
+        loss_drift = torch.tensor(0.0, device=logits.device)
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_drift = drift_regularization_loss(
+                note_tokens['pitch'],
+                e
+            )
+
         # Combine losses with appropriate weights
         loss_total = loss_recons * self.cfg.get('loss_recons', 1.0)
         
@@ -5397,6 +5706,15 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
         if self.cfg.get('loss_window_corr', 0) > 0:
             loss_total = loss_total + self.cfg['loss_window_corr'] * loss_window_corr
 
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_nonlinear_compression'] * loss_nonlinear_compression
+
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_latent_velocity'] * loss_latent_velocity
+
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_total = loss_total + self.cfg['loss_drift'] * loss_drift
+
         # Compute accuracy
         acc = self.compute_accuracy(logits, target)
         
@@ -5410,6 +5728,13 @@ class AutoregressiveAutoencoder_no_dtime_harmony(Module):
             'loss_pitch_button': loss_pitch_button,
             'loss_button_concentration': loss_button_concentration,                        
             'loss_window_corr': loss_window_corr,
+            'loss_saturated_contour': loss_saturated_contour,
+            'loss_pitch_extreme_anchoring': loss_pitch_extreme_anchoring,
+            'loss_nonlinear_compression': loss_nonlinear_compression,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
             'loss_contour': loss_contour,
             'loss_contour_perc': loss_contour_perc,
             'loss_multi_step_perc': loss_multi_step_perc,
@@ -8155,6 +8480,47 @@ class AutoregressiveAutoencoder_no_dtime_tester(Module):
                 e
             )
 
+        # Saturated contour loss (allows button saturation at extremes)
+        loss_saturated_contour = 0
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_saturated_contour = saturated_contour_loss(
+                note_tokens['pitch'],
+                e,
+                self.cfg['num_buttons']
+            )
+
+        # Pitch extreme anchoring loss (ties high pitches to high buttons, low to low)
+        loss_pitch_extreme_anchoring = 0
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_pitch_extreme_anchoring = pitch_extreme_anchoring_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Non-linear compression loss (more control in middle, less at extremes)
+        loss_nonlinear_compression = 0
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_nonlinear_compression = non_linear_compression_loss_vectorized(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Latent velocity loss (makes buttons control pitch direction like LSTM)
+        loss_latent_velocity = 0
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_latent_velocity = latent_velocity_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Drift regularization loss (rewards cumulative pitch motion in latent direction)
+        loss_drift = 0
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_drift = drift_regularization_loss(
+                note_tokens['pitch'],
+                e
+            )
+
         # Combine losses with appropriate weights
         loss_total = torch.zeros_like(loss_recons)
         loss_total += loss_recons * self.cfg['loss_recons'] 
@@ -8196,6 +8562,26 @@ class AutoregressiveAutoencoder_no_dtime_tester(Module):
         if self.cfg['loss_window_corr'] > 0:
             loss_total += self.cfg['loss_window_corr'] * loss_window_corr
 
+        # Add saturated contour loss
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_total += self.cfg['loss_saturated_contour'] * loss_saturated_contour
+
+        # Add pitch extreme anchoring loss
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_total += self.cfg['loss_pitch_extreme_anchoring'] * loss_pitch_extreme_anchoring
+
+        # Add non-linear compression loss
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_total += self.cfg['loss_nonlinear_compression'] * loss_nonlinear_compression
+
+        # Add latent velocity loss
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_total += self.cfg['loss_latent_velocity'] * loss_latent_velocity
+
+        # Add drift regularization loss
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_total += self.cfg['loss_drift'] * loss_drift
+
         #loss_total = loss_recons
         acc = self.compute_accuracy(logits, target)
         
@@ -8210,6 +8596,11 @@ class AutoregressiveAutoencoder_no_dtime_tester(Module):
             'loss_pitch_button': loss_pitch_button,
             'loss_button_concentration': loss_button_concentration,                        
             'loss_window_corr': loss_window_corr,
+            'loss_saturated_contour': loss_saturated_contour,
+            'loss_pitch_extreme_anchoring': loss_pitch_extreme_anchoring,
+            'loss_nonlinear_compression': loss_nonlinear_compression,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
             'loss_contour': loss_contour,
 
             'loss_contour_perc': loss_contour_perc,
@@ -8423,7 +8814,7 @@ class Decoder_no_conditioning(nn.Module):
 
 
 # autoregressive wrapper class
-class AE_no_conditioning(Module):
+class AutoregressiveDecoder_no_conditioning(Module):
     def __init__(
         self,
         decoder,
@@ -8493,7 +8884,7 @@ class AE_no_conditioning(Module):
             ):
 
         device = note_tokens['pitch'].device
-        b = self.quantizer.discrete_to_real( note_tokens['button'])
+        #b = self.quantizer.discrete_to_real( note_tokens['button'])
 
         decoder_context = {
             'pitch': note_tokens['pitch'][:, :-1],
