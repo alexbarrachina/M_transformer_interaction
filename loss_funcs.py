@@ -649,98 +649,6 @@ def pitch_extreme_anchoring_loss(
     
     return total_loss
 
-
-def non_linear_compression_loss(
-    pitches: Tensor,          # [B, T+1] or [B, T] pitch sequence
-    e: Tensor,                # [B, T] encoder output in [-1, 1]
-    steepness: float = 6.0,   # Controls compression: higher = more compression at extremes
-    use_local_norm: bool = True,  # Use local window for normalization vs global
-    window_size: int = 128,   # Window size for local normalization
-    contour_weight: float = 0.5,  # Weight for contour matching (direction preservation)
-) -> Tensor:
-    """
-    Non-linear compression loss that creates an asymmetric pitch-to-button mapping:
-    
-    - EXTREME buttons (near ±1): Many pitches compressed into few buttons
-      → User has less control, model has more freedom to choose pitches
-    - MIDDLE buttons (near 0): Fewer pitches spread across more buttons  
-      → User has more fine-grained control over pitch contour
-    
-    This is achieved by applying a sigmoid-like transformation that:
-    - Flattens at extremes (compresses many pitch values together)
-    - Is steep in the middle (expands fewer pitch values apart)
-    
-    Args:
-        pitches: [B, T+1] or [B, T] pitch sequence (MIDI note numbers)
-        e: [B, T] encoder output in [-1, 1]
-        steepness: Controls the S-curve steepness (higher = more extreme compression)
-        use_local_norm: If True, normalize pitches within local windows
-        window_size: Size of local normalization window
-        contour_weight: Weight for contour matching loss (0 = position only, 1 = equal weight)
-    
-    Returns:
-        Loss tensor
-    """
-    # Align shapes
-    if pitches.size(1) == e.size(1) + 1:
-        p = pitches[:, 1:].float()
-    else:
-        p = pitches.float()
-    
-    batch_size, seq_len = p.shape
-    
-    # Normalize pitches to [0, 1]
-    if use_local_norm:
-        # Use sliding window for local normalization
-        # This adapts to local pitch range, making the mapping context-aware
-        p_norm = torch.zeros_like(p)
-        for i in range(seq_len):
-            start = max(0, i - window_size // 2)
-            end = min(seq_len, i + window_size // 2 + 1)
-            window = p[:, start:end]
-            p_min = window.min(dim=1, keepdim=True)[0]
-            p_max = window.max(dim=1, keepdim=True)[0]
-            range_size = (p_max - p_min).clamp(min=1.0)  # Avoid division by zero
-            p_norm[:, i:i+1] = (p[:, i:i+1] - p_min) / range_size
-    else:
-        # Global normalization (entire sequence)
-        p_min = p.min(dim=1, keepdim=True)[0]
-        p_max = p.max(dim=1, keepdim=True)[0]
-        range_size = (p_max - p_min).clamp(min=1.0)
-        p_norm = (p - p_min) / range_size
-    
-    # Apply non-linear compression using sigmoid
-    # sigmoid((x - 0.5) * steepness) creates an S-curve that:
-    # - Is flat near x=0 and x=1 (compresses extremes)
-    # - Is steep near x=0.5 (expands middle)
-    p_compressed = torch.sigmoid((p_norm - 0.5) * steepness)
-    
-    # Renormalize to [0, 1] after sigmoid (sigmoid output is already in (0,1) but not exactly [0,1])
-    # This ensures we use the full button range
-    p_comp_min = torch.sigmoid(torch.tensor(-0.5 * steepness))
-    p_comp_max = torch.sigmoid(torch.tensor(0.5 * steepness))
-    p_compressed = (p_compressed - p_comp_min) / (p_comp_max - p_comp_min)
-    
-    # Map to e-space [-1, 1]
-    target_e = p_compressed * 2.0 - 1.0
-    
-    # Position loss: encourage e to match the non-linearly compressed target
-    loss_position = torch.square(e - target_e)
-    
-    # Contour loss: encourage e contour to match target contour (direction preservation)
-    if contour_weight > 0:
-        de = torch.diff(e, dim=1)
-        dt = torch.diff(target_e, dim=1)
-        # Penalize when directions don't match
-        loss_contour = torch.square(torch.relu(1.0 - de * dt))
-        # Combine with position loss
-        total_loss = loss_position.mean() + contour_weight * loss_contour.mean()
-    else:
-        total_loss = loss_position.mean()
-    
-    return total_loss
-
-
 def non_linear_compression_loss_vectorized(
     pitches: Tensor,          # [B, T+1] or [B, T] pitch sequence
     e: Tensor,                # [B, T] encoder output in [-1, 1]
@@ -893,11 +801,16 @@ def drift_regularization_loss(
     Encourages cumulative pitch motion in the direction of the latent.
     This rewards long-term movement, not just local step-to-step changes.
     
-    Loss: L_drift = -E[z_t * (x_t - x_{t-k})]
+    Loss: L_drift = E[ReLU(-z_t * drift_t)]
     
-    The negative sign means we're MAXIMIZING the correlation between:
+    Where drift_t = (x_t - x_{t-k}) is the cumulative pitch change.
+    
+    This penalizes MISALIGNMENT between:
     - The latent direction (z_t)
     - The cumulative pitch change over the last k steps
+    
+    When z_t and drift_t have the same sign (aligned), loss = 0
+    When z_t and drift_t have opposite signs (misaligned), loss > 0
     
     So if z_t > 0 (high button), we want (x_t - x_{t-k}) > 0 (pitch went up)
     If z_t < 0 (low button), we want (x_t - x_{t-k}) < 0 (pitch went down)
@@ -910,7 +823,7 @@ def drift_regularization_loss(
         pitch_range: Range for normalization
     
     Returns:
-        Loss tensor (scalar) - minimize this to maximize drift alignment
+        Loss tensor (scalar, always >= 0)
     """
     # Align shapes
     if pitches.size(1) == e.size(1) + 1:
@@ -940,15 +853,22 @@ def drift_regularization_loss(
     else:
         drift_norm = drift
     
-    # Loss: -E[z * drift]
-    # We want to maximize z * drift, so minimize -z * drift
-    # When z > 0 and drift > 0: product positive, loss negative (good)
-    # When z < 0 and drift < 0: product positive, loss negative (good)
-    # When signs disagree: product negative, loss positive (bad)
-    correlation = e_aligned * drift_norm
+    # Reformulated as a standard positive loss (squared error encouraging alignment)
+    # We want drift_norm to align with e_aligned (both in similar scales)
+    # When e > 0, we want drift > 0; when e < 0, we want drift < 0
+    # 
+    # Method 1: Penalize misalignment using hinge loss (always positive)
+    # When e * drift < 0 (opposite signs), penalize
+    # When e * drift > 0 (same signs), no penalty
+    misalignment = -e_aligned * drift_norm  # Negative when aligned, positive when misaligned
+    loss = torch.relu(misalignment)  # Only penalize misalignment
     
-    # Return negative mean (we want to maximize correlation)
-    return -correlation.mean()
+    # Method 2 (alternative): Squared alignment loss
+    # This encourages drift to be proportional to latent
+    # Uncomment below if you prefer this approach:
+    # loss = torch.square(drift_norm - e_aligned)
+    
+    return loss.mean()
 
 
 def latent_velocity_and_drift_loss(
@@ -995,3 +915,300 @@ def latent_velocity_and_drift_loss(
     )
     
     return loss_vel + drift_weight * loss_drift
+
+
+def companded_warp_loss_tanh(
+    pitches: Tensor,
+    e: Tensor,
+    k: float = 2.5,                 # warp strength: >1 expands low pitches, compresses high pitches
+    low_emphasis: float = 2.0,       # weighting strength: >1 emphasizes low pitches more
+    w_min: float = 0.10,             # minimum weight at high pitches (keeps some signal everywhere)
+    contour_weight: float = 0.25,    # 0 disables contour; otherwise adds warped contour agreement
+    huber_delta: float = 0.10,
+    eps: float = 1e-6
+) -> Tensor:
+    """
+    Asymmetric non-uniform "control density" loss:
+
+      pitch (0..127) -> x in [0,1]
+      warp: u01 = 1 - (1-x)^k  (concave, expands low, compresses high)
+      u = 2*u01 - 1 in [-1,1]
+
+    Then:
+      - Align encoder output e (in [-1,1]) to u (Huber)
+      - Weight alignment more for low pitches, less for high pitches
+      - Optional contour agreement in warped space
+
+    Expected shapes:
+      pitches: [B, T+1] or [B, T]
+      e:       [B, T]
+    """
+
+    # --- Align pitch length with e length (your code often has pitches [B, T+1]) ---
+    if pitches.size(1) == e.size(1) + 1:
+        p = pitches[:, 1:]
+    else:
+        p = pitches
+        T = min(p.size(1), e.size(1))
+        p = p[:, :T]
+        e = e[:, :T]
+
+    if e.size(1) < 2:
+        return torch.zeros(1, device=e.device)
+
+    # --- Normalize MIDI pitch (0..127) to x in [0,1] ---
+    p = p.float()
+    e_f = e.float()
+
+    x = (p / 127.0).clamp(0.0, 1.0)  # [B, T]
+
+    # --- Asymmetric companding warp: expand low, compress high ---
+    # u01 in [0,1]
+    k_t = torch.tensor(float(k), device=e.device, dtype=x.dtype)
+    u01 = 1.0 - torch.pow((1.0 - x).clamp(min=eps), k_t)  # [B, T]
+    # map to [-1,1]
+    u = 2.0 * u01 - 1.0
+
+    # --- Weighting: emphasize low pitches (lowest compression), relax high pitches (highest compression) ---
+    # w ~ 1 at x=0, w ~ w_min at x=1
+    le = torch.tensor(float(low_emphasis), device=e.device, dtype=x.dtype)
+    w = torch.pow((1.0 - x).clamp(min=0.0), le)
+    w = float(w_min) + (1.0 - float(w_min)) * w  # [B, T]
+
+    # --- Huber (smooth L1) position loss, elementwise then weighted ---
+    d = e_f - u
+    ad = torch.abs(d)
+    delta = float(huber_delta)
+
+    huber = torch.where(
+        ad < delta,
+        0.5 * (d * d) / max(delta, eps),
+        ad - 0.5 * delta
+    )
+    loss_pos = (w * huber).mean()
+
+    # --- Optional contour agreement in warped space ---
+    if contour_weight > 0.0:
+        de = torch.diff(e_f, dim=1)  # [B, T-1]
+        du = torch.diff(u, dim=1)    # [B, T-1]
+
+        contour = torch.square(
+            torch.maximum(
+                1.0 - de * du,
+                torch.zeros_like(de)
+            )
+        )
+
+        w_mid = 0.5 * (w[:, 1:] + w[:, :-1])  # [B, T-1]
+        loss_contour = (w_mid * contour).mean()
+
+        return loss_pos + float(contour_weight) * loss_contour
+
+    return loss_pos
+
+def companded_warp_loss_knee(
+    pitches: Tensor,
+    e: Tensor,
+    # --- shape of the non-uniform mapping ---
+    high_k: float = 5,             # >1 : stronger compression in the HIGH region (after knee)
+    knee_x0: float = 0.75,           # where "high compression" starts (0..1). LOWER => more high buttons compress
+    knee_width: float = 0.02,        # smoothness of the knee (smaller = sharper transition)
+    low_gamma: float = 1.0,          # <=1 : expand LOW region (1.0 = linear; 0.7 gives more resolution at low)
+    # --- weighting & extras ---
+    low_emphasis: float = 2.0,       # >1 : weight low pitches more, weight high pitches less
+    w_min: float = 0.10,
+    contour_weight: float = 0.25,
+    huber_delta: float = 0.10,
+    eps: float = 1e-6
+) -> Tensor:
+    """
+    Asymmetric "control density" loss with a smooth knee:
+
+      pitch (0..127) -> x in [0,1]
+      LOW part (x <= x0): u01_low = x0 * (x/x0)^low_gamma   (more resolution at low if low_gamma<1)
+      HIGH part (x > x0): u01_high = x0 + (1-x0) * (1 - (1-t)^high_k),  t=(x-x0)/(1-x0)
+      Blend both with a sigmoid mask around x0 for smoothness.
+
+    Then:
+      - Align e to target u in [-1,1] with weighted Huber
+      - Optional contour agreement in the warped space
+    """
+
+    # --- Align pitch length with e length (often pitches [B, T+1], e [B, T]) ---
+    if pitches.size(1) == e.size(1) + 1:
+        p = pitches[:, 1:]
+    else:
+        p = pitches
+        T = min(p.size(1), e.size(1))
+        p = p[:, :T]
+        e = e[:, :T]
+
+    if e.size(1) < 2:
+        return torch.zeros(1, device=e.device)
+
+    p = p.float()
+    e_f = e.float()
+
+    # --- Normalize MIDI pitch (0..127) to x in [0,1] ---
+    x = (p / 127.0).clamp(0.0, 1.0)  # [B, T]
+
+    # --- parameters as tensors on correct device/dtype ---
+    x0 = torch.tensor(float(knee_x0), device=e.device, dtype=x.dtype).clamp(min=eps, max=1.0 - eps)
+    k_t = torch.tensor(float(high_k), device=e.device, dtype=x.dtype)
+    g_t = torch.tensor(float(low_gamma), device=e.device, dtype=x.dtype).clamp(min=eps)
+    tau = torch.tensor(float(knee_width), device=e.device, dtype=x.dtype).clamp(min=eps)
+
+    one_minus_x0 = (1.0 - x0).clamp(min=eps)
+
+    # --- LOW branch (scaled so u01_low(x0)=x0) ---
+    # u01_low = x0 * (x/x0)^gamma  for x<=x0
+    x_over_x0 = (x / x0).clamp(0.0, 1.0)
+    u01_low = x0 * torch.pow(x_over_x0, g_t)
+
+    # --- HIGH branch (also continuous at x0, u01_high(x0)=x0, u01_high(1)=1) ---
+    t = ((x - x0) / one_minus_x0).clamp(0.0, 1.0)
+    u01_high = x0 + one_minus_x0 * (1.0 - torch.pow((1.0 - t).clamp(min=eps), k_t))
+
+    # --- smooth blend around the knee ---
+    m = torch.sigmoid((x - x0) / tau)  # ~0 below x0, ~1 above x0
+    u01 = (1.0 - m) * u01_low + m * u01_high
+
+    # map to [-1, 1] target for e
+    u = 2.0 * u01 - 1.0  # [B, T]
+
+    # --- Weighting: emphasize low (more control), relax high (more freedom) ---
+    le = torch.tensor(float(low_emphasis), device=e.device, dtype=x.dtype)
+    w = torch.pow((1.0 - x).clamp(min=0.0), le)          # 1 at low, -> 0 at high
+    w = float(w_min) + (1.0 - float(w_min)) * w          # keep a floor
+
+    # --- Weighted Huber (smooth L1) position loss ---
+    d = e_f - u
+    ad = torch.abs(d)
+    delta = float(huber_delta)
+
+    huber = torch.where(
+        ad < delta,
+        0.5 * (d * d) / max(delta, eps),
+        ad - 0.5 * delta
+    )
+    loss_pos = (w * huber).mean()
+
+    # --- Optional contour agreement in warped space ---
+    if contour_weight > 0.0:
+        de = torch.diff(e_f, dim=1)  # [B, T-1]
+        du = torch.diff(u, dim=1)    # [B, T-1]
+
+        contour = torch.square(torch.relu(1.0 - de * du))
+        w_mid = 0.5 * (w[:, 1:] + w[:, :-1])  # [B, T-1]
+        loss_contour = (w_mid * contour).mean()
+
+        return loss_pos + float(contour_weight) * loss_contour
+
+    return loss_pos
+
+def companded_warp_loss(
+    pitches: Tensor,
+    e: Tensor,
+    num_buttons: int = 18,         # total buttons (e quantized into these)
+    high_buttons: int = 5,         # how many TOP buttons should cover the "high register"
+    knee_x0: float = 0.70,         # pitch knee in x=[0,1] where high register begins (LOWER -> more pitches compressed)
+    knee_width: float = 0.02,      # smoothness of transition around knee_x0
+    low_gamma: float = 0.85,       # <1 expands low region more (less compression at low)
+    high_gamma: float = 2.0,       # >1 spreads high pitches across top buttons (prevents only-top saturation)
+    low_emphasis: float = 1.5,     # >0 weights low pitches more; higher => more low control
+    w_min: float = 0.20,           # floor weight for high region (DON'T set too low or high bins collapse)
+    contour_weight: float = 0.25,  # contour agreement in warped space
+    huber_delta: float = 0.10,
+    eps: float = 1e-6
+) -> Tensor:
+    """
+    Asymmetric non-uniform mapping with explicit bin allocation for the high register.
+
+    pitch p (0..127) -> x in [0,1]
+    Define knee_x0 in pitch space, and knee_y0 in latent space so that x >= knee_x0
+    is mapped only into the top 'high_buttons' bins.
+
+    This makes compression apply to multiple top buttons, not only the highest one.
+    """
+
+    # Align shapes: if pitches is [B, T+1], use pitches[:, 1:] to match e [B, T]
+    if pitches.size(1) == e.size(1) + 1:
+        p = pitches[:, 1:].float()
+    else:
+        p = pitches.float()
+        min_len = min(p.size(1), e.size(1))
+        p = p[:, :min_len]
+        e = e[:, :min_len]
+
+    if e.size(1) < 2:
+        return torch.zeros(1, device=e.device)
+
+    e_f = e.float()
+
+    # Normalize MIDI pitch to x in [0,1]
+    x = (p / 127.0).clamp(0.0, 1.0)
+
+    # -------------------------
+    # Latent knee y0: boundary of top 'high_buttons' buttons in u01 space
+    # Quantizer centers in u01 are at i/(num_buttons-1). Boundaries at (i+0.5)/(num_buttons-1).
+    # Boundary below the top 'high_buttons' starts between buttons (N-high_buttons-1) and (N-high_buttons).
+    # -------------------------
+    N = float(max(int(num_buttons), 2))
+    hb = float(max(min(int(high_buttons), int(num_buttons) - 1), 1))
+    denom = max(N - 1.0, 1.0)
+
+    knee_y0 = (N - hb - 0.5) / denom
+    knee_y0 = float(max(min(knee_y0, 1.0 - 1e-4), 1e-4))
+
+    # Params as tensors
+    x0 = torch.tensor(float(knee_x0), device=e.device, dtype=x.dtype).clamp(min=eps, max=1.0 - eps)
+    y0 = torch.tensor(float(knee_y0), device=e.device, dtype=x.dtype).clamp(min=eps, max=1.0 - eps)
+    tau = torch.tensor(float(knee_width), device=e.device, dtype=x.dtype).clamp(min=eps)
+
+    gL = torch.tensor(float(low_gamma), device=e.device, dtype=x.dtype).clamp(min=eps)
+    gH = torch.tensor(float(high_gamma), device=e.device, dtype=x.dtype).clamp(min=eps)
+
+    # LOW branch: map [0, x0] -> [0, y0]
+    x_over_x0 = (x / x0).clamp(0.0, 1.0)
+    u01_low = y0 * torch.pow(x_over_x0, gL)
+
+    # HIGH branch: map [x0, 1] -> [y0, 1]
+    t = ((x - x0) / (1.0 - x0).clamp(min=eps)).clamp(0.0, 1.0)
+    u01_high = y0 + (1.0 - y0) * torch.pow(t, gH)
+
+    # Smooth blend around knee
+    m = torch.sigmoid((x - x0) / tau)  # ~0 below knee, ~1 above
+    u01 = (1.0 - m) * u01_low + m * u01_high
+
+    # Map to [-1, 1] target
+    target_e = u01 * 2.0 - 1.0
+
+    # Weighting: emphasize low pitches, de-emphasize high pitches (but keep floor w_min)
+    le = torch.tensor(float(low_emphasis), device=e.device, dtype=x.dtype)
+    w = torch.pow((1.0 - x).clamp(min=0.0), le)           # 1 at low, 0 at high
+    w = float(w_min) + (1.0 - float(w_min)) * w           # keep floor
+
+    # Weighted Huber (smooth L1) position loss
+    d = e_f - target_e
+    ad = torch.abs(d)
+    delta = float(huber_delta)
+
+    huber = torch.where(
+        ad < delta,
+        0.5 * (d * d) / max(delta, eps),
+        ad - 0.5 * delta
+    )
+    loss_pos = (w * huber).mean()
+
+    # Optional contour in warped space
+    if contour_weight > 0:
+        de = torch.diff(e_f, dim=1)
+        dt = torch.diff(target_e, dim=1)
+        loss_contour = torch.square(torch.relu(1.0 - de * dt))
+
+        w_mid = 0.5 * (w[:, 1:] + w[:, :-1])
+        loss_contour = (w_mid * loss_contour).mean()
+
+        return loss_pos + float(contour_weight) * loss_contour
+
+    return loss_pos

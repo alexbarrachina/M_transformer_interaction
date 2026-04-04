@@ -107,6 +107,26 @@ def load_model(model_name='default',
            attn_flash = True
         )
         )  
+    elif cfg['model_type'] == 'autoencoder_anticipation':
+        mpt_model = AutoregressiveAutoencoder_anticipation(
+           cfg = cfg,
+           decoder = Decoder_no_dtime_anticipation(
+              max_seq_len = cfg['seq_len'],
+              dim = cfg['emb_dim'],
+              depth = cfg['num_layers'],
+              heads = cfg['heads'],
+              rotary_pos_emb = True,
+              attn_flash = True
+           ),
+           encoder = Encoder_no_dtime(
+              max_seq_len = cfg['seq_len'],
+              dim = cfg['emb_dim'],
+              depth = cfg['num_layers'],
+              heads = cfg['heads'],
+              rotary_pos_emb = True,
+              attn_flash = True
+           )
+        )
     elif cfg['model_type'] == 'autoencoder_w_encoder_antic':
         mpt_model = AutoregressiveAutoencoder(
            cfg = cfg,
@@ -316,6 +336,28 @@ def load_model(model_name='default',
                 attn_flash = True
             ),
 
+        )
+    elif cfg['model_type'] == 'autoencoder_no_dtime_dual':
+        # Dual-conditioned autoencoder: melodic shape buttons + harmony movement decay
+        mpt_model = AutoregressiveAutoencoder_no_dtime_dual(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_dual(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                num_harmony_movements = cfg.get('num_harmony_movements', 8),
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            )
         )
     elif cfg['model_type'] == 'AutoregressiveDecoder_no_conditioning':
         # Autoencoder with Tonnetz harmony conditioning (decoder-only)

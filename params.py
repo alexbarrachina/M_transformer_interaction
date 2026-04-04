@@ -151,3 +151,21 @@ if torch.cuda.is_available():
 else:
     DEFAULT_HPARAMS['local_dataset_path'] = "../../../Datasets/MIDI/asigalov61___monster-piano"
 
+# MIDI CHANNELS
+# Melody channel filter
+MELODY_CHANNEL = 0  # Channel 0 is melody (channel 1 in the midifile)
+ACCOMP_CHANNEL = 10  # Channel 10 is accompaniment (channel 11 in the midifile)
+HARMONY_CHANNEL = 3 # harmony movement info (channel 4 in the midifile)
+CHORDS_CHANNEL = 4 # harmony chords (channel 5 in the midifile)
+
+MELODY_CHORDS_CHANNEL = 1 # channel 2 in the midifile
+EXTRA_ACCOMP_CHANNEL = 11 # channel 12 in the midifile
+
+MOVE_STABILIZE = 0 #60
+MOVE_RECOLOR = 1 #61
+MOVE_PREPARE = 2 #62
+MOVE_TENSION = 3 #63
+MOVE_RESOLVE = 4 #64
+MOVE_EVADE = 5 #65
+MOVE_CHROMATIC = 6 #66
+MOVE_MODULATE = 7 #67

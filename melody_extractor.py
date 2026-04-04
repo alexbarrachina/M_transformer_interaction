@@ -38,8 +38,8 @@ device = torch.device('mps')
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-file_name='Baines_hkNo8ESFFZU'
-sample_midi_path = './samples/2hands/' + file_name + '.midi'
+file_name='Liszt, Franz, 2 Polonaises, S.223, VvreQKtsObY'
+sample_midi_path = './samples/seg/' + file_name + '.mid'
 output_midi_name = './out/' + file_name
 CHANNEL = 0
 
@@ -52,8 +52,8 @@ CHANNEL = 0
 #dataset_addr = "../../../DataSets/MIDI/giantMIDI/sel_hannds/_post-process"
 #dataout_addr = "../../../DataSets/MIDI/giantMIDI/sel_hannds/_post-process/melody_segmented"
 
-dataset_addr = "../PROCESS/hannds/out"
-dataout_addr = "../PROCESS/hannds/out/melody_segmented"
+dataset_addr = "./samples/seg/"
+dataout_addr = "./out"
 
 
 filez = list()

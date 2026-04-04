@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J mai2b
+#SBATCH -J 5butt
 #SBATCH -p high
 #SBATCH -N 1
 #SBATCH --gres=gpu:quadro:1
@@ -14,4 +14,5 @@ source /etc/profile.d/zz_hpcnow-arch.sh
 module load Anaconda3/2020.02
 
 source activate tgenie
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python train.py

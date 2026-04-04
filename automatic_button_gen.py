@@ -34,7 +34,7 @@ device = torch.device('mps')
 ''' MODEL '''
 #model_name = 'AE_no_dtime_saturation_v1' # button saturation at extremes, more free pitch generation
 #model_name = 'no_dtime_good_reference' # original Genie
-model_name = 'AE_non_linear_compression_v1'
+model_name = 'good_ref_88buttons'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)

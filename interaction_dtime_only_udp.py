@@ -23,6 +23,7 @@ import time
 import sys
 import fluidsynth
 import os 
+import atexit
 # pip install pyfluidsynth
 from typing import Optional, List
 import socket
@@ -44,11 +45,21 @@ UDP_IP = ""  # Listen on all interfaces
 UDP_PORT = 3000
 
 ''' DEVICE '''
-#device = torch.device('cpu')
-device = torch.device('mps') 
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cuda')
+
 
 ''' MODEL '''
-model_name = 'no_dtime_good_reference'
+#model_name = 'no_dtime_good_reference' # 12 button original Genie
+#model_name = 'no_dtime_button_concentration_tester_v3' # 12 buttons the button extremes pushes the pitch up/down
+#model_name = 'AE_non_linear_compression_12but_tester_v1' # 12 buttons non-linear compression: more control in middle, less at extremes
+#model_name = 'AE_non_linear_compression_tester_v1' # 18 buttons
+model_name = 'mai27_big_m_5buttons_original_loss' # 5 buttons
+#model_name = 'no_dtime_19_buttons' # 19 buttons
+#model_name = 'no_dtime_good_reference' # 12 buttons
+
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -57,12 +68,13 @@ model.eval()
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-#sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
-sample_midi_path = './samples/clairTester_to_end.midi'
+#sample_midi_path = './samples/Bach_Prelude_and_Fugue_in_C_major.mid'
+sample_midi_path = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
+#sample_midi_path = './samples/clairTester_to_end.midi'
 output_midi_name = './out/interactive_performance'
 
-CTX_LEN = 256 # num notes in context. tokens = CTX_LENGTH * 3
-TOTAL_GEN_LEN = 1024 # num notes to generate
+CTX_LEN = 1024 # num notes in context. tokens = CTX_LENGTH * 3
+TOTAL_GEN_LEN = 2048 # num notes to generate
 
 '''THREADING'''
 # Add these at the global scope after your imports
@@ -177,7 +189,7 @@ def handle_udp_message(data):
             with save_lock:
                 print("saving performance")
                 save_performance()
-                os._exit(1)
+                sys.exit(0)
         elif parsed['number'] == 2 and parsed['state']:  # Switch 2 for reset
             with save_lock:
                 print("resetting context")
@@ -239,10 +251,13 @@ def reset_context():
     global dict_output_tokens, dict_input_tokens
 
     i = 0
-    dict_output_tokens['dtime'] = dict_input_tokens['dtime'] 
-    dict_output_tokens['pitch'] = dict_input_tokens['pitch'] 
-    dict_output_tokens['dur'] = dict_input_tokens['dur'] 
-    dict_output_tokens['button'] = dict_input_tokens['button'] 
+    # Reset and extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
+    required_len = TOTAL_GEN_LEN + CTX_LEN
+    for key in dict_input_tokens.keys():
+        extended_list = dict_input_tokens[key].copy()
+        if len(extended_list) < required_len:
+            extended_list.extend([0] * (required_len - len(extended_list)))
+        dict_output_tokens[key] = extended_list 
 
 ''' VARIABLES '''
 context = None
@@ -255,7 +270,14 @@ first_note = True
 # Load seed MIDI
 dict_input_tokens, num_notes = midi_to_dict(sample_midi_path) # tokens
 
-dict_output_tokens = dict_input_tokens.copy()
+# Extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
+required_len = TOTAL_GEN_LEN + CTX_LEN
+dict_output_tokens = {}
+for key in dict_input_tokens.keys():
+    extended_list = dict_input_tokens[key].copy()
+    if len(extended_list) < required_len:
+        extended_list.extend([0] * (required_len - len(extended_list)))
+    dict_output_tokens[key] = extended_list
 
 if TRACES:  
     print("num_notes", num_notes)
@@ -271,6 +293,9 @@ with torch.inference_mode():
     e = model.encoder(context) # encoder output (batch, seq_len)
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     b = b.clone().detach().tolist()
+    # Extend b to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
+    if len(b) < required_len:
+        b.extend([0] * (required_len - len(b)))
 
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN ], b[:CTX_LEN])
 
@@ -382,12 +407,8 @@ try:
         # Update visualizer
         visualizer.draw()
         
-except KeyboardInterrupt:
-    print(f"\nStopping receiver...")
-    print(f"Total messages received: {message_count}")
-    
-except Exception as e:
-    print(f"Error: {e}")
+except (EOFError, KeyboardInterrupt, SystemExit):
+    print("Bye.")
     
 finally:
     sock.close()

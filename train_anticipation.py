@@ -159,8 +159,8 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'compression_tradeoff'
-    model_name = 'good_ref_5buttons'
+    project_name = 'anticipation'
+    model_name = 'anticipation_5buttons'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)

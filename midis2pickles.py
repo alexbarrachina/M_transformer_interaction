@@ -26,10 +26,16 @@ import os
 from tqdm import tqdm
 
 from midiUtils import midi2ms_score, Any_Pickle_File_Writer
+from params import *
 
 # NO OFFSETS: Each token type is stored in its raw range (0-127)
-# The pickle format stores 5 tokens per note: [dtime, dur, pitch, vel, chan]
+# The pickle format stores 5 tokens per event: [dtime, dur, pitch, vel, chan]
 # All values are in range 0-127 (or 0-15 for channel)
+#
+# HARMONY MOVEMENT EVENTS (from MIDI channel 4, stored as channel 3 in pickle):
+#   Stored as [0, 0, movement_type, 0, 3] following the [dtime, dur, pitch, vel, chan] layout.
+#   Harmony events do NOT update pe, so subsequent notes compute dtime from the last playable note.
+#   Channel 5 (chord references) is discarded entirely.
 
 # Process MIDIs
 
@@ -47,15 +53,14 @@ dataset_ratio = 1 # Change this if you need more or less % of the dataset
 #train_and_test_ratio = 1. # 100% for training
 train_and_test_ratio = 0.8 # 80% for training, 20% for testing
 
-# Melody channel filter
-MELODY_CHANNEL = 0  # Channel 0 is melody
-ACCOMP_CHANNEL = 10  # Channel 10 is accompaniment
-MELODY_ONLY = 0
-ACCOMP_ONLY = 1
-MELODY_AND_ACCOMP = 2
-ALL_CHANNELS = 3 # we will use all channels
 
-useful_channels = ACCOMP_ONLY 
+MELODY_ONLY = 0 # melody only (harmony not used for dtime)
+ACCOMP_ONLY = 1 # accompaniment only (harmony not used for dtime)
+MELODY_AND_ACCOMP = 2 # melody and accompaniment (harmony not used for dtime)
+MELODY_AND_ACCOMP_NOT_HARMONY = 3 # melody, accompaniment. Not harmony no chords
+ALL_CHANNELS = 4 # we will use all channels in the pickle (harmony not used for dtime)  
+
+useful_channels = MELODY_AND_ACCOMP 
 
 ###########
 
@@ -70,13 +75,14 @@ test_data1 = []
 total_notes = 0
 channel_0_notes = 0
 channel_10_notes = 0
+channel_4_movements = 0
 
 ###########
 
 # dataset_addr = "./Samples"  # when testing
-dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_chan_segmented"
+dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_harmony"
 # Output file names
-output_name = 'giantmidi_full_melody'
+output_name = 'giantmidi_full_harmony'
 
 
 filez = list()
@@ -124,25 +130,24 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           events_matrix.sort(key=lambda x: x[4], reverse=True) # pitch
           events_matrix.sort(key=lambda x: x[1]) # time
 
-          # Filter for melody notes BEFORE timing recalculation
-          # This ensures delta times are calculated between consecutive melody notes
+          # Include channel 4 (harmony movements) in the event stream
+          # Channel 5 (chord references) is discarded entirely
           if useful_channels == MELODY_ONLY:
-            # event format: ['note', start_time, duration, channel, pitch, velocity]
-            filtered_events_matrix = [e for e in events_matrix if e[3] == MELODY_CHANNEL]
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, HARMONY_CHANNEL)]
           elif useful_channels == ACCOMP_ONLY:
-            # event format: ['note', start_time, duration, channel, pitch, velocity]
-            filtered_events_matrix = [e for e in events_matrix if e[3] == ACCOMP_CHANNEL]
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (ACCOMP_CHANNEL, HARMONY_CHANNEL)]
           elif useful_channels == MELODY_AND_ACCOMP:
-            # event format: ['note', start_time, duration, channel, pitch, velocity]
-            filtered_events_matrix = [e for e in events_matrix if (e[3] == MELODY_CHANNEL or e[3] == ACCOMP_CHANNEL)]
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, ACCOMP_CHANNEL, HARMONY_CHANNEL)]
+          elif useful_channels == MELODY_AND_ACCOMP_NOT_HARMONY:
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, ACCOMP_CHANNEL)]
           else:
             filtered_events_matrix = events_matrix
-          
-          # Skip files with no notes after filtering
-          if len(filtered_events_matrix) == 0:
+
+          # Skip files with no playable notes
+          if not any(e[3] != HARMONY_CHANNEL for e in filtered_events_matrix):
               continue
 
-          # Recalculating timings (quantize) 
+          # Quantize timings for all events
           for e in filtered_events_matrix:
               e[1] = time2quant(e[1])
               e[2] = dur2quant(e[2])
@@ -154,26 +159,33 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           # Intro/Zero seq (5 tokens) - no offsets, raw values
           target_data.extend([126, 126, 0, 0, 0])  # dtime, dur, pitch, vel, chan
 
-          pe = filtered_events_matrix[0]
+          # pe tracks the last PLAYABLE note for dtime calculation
+          # Harmony events (channel 3) do NOT update pe
+          pe = next(e for e in filtered_events_matrix if e[3] != HARMONY_CHANNEL)
           for e in filtered_events_matrix:
 
-              time = max(0, min(126, e[1]-pe[1]))
-              dur = max(1, min(126, e[2]))
-              chan = max(0, min(15, e[3]))  # Channel 0-15
-              ptc = max(1, min(126, e[4]))
-              vel = max(1, min(126, e[5]))
+              if e[3] == HARMONY_CHANNEL:
+                  # Harmony movement: [0, 0, movement_type, 0, chan=3], pe NOT updated
+                  movement_type = max(0, min(126, e[4]))
+                  target_data.extend([0, 0, movement_type, 0, HARMONY_CHANNEL])
+                  channel_4_movements += 1
+              else:
+                  # Playable note: compute dtime from last playable note
+                  time = max(0, min(126, e[1]-pe[1]))
+                  dur = max(1, min(126, e[2]))
+                  chan = max(0, min(15, e[3]))
+                  ptc = max(1, min(126, e[4]))
+                  vel = max(1, min(126, e[5]))
 
-              # 5 tokens per note: dtime, dur, pitch, vel, chan (no offsets)
-              target_data.extend([time, dur, ptc, vel, chan])
+                  target_data.extend([time, dur, ptc, vel, chan])
 
-              # Update channel statistics
-              total_notes += 1
-              if e[3] == MELODY_CHANNEL:
-                  channel_0_notes += 1
-              elif e[3] == ACCOMP_CHANNEL:
-                  channel_10_notes += 1
+                  total_notes += 1
+                  if e[3] == MELODY_CHANNEL:
+                      channel_0_notes += 1
+                  elif e[3] == ACCOMP_CHANNEL:
+                      channel_10_notes += 1
 
-              pe = e
+                  pe = e
 
           files_count += 1
         
@@ -210,8 +222,9 @@ if total_notes > 0:
     channel_10_pct = (channel_10_notes / total_notes) * 100
     print(f'Channel 0 (melody) notes: {channel_0_notes} ({channel_0_pct:.2f}%)')
     print(f'Channel 10 (accompaniment) notes: {channel_10_notes} ({channel_10_pct:.2f}%)')
-else:
-    print('No notes processed')
+print(f'Channel 4 harmony movement events inserted: {channel_4_movements}')
+if total_notes > 0:
+    print(f'Movement events per note ratio: {channel_4_movements / total_notes:.4f}')
 print('=' * 70)
 
 print('Done!')

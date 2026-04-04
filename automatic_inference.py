@@ -27,7 +27,8 @@ from model_loader import load_model
 from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 
-temperature = 1.0
+# temp = 0.0001 conservative, 1.0 creative
+temperature = 0.0001
 
 ''' DEVICE '''
 #device = torch.device('cpu')
@@ -35,8 +36,8 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model_name = 'no_dtime_2buttons'
-#model_name = 'no_dtime_good_reference'
+#model_name = 'no_dtime_2buttons'
+model_name = 'no_dtime_good_reference'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -46,11 +47,11 @@ model.eval()
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-sample_midi_path = './samples/clairTester_to_end_monophonic.midi'
-output_midi_name = './out/continuator_clairTester_to_end'
+sample_midi_path = './samples/Bach_Prelude_and_Fugue_in_C_major.mid'
+output_midi_name = './out/continuator_Bach_Prelude_and_Fugue_in_C_major'
 output_butt_midi_name = './out/continuator_clairTester_to_end_buttons'
 output_e_midi_name = './out/continuator_clairTester_to_end_e'
-CTX_LEN = 218 # num notes in context. 
+CTX_LEN = 450 # num notes in context. 
 #TOTAL_GEN_LEN = 500 # num notes to generate
 
 

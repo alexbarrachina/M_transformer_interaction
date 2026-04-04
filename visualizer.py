@@ -29,7 +29,7 @@ from typing import List, Tuple, Optional, Dict, Any, Union
 
 class Visualizer:
 
-    def __init__(self, width: int = 1200, height: int = 940, roll_height: int = 180, fps: int = 30) -> None:
+    def __init__(self, width: int = 1200, height: int = 940, roll_height: int = 180, fps: int = 30, button_slots: int = 12) -> None:
         pygame.init()
         self.width = width
         self.roll_height = roll_height
@@ -38,6 +38,7 @@ class Visualizer:
         self.pitch_height = roll_height * 2  # Double height for pitches
         self.height = self.ref_height + 10 + self.pitch_height + 10 + self.button_height + 20
         self.fps = fps
+        self.button_slots = button_slots
         self.screen = pygame.display.set_mode((self.width, self.height))
         pygame.display.set_caption('Real-Time Piano Roll Visualizer')
         self.clock = pygame.time.Clock()
@@ -158,8 +159,8 @@ class Visualizer:
         max_pitch = max(all_pitches)
         # Pitch roll: variable height per pitch, double height
         self._draw_roll(self.notes, pitch_y, self.pitch_height, min_pitch, max_pitch, is_button=False)
-        # Button roll: always 12 slots, fixed height
-        self._draw_roll(self.buttons, button_y, self.button_height, 0, 11, is_button=True)
+        # Button roll: configurable slots, fixed height
+        self._draw_roll(self.buttons, button_y, self.button_height, 0, self.button_slots - 1, is_button=True)
         pygame.display.flip()
         self.clock.tick(self.fps)
 
@@ -190,7 +191,7 @@ class Visualizer:
     def _draw_primer_button_roll(self, buttons: List[int], dtimes: List[int], y_offset: int, height: int, width: int, colors: List[Tuple[int, int, int]]) -> None:
         if not buttons or not dtimes or len(buttons) != len(dtimes):
             return
-        slot_count = 12
+        slot_count = self.button_slots
         y_scale = height / float(slot_count)
         # Calculate cumulative time for each note
         times = [0]
@@ -206,7 +207,7 @@ class Visualizer:
             x = int(self.width // 2 + times[i] * time_scale)
             length = int(dtimes[i] * time_scale)
             color = colors[i] if i < len(colors) else (200, 200, 200)
-            slot = int(button) % 12
+            slot = int(button) % self.button_slots
             y = int(y_offset + height - (slot + 1) * y_scale)
             rect = pygame.Rect(x, y, max(length, 2), int(max(y_scale, 2)))
             pygame.draw.rect(self.screen, color, rect)
@@ -222,7 +223,7 @@ class Visualizer:
             min_val -= 1
             max_val += 1
         if is_button:
-            slot_count = 12
+            slot_count = self.button_slots
             y_scale = height / float(slot_count)
         else:
             y_scale = height / float(max_val - min_val + 1)
@@ -234,7 +235,7 @@ class Visualizer:
                 length = int((self.current_time() - item['start_time']) * self.scroll_speed)
             color = self._velocity_color(item['velocity'], is_button=is_button)
             if is_button:
-                slot = int(item['pitch']) % 12
+                slot = int(item['pitch']) % self.button_slots
                 y = int(y_offset + height - (slot + 1) * y_scale)
                 rect = pygame.Rect(start_x, y, max(length, 2), int(max(y_scale, 2)))
             else:
