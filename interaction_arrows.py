@@ -21,6 +21,7 @@
 
 import time
 import sys
+from tkinter import TRUE
 import fluidsynth
 import os 
 import atexit
@@ -32,7 +33,7 @@ import rtmidi
 # pip install python-rtmidi
 from threading import Lock
 
-from sympy.sets.sets import false
+from sympy.sets.sets import false, true
 import torch
 import pygame
 from pygame.locals import *
@@ -45,6 +46,8 @@ from visualizer import Visualizer
 
 TRACES = false
 AUTOMATIC_ARROWS = False # if True, use original midi file arrows for guidance
+USE_CACHE = False
+CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 
 
 ''' DEVICE '''
@@ -143,6 +146,7 @@ def reset_context(dict_input):
     global pitch_buffer
     global arrows
     global first_note
+    global kv_cache
 
     # 1. Capture the last N notes of the current performance
     PRESERVE_LEN = 16
@@ -159,6 +163,7 @@ def reset_context(dict_input):
     
     # 2. Reset global variables
     i = 0
+    kv_cache = None
     first_note = True
     # 3. Reload the original seed content
     # Start with a fresh copy of the original inputs
@@ -196,6 +201,8 @@ timeLast = 0
 i = 0 # num current tokens in context after CTX_LEN
 noteOn_dict = {}
 first_note = True
+kv_cache = None
+last_gen_time: float = 0.0
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -231,6 +238,8 @@ def manage_button_input(key, velocity):
   global pitch_buffer # output tokens
   global noteOn_dict # button: (pitch, timeIn)
   global first_note
+  global kv_cache
+  global last_gen_time
   global visualizer
   global KEY_MAPPING
   
@@ -241,6 +250,9 @@ def manage_button_input(key, velocity):
   timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_dict()
 
   if velocity > 0: # noteOn
+    now = time.perf_counter()
+    if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
+        kv_cache = None
     # Update position token
     dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
     if first_note:
@@ -290,8 +302,22 @@ def manage_button_input(key, velocity):
     }
     context = to_device(context, device)
                  
+    if device.type == 'mps':
+        torch.mps.synchronize()  # ensure previous GPU work is done
+    t0 = time.perf_counter()
+    
     with torch.inference_mode():
-        new_pitch_token = model.gen_pitch_token(context, temperature=temperature)
+        if USE_CACHE:
+            new_pitch_token, kv_cache = model.gen_pitch_token(context, temperature=temperature, cache=kv_cache, use_cache=True)
+        else:
+            new_pitch_token = model.gen_pitch_token(context, temperature=temperature)
+    
+    if device.type == 'mps':
+        torch.mps.synchronize()  # wait for GPU to finish
+    t1 = time.perf_counter()
+    print(f"gen_pitch_token: {(t1-t0)*1000:.2f} ms")
+    last_gen_time = t1
+    
     if TRACES:
         print("new_pitch_token", new_pitch_token)
 

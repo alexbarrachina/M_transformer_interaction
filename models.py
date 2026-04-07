@@ -1845,9 +1845,9 @@ MODELS_PARAMETERS = {
     },
 'AE_dual_tester_v3': {
     'model_type': 'autoencoder_no_dtime_dual',
-    'description': '0.6 dropout, concatenation instead of addition, variable decay rate' ,
+    'description': '0.0 dropout, concatenation instead of addition, variable decay rate' ,
     'train_log': '',
-    'ckpt_file_name': './save_models/AE_dual_tester_v1_60_eps_305_steps_1.5273_loss_0.7311_acc.pth',
+    'ckpt_file_name': './save_models/AE_dual_tester_v3_90_eps_455_steps_1.6103_loss_0.7523_acc.pth',
     'seq_len': 512,
     'pad_idx': 128,
     'emb_dim': 512,
@@ -1855,7 +1855,7 @@ MODELS_PARAMETERS = {
     'heads': 32,
     'num_buttons': 12,
     'num_harmony_movements': 8,
-    'harmony_span_dropout': 0.6,
+    'harmony_span_dropout': 0.0,
     'harmony_decay_residual': 0.05,
     # Loss weights
     'loss_margin': 0.1,
@@ -1867,6 +1867,32 @@ MODELS_PARAMETERS = {
     # Training settings
     "save_every": 15,
     "batch_size": 24,
+    "num_workers": 10,
+    },
+# Style-conditioned autoencoder (no harmony): buttons + cross-attention to style reference
+'AE_style_tester': {
+    'model_type': 'autoencoder_no_dtime_style',
+    'description': 'Style-conditioned: buttons + cross-attention to a style reference MIDI sequence (no harmony)',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'style_seq_len': 256,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 2,
+    'heads': 32,
+    'num_buttons': 12,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_test",
+    # Training settings
+    "save_every": 15,
+    "batch_size": 16,
     "num_workers": 10,
     },
 }

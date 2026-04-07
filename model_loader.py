@@ -373,6 +373,35 @@ def load_model(model_name='default',
             ),
 
         )
+    elif cfg['model_type'] == 'autoencoder_no_dtime_style':
+        # Style-conditioned autoencoder (no harmony): buttons + cross-attention to style reference
+        mpt_model = AutoregressiveAutoencoder_no_dtime_style(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 2),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
     if set_only == False:
         model_path = cfg['ckpt_file_name']
 

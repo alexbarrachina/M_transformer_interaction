@@ -44,7 +44,9 @@ from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
 
-TRACES = True
+TRACES = False
+USE_CACHE = False
+CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 
 ''' DEVICE '''
 if torch.backends.mps.is_available():
@@ -52,9 +54,8 @@ if torch.backends.mps.is_available():
 else:
     device = torch.device('cuda')
 
-
 ''' MODEL '''
-model_name = 'AE_dual_tester_v1'
+model_name = 'AE_dual_tester_v3'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -150,6 +151,7 @@ def reset_context(dict_input):
     global current_harm_regime
     global current_harm_strength
     global first_note
+    global kv_cache
 
     # 1. Capture the last N notes of the current performance
     PRESERVE_LEN = 16
@@ -167,6 +169,7 @@ def reset_context(dict_input):
     first_note = True
     current_harm_regime = 0
     current_harm_strength = 0.0
+    kv_cache = None
 
     # 3. Reload the original seed content
     pitch_buffer = dict_input['pitch'].copy()
@@ -199,6 +202,8 @@ noteOn_dict = {}
 first_note = True
 current_harm_regime = 0       # currently active harmony movement type (0-7)
 current_harm_strength = 0.0   # current harmony strength (1.0 at onset, decays)
+kv_cache = None
+last_gen_time: float = 0.0
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -254,6 +259,8 @@ def manage_button_input(key, velocity):
   global noteOn_dict
   global first_note
   global visualizer
+  global kv_cache
+  global last_gen_time
   
   if TRACES:
     print("key", key)
@@ -262,6 +269,9 @@ def manage_button_input(key, velocity):
   timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_dict()
 
   if velocity > 0: # noteOn
+    now = time.perf_counter()
+    if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
+        kv_cache = None
     # Update position token
     dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
     if first_note:
@@ -305,7 +315,11 @@ def manage_button_input(key, velocity):
     context = to_device(context, device)
                  
     with torch.inference_mode():
-        new_pitch_token = model.gen_pitch_token(context, temperature=temperature)
+        if USE_CACHE:
+            new_pitch_token, kv_cache = model.gen_pitch_token(context, temperature=temperature, cache=kv_cache, use_cache=True)
+        else:
+            new_pitch_token = model.gen_pitch_token(context, temperature=temperature)
+    last_gen_time = time.perf_counter()
     if TRACES:
         print("new_pitch_token", new_pitch_token)
 

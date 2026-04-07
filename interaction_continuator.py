@@ -42,6 +42,8 @@ from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Con
 #import params
 
 TRACES = False
+USE_CACHE = False
+CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 
 ''' DEVICE '''
 #device = torch.device('cpu')
@@ -146,8 +148,10 @@ def save_performance():
 def reset_context():
     global i
     global dict_output_tokens, dict_input_tokens
+    global kv_cache
 
     i = 0
+    kv_cache = None
     dict_output_tokens['dtime'] = dict_input_tokens['dtime'] 
     dict_output_tokens['pitch'] = dict_input_tokens['pitch'] 
     dict_output_tokens['dur'] = dict_input_tokens['dur'] 
@@ -159,6 +163,8 @@ timeLast = 0
 i = 0 # num current tokens in context after CTX_LEN
 noteOn_dict = {}
 first_note = True
+kv_cache = None
+last_gen_time: float = 0.0
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -192,6 +198,8 @@ def manageNote(note, velocity):
   global dict_output_tokens # output tokens
   global noteOn_dict # button: (pitch, timeIn)
   global first_note
+  global kv_cache
+  global last_gen_time
   global visualizer
 
   if TRACES:
@@ -201,6 +209,9 @@ def manageNote(note, velocity):
   timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_dict()
 
   if velocity > 0: # noteOn
+    now = time.perf_counter()
+    if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
+        kv_cache = None
     # Update position token
     dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
     if first_note:
@@ -233,7 +244,11 @@ def manageNote(note, velocity):
         print("pass context")
                  
     with torch.inference_mode():
-        new_pitch_token = model.gen_pitch_token(context)
+        if USE_CACHE:
+            new_pitch_token, kv_cache = model.gen_pitch_token(context, cache=kv_cache, use_cache=True)
+        else:
+            new_pitch_token = model.gen_pitch_token(context)
+    last_gen_time = time.perf_counter()
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
 
     playNote(new_pitch_token, velocity) 

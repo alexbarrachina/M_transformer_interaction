@@ -341,7 +341,7 @@ def main():
 
     ''' MODEL & HYPERPARAMETERS '''
     project_name = 'monsterGenie_harmony_movement'
-    model_name = 'AE_dual_tester_v3'
+    model_name = 'AE_dual_tester_v4'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
