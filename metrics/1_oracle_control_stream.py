@@ -1,5 +1,5 @@
 #==================================================================================================
-# Monster Genie inference_continuator.py Python module
+# Oracle_control_Stream.py Python module
 # Automatic inference, from a MIDI file as context,
 # guided with buttons extracted from the same MIDI file
 # By default, the context len is fixed to 120 notes. Once reached 120 notes, the first ones are discarded.
@@ -21,6 +21,10 @@
 
 import time
 import torch
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from params import *
 from model_loader import load_model
@@ -47,7 +51,7 @@ model.eval()
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-sample_midi_path = './samples/Bach_Prelude_and_Fugue_in_C_major.mid'
+sample_midi_path = '../samples/Bach_Prelude_and_Fugue_in_C_major.mid'
 output_midi_name = './out/continuator_Bach_Prelude_and_Fugue_in_C_major'
 output_butt_midi_name = './out/continuator_clairTester_to_end_buttons'
 output_e_midi_name = './out/continuator_clairTester_to_end_e'

@@ -22,7 +22,7 @@
 
 
 import os
-os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
+#os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
 
 import torch
 
@@ -107,6 +107,26 @@ def load_model(model_name='default',
            attn_flash = True
         )
         )  
+    elif cfg['model_type'] == 'autoencoder_no_dtime_joker':
+        mpt_model = AutoregressiveAutoencoder_no_dtime_joker(
+           cfg = cfg,
+        decoder = Decoder_no_dtime(
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
+        ),
+        encoder = Encoder_no_dtime(
+           max_seq_len = cfg['seq_len'],
+           dim = cfg['emb_dim'],
+           depth = cfg['num_layers'],
+           heads = cfg['heads'],
+           rotary_pos_emb = True,
+           attn_flash = True
+        )
+        )
     elif cfg['model_type'] == 'autoencoder_anticipation':
         mpt_model = AutoregressiveAutoencoder_anticipation(
            cfg = cfg,

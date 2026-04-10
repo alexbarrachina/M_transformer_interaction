@@ -25,6 +25,10 @@
 import time
 import torch
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from params import *
 from model_loader import load_model
 from models import get_model_hparams
@@ -46,7 +50,7 @@ model.to(device)
 model.eval()
 
 ''' PARAMS '''
-pickle_path = './Training-Data/giantmidi_full_harmony_test'
+pickle_path = '../Training-Data/giantmidi_full_harmony_test'
 output_base = './out/harm_inference'
 CTX_LEN = 450
 # Use a subset of notes from the pickle for testing

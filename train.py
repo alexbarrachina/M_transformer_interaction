@@ -22,7 +22,6 @@
 
 
 import os
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
@@ -159,8 +158,8 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'compression_tradeoff'
-    model_name = 'good_ref_5buttons'
+    project_name = 'buttons&jokers'
+    model_name = 'no_dtime_joker_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)

@@ -3309,6 +3309,337 @@ class AutoregressiveAutoencoder_no_dtime(Module):
         return acc
 
 
+class AutoregressiveAutoencoder_no_dtime_joker(AutoregressiveAutoencoder_no_dtime):
+    """Variant with a joker button (index = num_buttons) that teaches the decoder
+    to predict pitch without button guidance. During training, ~joker_ratio of
+    buttons are replaced with joker in consecutive blocks. During inference, the
+    performer alternates guided sequences with joker sequences."""
+
+    JOKER_REAL_VALUE: float = 2.0  # Outside the normal [-1, 1] button range
+
+    def __init__(
+        self,
+        encoder,
+        decoder,
+        cfg = None,
+    ):
+        super().__init__(encoder, decoder, cfg)
+        self.joker_ratio: float = float(self.cfg.get('joker_ratio', 0.15))
+        self.joker_button_idx: int = int(self.cfg['num_buttons'])
+
+    def _make_joker_mask(self, B: int, T: int, device: torch.device) -> Tensor:
+        """Create a boolean mask with consecutive blocks of joker positions
+        covering approximately self.joker_ratio of the sequence length.
+        Uses smoothed random noise + quantile thresholding to produce
+        natural contiguous blocks (fully tensorized, no loops)."""
+        noise = torch.rand(B, T, device=device)
+        kernel_size: int = max(3, T // 20)
+        kernel = torch.ones(1, 1, kernel_size, device=device) / kernel_size
+        pad_left: int = kernel_size // 2
+        pad_right: int = kernel_size - 1 - pad_left
+        noise_padded = F.pad(noise.unsqueeze(1), (pad_left, pad_right), mode='reflect')
+        smoothed = F.conv1d(noise_padded, kernel).squeeze(1).float()  # (B, T)
+        threshold = torch.quantile(smoothed, 1.0 - self.joker_ratio, dim=1, keepdim=True)
+        mask = smoothed >= threshold
+        return mask
+
+    def _buttons_discrete_to_real(self, button_discrete: Tensor) -> Tensor:
+        """Convert discrete button indices to real values, mapping joker
+        button (index = num_buttons) to JOKER_REAL_VALUE."""
+        joker_mask = (button_discrete == self.joker_button_idx)
+        safe_buttons = torch.where(joker_mask, torch.zeros_like(button_discrete), button_discrete)
+        b = self.quantizer.discrete_to_real(safe_buttons)
+        b = torch.where(joker_mask, torch.full_like(b, self.JOKER_REAL_VALUE), b)
+        return b
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        ''' only used for training'''
+
+        encoder_context = {
+            'pitch': note_tokens['pitch'][:, 1:],
+        } # (B, T)
+        e = self.encoder(encoder_context) # encoder output (batch, seq_len)
+        b = self.quantizer(e) # generate buttons (batch, seq_len), continuous values
+
+        # During training, replace ~joker_ratio of buttons with joker value
+        # in consecutive blocks to teach the decoder to predict without guidance
+        if self.training:
+            joker_mask = self._make_joker_mask(b.shape[0], b.shape[1], b.device)
+            b = torch.where(joker_mask, torch.full_like(b, self.JOKER_REAL_VALUE), b)
+
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1], # no current pitch
+            'button': b[:, :] # b.shape = (B, T) # includes current button
+        } # (B, T)
+
+        logits = self.decoder(decoder_context) # (B, T (seq_len), VOCAB_SIZE_PITCH)
+
+        # Target should be the pitch at the current (last) position
+        target = note_tokens['pitch'][:,1:]
+
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index = self.ignore_index
+        )
+
+        # Calculate contour penalty (all contour losses computed on original e, not joker-modified b)
+        loss_contour_perc = 0
+        if self.cfg['loss_contour_perc'] > 0: 
+            loss_contour_perc = simple_contour_loss(
+                note_tokens['pitch'],
+                e
+            ).mean()
+           
+        loss_margin = 0
+        if self.cfg['loss_margin'] > 0:
+            loss_margin = margin_loss( e)
+
+        loss_multi_step_perc = 0
+        if self.cfg['loss_multi_step_perc'] > 0:
+            loss_multi_step_perc = multi_step_contour_loss(
+                note_tokens['pitch'][:,1:], 
+                e,
+                max_steps=5
+            ).mean()
+
+        loss_interval_perc = 0
+        if self.cfg['loss_interval_perc'] > 0:
+            loss_interval_perc = interval_preservation_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                max_steps=5
+            ).mean()
+
+        loss_shape_perc = 0
+        if self.cfg['loss_shape_perc'] > 0:
+            loss_shape_perc = melodic_shape_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                window_size=5
+            ).mean()
+
+       # Improved Deviate Penalty
+        loss_deviate = 0
+        if self.cfg['loss_deviate'] > 0:
+             loss_deviate = deviate_loss(
+                note_tokens['pitch'],
+                e
+            )          
+ 
+        loss_button_held = 0
+        if self.cfg['loss_button_held'] > 0:
+            loss_button_held = button_held_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                self.cfg['num_buttons']
+            )
+
+        # Calculate normalized position loss
+        loss_norm_pos = 0
+        if self.cfg['loss_norm_pos'] > 0:
+            loss_norm_pos = normalized_position_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                num_buttons=self.cfg['num_buttons'],
+                window_size=5,
+            )
+
+        # Calculate pitch-button correlation loss
+        loss_pitch_button = 0
+        if self.cfg['loss_pitch_button'] > 0:
+            loss_pitch_button = pitch_button_correlation_loss(
+                note_tokens['pitch'][:,1:],
+                e,
+                window_size=5
+            )
+
+        # Calculate button concentration loss
+        loss_button_concentration = 0
+        if self.cfg['loss_button_concentration'] > 0:
+            loss_button_concentration = button_concentration_loss(
+                e,
+                note_tokens,
+                self.cfg['num_buttons']
+            )
+
+        # Windowed Pearson correlation between local pitch shape and e
+        loss_window_corr = 0
+        if self.cfg['loss_window_corr'] > 0:
+            loss_window_corr = windowed_correlation_loss(
+                note_tokens['pitch'][:,1:],
+                e
+            )
+
+        # Saturated contour loss (allows button saturation at extremes)
+        loss_saturated_contour = 0
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_saturated_contour = saturated_contour_loss(
+                note_tokens['pitch'],
+                e,
+                self.cfg['num_buttons']
+            )
+
+        # Pitch extreme anchoring loss (ties high pitches to high buttons, low to low)
+        loss_pitch_extreme_anchoring = 0
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_pitch_extreme_anchoring = pitch_extreme_anchoring_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Non-linear compression loss (more control in middle, less at extremes)
+        loss_nonlinear_compression = 0
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_nonlinear_compression = companded_warp_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Latent velocity loss (makes buttons control pitch direction like LSTM)
+        loss_latent_velocity = 0
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_latent_velocity = latent_velocity_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Drift regularization loss (rewards cumulative pitch motion in latent direction)
+        loss_drift = 0
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_drift = drift_regularization_loss(
+                note_tokens['pitch'],
+                e
+            )
+
+        # Combine losses with appropriate weights
+        loss_total = torch.zeros_like(loss_recons)
+        loss_total += loss_recons * self.cfg['loss_recons'] 
+        
+        loss_contour = 0
+        if self.cfg['loss_contour'] > 0:
+            loss_contour = self.cfg['loss_contour'] * (
+                self.cfg['loss_contour_perc'] * loss_contour_perc +
+                self.cfg['loss_multi_step_perc'] * loss_multi_step_perc +
+                self.cfg['loss_interval_perc'] * loss_interval_perc +
+                self.cfg['loss_shape_perc'] * loss_shape_perc
+            )
+            loss_total += loss_contour
+
+        if self.cfg['loss_margin'] > 0:
+            loss_total += self.cfg['loss_margin'] * loss_margin
+        
+        if self.cfg['loss_deviate'] > 0:
+            loss_total += self.cfg['loss_deviate'] * loss_deviate
+        
+        if self.cfg['loss_button_held'] > 0:
+            loss_total += self.cfg['loss_button_held'] * loss_button_held
+
+        # Add normalized position loss
+        if self.cfg['loss_norm_pos'] > 0:
+            loss_total += self.cfg['loss_norm_pos'] * loss_norm_pos
+
+        # Add pitch-button correlation loss
+        if self.cfg['loss_pitch_button'] > 0:
+            loss_total += self.cfg['loss_pitch_button'] * loss_pitch_button
+
+        # Add button concentration loss
+        if self.cfg['loss_button_concentration'] > 0:
+            loss_total += self.cfg['loss_button_concentration'] * loss_button_concentration
+
+        # Add windowed correlation loss (maximize corr -> minimize 1-corr)
+        if self.cfg['loss_window_corr'] > 0:
+            loss_total += self.cfg['loss_window_corr'] * loss_window_corr
+
+        # Add saturated contour loss
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_total += self.cfg['loss_saturated_contour'] * loss_saturated_contour
+
+        # Add pitch extreme anchoring loss
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_total += self.cfg['loss_pitch_extreme_anchoring'] * loss_pitch_extreme_anchoring
+
+        # Add non-linear compression loss
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_total += self.cfg['loss_nonlinear_compression'] * loss_nonlinear_compression
+
+        # Add latent velocity loss
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_total += self.cfg['loss_latent_velocity'] * loss_latent_velocity
+
+        # Add drift regularization loss
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_total += self.cfg['loss_drift'] * loss_drift
+
+        acc = self.compute_accuracy(logits, target)
+        
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+
+            'loss_margin': loss_margin,
+            'loss_deviate': loss_deviate,
+            'loss_button_held': loss_button_held,
+            'loss_norm_pos': loss_norm_pos,
+            'loss_pitch_button': loss_pitch_button,
+            'loss_button_concentration': loss_button_concentration,                        
+            'loss_window_corr': loss_window_corr,
+            'loss_saturated_contour': loss_saturated_contour,
+            'loss_pitch_extreme_anchoring': loss_pitch_extreme_anchoring,
+            'loss_nonlinear_compression': loss_nonlinear_compression,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
+            'loss_contour': loss_contour,
+
+            'loss_contour_perc': loss_contour_perc,
+            'loss_multi_step_perc': loss_multi_step_perc,
+            'loss_interval_perc': loss_interval_perc,
+            'loss_shape_perc': loss_shape_perc,
+        }
+        return loss, acc
+
+    @torch.inference_mode()
+    def gen_pitch_token(self, 
+            note_tokens: Dict[str, Tensor],
+            temperature = 1.0,
+            cache: Optional[LayerIntermediates] = None,
+            use_cache: bool = False
+            ):
+
+        device = note_tokens['pitch'].device
+        b = self._buttons_discrete_to_real(note_tokens['button'])
+
+        if cache is not None:
+            decoder_context = {
+                'pitch': note_tokens['pitch'][:, -2:-1],
+                'button': b[:, -1:]
+            }
+        else:
+            decoder_context = {
+                'pitch': note_tokens['pitch'][:, :-1],
+                'button': b[:, 1:]
+            } # (B, T)
+
+        logits, intermediates = self.decoder(
+                decoder_context,
+                return_intermediates = True,
+                cache = cache,
+                seq_start_pos = None
+        )
+
+        logits = logits[:, -1]  # [B, 1, vocab_size]
+
+        probs = F.softmax(logits / temperature, dim=-1)
+
+        next_token = torch.multinomial(probs, 1)
+            
+        next_token = next_token.item()
+        
+        if use_cache:
+            return next_token, intermediates
+        return next_token
+
+
 class Decoder_no_dtime_anticipation(Decoder_no_dtime):
     """
     Decoder with anticipation support for user-injected MIDI notes.

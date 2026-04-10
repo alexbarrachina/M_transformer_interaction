@@ -1843,11 +1843,11 @@ MODELS_PARAMETERS = {
     "batch_size": 16,
     "num_workers": 8,
     },
-'AE_dual_tester_v3': {
+'AE_dual_tester_v4': {
     'model_type': 'autoencoder_no_dtime_dual',
     'description': '0.0 dropout, concatenation instead of addition, variable decay rate' ,
     'train_log': '',
-    'ckpt_file_name': './save_models/AE_dual_tester_v3_90_eps_455_steps_1.6103_loss_0.7523_acc.pth',
+    'ckpt_file_name': './save_models/AE_dual_tester_v4_75_eps_380_steps_1.6323_loss_0.7606_acc.pth',
     'seq_len': 512,
     'pad_idx': 128,
     'emb_dim': 512,
@@ -1894,6 +1894,52 @@ MODELS_PARAMETERS = {
     "save_every": 15,
     "batch_size": 16,
     "num_workers": 10,
+    },
+'no_dtime_joker_tester_v1': {
+    'model_type': 'autoencoder_no_dtime_joker',
+    'description': 'full model, autoencoder, no encoder, no button loss, full dataset',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 15,
+    "batch_size": 16,
+    "num_workers": 10,
+    },
+'no_dtime_joker_v1': {
+    'model_type': 'autoencoder_no_dtime_joker',
+    'description': 'full model',
+    'train_log': '',
+    'ckpt_file_name': './save_models/no_dtime_joker_v1_40_eps_328_steps_1.303_loss_0.5605_acc.pth',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 8,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 16,
+    "num_workers": 8,
     },
 }
 

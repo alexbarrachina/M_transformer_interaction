@@ -22,6 +22,10 @@
 import time
 import torch
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from params import *
 from model_loader import load_model
 from models import get_model_hparams
@@ -46,7 +50,7 @@ model.eval()
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-sample_midi_path = './samples/clairTester_to_end_monophonic.midi'
+sample_midi_path = '../samples/clairTester_to_end_monophonic.midi'
 output_midi_name = './out/continuator_clairTester_to_end'
 input_arrows_midi_name = './out/continuator_clairTester_input_arrows'
 output_arrows_midi_name = './out/continuator_clairTester_output_arrows'

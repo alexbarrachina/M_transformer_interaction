@@ -18,6 +18,10 @@
 # limitations under the License.'''
 #===================================================================================================
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import time
 import torch
 
@@ -32,9 +36,9 @@ device = torch.device('mps')
 
 
 ''' MODEL '''
-model_name = 'AE_no_dtime_saturation_v1' # button saturation at extremes, more free pitch generation
-
-#model_name = 'contour+loss_norm_pos'
+#model_name = 'AE_no_dtime_saturation_v1' # button saturation at extremes, more free pitch generation
+#model_name = 'no_dtime_good_reference' # original Genie
+model_name = 'good_ref_88buttons'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -46,17 +50,16 @@ model.eval()
 ''' PARAMS '''
 # Get sample seed MIDI path
 #sample_midi_path = './seed_midis/Monster-Piano-Transformer-Piano-Seed-3.mid'
-sample_midi_path = './samples/test'
-output_midi_name = './out/test'
-output_butt_midi_name = './out/test_b'
-output_e_midi_name = './out/test_e'
+sample_midi_path = '../samples/test1'
+output_midi_name = './out/test1'
+output_butt_midi_name = './out/test1_b'
+
 CTX_LEN = 512 # num notes in context. 
 
-for j in range(1, 9):  # generate 10 continuation files
-
+if True:
   ''' BUILD CTX '''
   # Load seed MIDI
-  dict_input_tokens, num_notes = midi_to_dict(sample_midi_path+str(j)+'.midi') # tokens
+  dict_input_tokens, num_notes = midi_to_dict(sample_midi_path+'.midi') # tokens
 
   dict_output_tokens = dict_input_tokens.copy()
 
@@ -75,56 +78,17 @@ for j in range(1, 9):  # generate 10 continuation files
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     e = e.squeeze(0)
 
-  #timeStart = time.perf_counter()
-  # generate pitches
-  for i in range(0, num_notes-1-CTX_LEN):
-    
-    context = {
-      'dtime': torch.tensor(dict_input_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'pitch': torch.tensor(dict_input_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'dur': torch.tensor(dict_input_tokens['dur'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
-    }
-
-    context = to_device(context, device)
-  
-    with torch.inference_mode():
-        new_pitch_token = model.gen_pitch_token(context)
-    dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
-    print(new_pitch_token)
-
-  #timeEnd = time.perf_counter()
-  #print("t=", (timeEnd-timeStart) * 1000 / (TOTAL_GEN_LEN-CTX_LEN), "ms") # in miliseconds, mean time per note
-
-  context = {
-      'dtime': dict_output_tokens['dtime'][:num_notes],
-      'pitch': dict_output_tokens['pitch'][:num_notes],
-      'dur': dict_output_tokens['dur'][:num_notes],
-    }
-
-  # generate a midi file from generated pitches
-  song_d = dict_to_song(context)
-  detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name+str(j),
-                                                            timings_multiplier=2
-                                                            )
-
+ 
   # Convert buttons to values similar to pitch, just to represent the melodic contour
   b = torch.add(b, 60)
 
   context['pitch'] = b[:num_notes].tolist()
+  # Around line 81, ensure ALL fields are converted from tensors to Python types
+  context['dtime'] = context['dtime'].squeeze(0).tolist()
+  context['dur'] = context['dur'].squeeze(0).tolist()  
   song_d = dict_to_song(context)
 
-  detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_butt_midi_name+str(j),
+  detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_butt_midi_name,
                                                             timings_multiplier=2
                                                             )
-  re_int = e[:num_notes]
-  re_int = torch.add(re_int, 1) # shift to [0, 2]
-  re_int = torch.mul(re_int, 0.5) #  to [0, 1]
-  re_int = torch.mul(re_int, 12) #  to [0, 12]
-  re_int = torch.add(re_int, 60)
-  context['pitch'] = re_int.int().tolist()
-  # generate a midi file from buttons
-  song_d = dict_to_song(context)
-  detailed_stats = ms_SONG_to_MIDI_Converter(song_d,output_file_name = output_e_midi_name+str(j),  
-                                                              timings_multiplier=2
-                                                            )
+ 

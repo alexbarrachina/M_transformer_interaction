@@ -44,7 +44,7 @@ from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
 
-TRACES = False
+TRACES = True
 USE_CACHE = False
 CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 
@@ -55,7 +55,7 @@ else:
     device = torch.device('cuda')
 
 ''' MODEL '''
-model_name = 'AE_dual_tester_v3'
+model_name = 'AE_dual_tester_v4'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -391,7 +391,7 @@ try:
                     print("saving performance")
                     save_performance()
                     sys.exit(0)                              
-                elif event.key == 1073742051 or event.key == K_a: # Reset
+                elif event.key == 8 or event.key == K_a: # Reset
                     if TRACES:
                         print("resetting context")
                     reset_context(dict_input_tokens2)
