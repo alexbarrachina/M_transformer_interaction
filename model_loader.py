@@ -422,6 +422,13 @@ def load_model(model_name='default',
                 attn_flash = True
             ),
         )
+    elif cfg['model_type'] == 'ae_buttons_p_residual':
+        # Residual harmony steering: build base model architecture, then wrap.
+        # Base weights come from the residual checkpoint (state_dict includes base_model.*).
+        base_model_name = cfg['base_model_name']
+        base_cfg = get_model_hparams(base_model_name)
+        base_model = load_model(model_name=base_model_name, cfg=base_cfg, set_only=True)
+        mpt_model = AE_buttons_p_residual(base_model=base_model, cfg=cfg)
     if set_only == False:
         model_path = cfg['ckpt_file_name']
 

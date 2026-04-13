@@ -22,7 +22,6 @@
 
 
 import os
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
@@ -249,11 +248,11 @@ def main():
     #==========================================================================
 
 
-    NSTEPS_INIT = 0
+    NSTEPS_INIT = 568
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'decoder_no_conditioning'
-    model_name = 'Dec_no_conditioning_v1'
+    project_name = 'buttons&jokers'
+    model_name = 'no_dtime_joker_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)

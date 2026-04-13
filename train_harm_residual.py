@@ -1,0 +1,401 @@
+#===================================================================================================
+# Monster Genie train_harm_residual.py Python module
+# Training the residual harmony steering GRU on top of a frozen base autoencoder.
+# The base model (AutoregressiveAutoencoder_no_dtime) is loaded from a checkpoint and frozen.
+# Only the GRU + embedding + projection parameters are trained.
+# Pickle format: flat [dtime, dur, pitch, vel, chan] with harmony movements as [0, 0, move_type, 0, 3]
+# 
+# Copyright 2025 Alex Barrachina
+#
+# Based on Project Los Angeles / Tegridy Code 2025
+# https://github.com/asigalov61/monsterpianotransformer
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.'''
+#===================================================================================================
+
+
+import os
+
+import torch.multiprocessing as mp
+mp.set_start_method('spawn', force=True)
+
+import time
+import tqdm
+
+os.environ['USE_FLASH_ATTENTION'] = '1'
+
+from random import randint, random
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+
+from midiUtils import Any_Pickle_File_Reader
+from model_loader import load_model
+from models import get_model_hparams
+from params import *
+from x_transformer import *
+
+#==========================================================================
+
+class MusicSamplerDataset(Dataset):
+    """
+    Dataset for dual-conditioned model (melodic shape buttons + harmony movements).
+    
+    Reads flat pickle format: [dtime, dur, pitch, vel, chan] (5 tokens per event).
+    Harmony movement events: [0, 0, movement_type, 0, 3] (chan=3).
+    Note events have chan in {0, 10, ...}.
+    
+    For each note, builds:
+    - harm_regime: forward-filled movement type from the most recent harmony event
+    - harm_strength: linear decay from that event's position (1.0 at onset -> 0.0 at next onset)
+    """
+    def __init__(self, data, seq_len, is_eval=False, cfg=None):
+        super().__init__()
+
+        self.data = data
+        self.seq_len = seq_len
+        self.tokens_per_note = 5  # dtime, dur, pitch, vel, chan
+        self.cfg = cfg if cfg is not None else {}
+
+        # To sample, we need enough tokens to extract seq_len notes after filtering
+        # Oversample by 2x to account for harmony events mixed in
+        self.seq_tot_tokens = self.seq_len * self.tokens_per_note * 2
+
+    def __len__(self):
+        # return int(self.data.size(0) / self.seq_tot_tokens)  #  self.seq_len if you want exact training time per epoch
+        return int(self.data.size(0) / (self.seq_len * self.tokens_per_note + self.tokens_per_note))
+
+    def __getitem__(self, index): # TODO concatenates all data, end of files with begining of files
+        seq_tot_tokens = self.seq_tot_tokens
+        # Pick a random starting position aligned to 5-token boundaries
+        max_start = (self.data.size(0) - seq_tot_tokens) // self.tokens_per_note
+        if max_start <= 0:
+            max_start = 1
+        rand = randint(0, max_start) * self.tokens_per_note
+
+        x = self.data[rand: rand + seq_tot_tokens]
+
+        # Reshape to (num_events, 5): [dtime, dur, pitch, vel, chan]
+        # Harmony events follow the same layout: [0, 0, movement_type, 0, 3]
+        num_events = len(x) // self.tokens_per_note
+        if num_events == 0:
+            return self._create_dummy_sample()
+        events = x[:num_events * self.tokens_per_note].view(num_events, self.tokens_per_note).long()
+
+        # --- Vectorized harmony regime + strength computation (no for loops) ---
+        is_harmony = (events[:, 4] == HARMONY_CHANNEL)
+        is_note = ~is_harmony
+        note_indices = torch.where(is_note)[0]
+
+        if len(note_indices) == 0:
+            return self._create_dummy_sample()
+
+        target_len = self.seq_len + 1
+
+        # Forward-fill movement type via cumsum grouping over all events
+        harm_cumsum = torch.cumsum(is_harmony.long(), dim=0)  # group id per event (0 = before any harmonyunguided, 1 = after first harmony event, etc.)
+        harm_event_indices = torch.where(is_harmony)[0]
+        num_harm = harm_event_indices.shape[0]
+
+        # Lookup table: group_id -> movement_type (group 0 = before any harmony = unguided)
+        move_lookup = torch.zeros(num_harm + 1, dtype=torch.long)
+        if num_harm > 0:
+            move_lookup[1:] = torch.clamp(events[harm_event_indices, 2] - 60, min=0, max=7) # MIDI note numbers are 0-127, but we want to map to 0-7 for the movement types
+
+        # Project to note-space
+        harm_group_notes = harm_cumsum[note_indices]
+        harm_regime_notes = move_lookup[harm_group_notes]
+
+        # Position within each group (in note-space) via diff on group boundaries
+        group_changes = torch.cat([
+            torch.tensor([True]),
+            harm_group_notes[1:] != harm_group_notes[:-1]
+        ])
+        group_start_indices = torch.where(group_changes)[0]
+        note_arange = torch.arange(len(harm_group_notes))
+        group_of_note = torch.searchsorted(group_start_indices, note_arange, side='right') - 1
+        position_in_group = note_arange - group_start_indices[group_of_note]
+
+        # Span lengths per group, broadcast to each note
+        span_lengths = torch.diff(group_start_indices, append=torch.tensor([len(harm_group_notes)]))
+        span_length_per_note = span_lengths[group_of_note]
+
+        # Linear decay from 1.0 at onset to 0.0 at next onset
+        harm_strength_notes = 1.0 - position_in_group.float() / span_length_per_note.float()
+
+        # Zero out unguided notes (group 0 = before any harmony event)
+        unguided = (harm_group_notes == 0)
+        harm_strength_notes = harm_strength_notes.masked_fill(unguided, 0.0)
+
+        # --- Filter to note events and truncate to target_len ---
+        note_events = events[note_indices]
+        if len(note_events) < target_len:
+            num_repeats = (target_len // len(note_events)) + 1
+            note_events = note_events.repeat(num_repeats, 1)[:target_len]
+            harm_regime_notes = harm_regime_notes.repeat(num_repeats)[:target_len]
+            harm_strength_notes = harm_strength_notes.repeat(num_repeats)[:target_len]
+        else:
+            note_events = note_events[:target_len]
+            harm_regime_notes = harm_regime_notes[:target_len]
+            harm_strength_notes = harm_strength_notes[:target_len]
+
+        pitches = note_events[:, 2]
+        dtimes = note_events[:, 0]
+        durs = note_events[:, 1]
+        harm_regime = harm_regime_notes
+        harm_strength = harm_strength_notes
+
+        # Data augmentation
+        # Time stretching
+        stretch_factor = random() * self.cfg['data_augment_time_stretch_max'] * 2
+        stretch_factor += 1 - self.cfg['data_augment_time_stretch_max']
+        dtimes = (dtimes.float() * stretch_factor).long()
+        dtimes = torch.clamp(dtimes, min=0, max=RANGE_DTIME_SHIFT)
+  
+        stretch_factor = random() * self.cfg['data_augment_time_stretch_max'] * 2
+        stretch_factor += 1 - self.cfg['data_augment_time_stretch_max']
+        durs = (durs.float() * stretch_factor).long()
+        durs = torch.clamp(durs, min=0, max=RANGE_DUR_SHIFT)
+
+        # Chord micro-alterations
+        # Convert to absolute times for easier chord detection
+        abs_times = torch.cumsum(dtimes, dim=0)
+              
+        # Find chord groups
+        chord_groups = []
+        current_chord = [0]  # Start with first note
+        
+        for i in range(1, len(abs_times)):
+            if abs_times[i] - abs_times[i-1] <= self.cfg['data_augment_chord_threshold']:
+                current_chord.append(i)
+            else:
+                if len(current_chord) > 1: # Only process if it's actually a chord
+                    chord_groups.append(current_chord)
+                current_chord = [i]
+        
+        if len(current_chord) > 1:
+            chord_groups.append(current_chord)
+        
+        # Apply micro-alterations to chord notes
+        for chord in chord_groups:
+            shifts = torch.randint(-1, 2, (len(chord),))  # Random shifts of -1, 0, or 1
+            abs_times[chord] = abs_times[chord] + shifts
+        
+        # Re-sort the sequence based on new absolute times
+        sorted_indices = torch.argsort(abs_times)
+        abs_times = abs_times[sorted_indices]
+        durs = durs[sorted_indices]
+        pitches = pitches[sorted_indices]
+        harm_regime = harm_regime[sorted_indices]
+        harm_strength = harm_strength[sorted_indices]
+        
+        # Convert back to delta times
+        dtimes = torch.cat([abs_times[0:1], abs_times[1:] - abs_times[:-1]])
+        dtimes = torch.clamp(dtimes, min=0, max=RANGE_DTIME_SHIFT)
+
+        # Transposition
+        transposition_factor = randint(
+            -self.cfg['data_augment_transpose_max'], self.cfg['data_augment_transpose_max']
+        )
+        # Apply transposition and ensure pitches stay within valid range (0-127)
+        # TODO: Clamp isn't a good idea as we alter the interval relationships. But we hope transposing +-6 we don't clamp
+        pitches = torch.clamp(pitches + transposition_factor, min=0, max=VOCAB_SIZE_PITCH-1)
+
+        feature_data = {
+            #'dtime': dtime,
+            #'dur': dur,
+            #'channel': channel,
+            'pitch': pitches,
+            'harm_regime': harm_regime,
+            'harm_strength': harm_strength,
+        }
+        return feature_data
+    
+    def _create_dummy_sample(self) -> dict:
+        target_len = self.seq_len + 1
+        print("********** Creating dummy sample **********")
+        return {
+            #'dtime': torch.full((target_len,), 1, dtype=torch.long),
+            #'dur': torch.full((target_len,), 1, dtype=torch.long),
+            # 'channel': torch.zeros(target_len, dtype=torch.long),
+            'pitch': torch.full((target_len,), 60, dtype=torch.long),
+            'harm_regime': torch.zeros(target_len, dtype=torch.long),
+            'harm_strength': torch.zeros(target_len, dtype=torch.float),
+        }
+
+
+def main():
+    # Set up CUDA settings
+    torch.set_float32_matmul_precision('high')
+    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_cudnn_sdp(False)
+
+    #==========================================================================
+
+    ''' DEVICE '''
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device_type='cuda' if torch.cuda.is_available() else 'cpu'
+
+    #==========================================================================
+
+    ''' MODEL & HYPERPARAMETERS '''
+    project_name = 'monsterGenie_harm_residual'
+    model_name = 'AE_residual_v1'
+    cfg = get_model_hparams(model_name)
+
+    # ---- Load frozen base model from its pretrained checkpoint ----
+    base_model_name = cfg['base_model_name']
+    base_cfg = get_model_hparams(base_model_name)
+    base_model = load_model(model_name=base_model_name, cfg=base_cfg, set_only=False)
+
+    # ---- Wrap in residual steering module ----
+    model = AE_buttons_p_residual(base_model=base_model, cfg=cfg)
+    model.to(device)
+
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Trainable parameters: {trainable_params:,} / {total_params:,} "
+          f"({100*trainable_params/total_params:.2f}%)")
+
+    #==========================================================================
+
+    ''' WANDB '''
+    if(cfg['use_logs']):
+        import wandb
+        wandb.login()
+        wandb.init(project=project_name, name=model_name, config=cfg)
+
+
+    #==========================================================================
+
+    ''' DATA '''
+
+    """ LOAD TRAINING DATA """
+
+    # Loading dataset from a pickle in ./Training-Data
+    train_data = Any_Pickle_File_Reader(cfg['dataset_train_path'])   
+    data_train = torch.Tensor(train_data)
+    eval_data = Any_Pickle_File_Reader(cfg['dataset_val_path'])   
+    data_eval = torch.Tensor(eval_data)
+
+    # Dataloader
+    train_dataset = MusicSamplerDataset(data_train, cfg['seq_len'], cfg=cfg)  # train in chunks of SEQ_LEN
+    print(f"BATCH_SIZE: {cfg['batch_size']}")
+    print(f"Dataset size: {len(train_dataset)}")
+    train_loader  = DataLoader(train_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=True)
+    print(f"Number of batches: {len(train_loader)}")
+    val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True, cfg=cfg)
+    val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False)
+
+    # Right after val_loader is created and before model definition, add a reusable iterator for streaming validation
+    val_iter = iter(val_loader)  # will be cycled through inside training loop
+
+    #==========================================================================
+
+    ''' PRECISION/OPTIMIZER/SCALER '''
+
+    dtype = torch.bfloat16
+
+    # Only optimize the residual GRU parameters (base model is frozen)
+    optim = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=cfg['learning_rate'],
+    )
+
+    scaler = torch.amp.GradScaler(device_type)
+
+    ''' TRAINING '''
+
+    nsteps = 0
+
+    for ep in range(cfg['epochs']):
+        print('Epoch #', ep)
+        
+        model.train()
+        with tqdm.tqdm(total=len(train_loader)) as bar_train:
+            for i, batch in enumerate(train_loader):            
+                optim.zero_grad()
+
+                # move to device
+                x = {
+                    'pitch': batch['pitch'].to(device),
+                    'harm_regime': batch['harm_regime'].to(device),
+                    'harm_strength': batch['harm_strength'].to(device),
+                }
+
+                with torch.amp.autocast(device_type=device_type, dtype=dtype):
+                    loss, acc = model(x)
+                scaler.scale(loss['loss_total']).backward()
+                
+                if (i % cfg['print_stats_every'] == 0) or TESTING:
+                    if( cfg['use_logs']):                
+                        wandb.log({
+                            "loss_total": loss['loss_total'].item(),
+                            "loss_recons": loss['loss_recons'].item(),
+                            "train_acc": acc.item(),
+                        }, step=nsteps)
+                        
+                        nsteps += 1
+
+
+                scaler.unscale_(optim)
+                torch.nn.utils.clip_grad_norm_(
+                    filter(lambda p: p.requires_grad, model.parameters()),
+                    cfg['grad_clip'],
+                )
+                scaler.step(optim)
+                scaler.update()
+
+
+                bar_train.set_description(f'Epoch: {ep} Loss: {float(loss["loss_total"]):.4}')
+                bar_train.update(1)
+
+                if (i % cfg['validate_every'] == 0) or TESTING:
+                    try:
+                        val_batch = next(val_iter)
+                    except StopIteration:
+                        val_iter = iter(val_loader)
+                        val_batch = next(val_iter)
+                    model.eval()
+                    with torch.no_grad():
+                        with torch.amp.autocast(device_type=device_type, dtype=dtype):
+                            vx = {
+                                'pitch': val_batch['pitch'].to(device),
+                                'harm_regime': val_batch['harm_regime'].to(device),
+                                'harm_strength': val_batch['harm_strength'].to(device),
+                            }
+                            val_loss, val_acc = model(vx)
+
+                        if(cfg['use_logs']):                
+                            wandb.log({
+                                "val_loss": val_loss['loss_total'].item(),
+                                "val_acc": val_acc.item(),
+                            }, step=nsteps)
+                    model.train()
+                    del val_batch, vx
+                    torch.cuda.empty_cache()
+
+        
+        if ep % cfg['save_every'] == 0:
+            fname = ('./save_models/' + cfg['model_name'] + '_' + str(ep) + '_eps_'
+                     + str(nsteps) + '_steps_'
+                     + str(round(float(loss['loss_total'].item()), 4)) + '_loss_'
+                     + str(round(float(acc.item()), 4)) + '_acc.pth')
+            torch.save(model.state_dict(), fname)
+
+
+if __name__ == '__main__':
+    mp.freeze_support()
+    main()

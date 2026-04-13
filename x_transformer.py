@@ -12070,3 +12070,268 @@ class AutoregressiveAutoencoder_no_dtime_style(Module):
         num_right = (out == labels).sum().float()
         acc = num_right / len(labels) if len(labels) > 0 else torch.tensor(0.0)
         return acc
+
+
+class AE_buttons_p_residual(Module):
+    """
+    Residual harmony steering on top of a frozen base autoencoder.
+
+    The base model (AutoregressiveAutoencoder_no_dtime) is fully frozen and produces
+    base_logits from pitch + buttons.  A small GRU reads the last *harm_ctx_len*
+    tokens of (harm_regime_emb * harm_strength, base_hidden) and outputs a logit
+    correction.  The final logits are:
+
+        final_logits = base_logits + correction * harm_strength
+
+    When harm_strength == 0 (no harmony guidance), correction is zeroed out and the
+    output equals the unmodified base model.  Only the GRU + projection parameters
+    are trained; the base model is never updated.
+    """
+
+    def __init__(
+        self,
+        base_model: Module,
+        cfg: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__()
+        self.cfg = cfg if cfg is not None else {}
+        self.ignore_index = PAD_IDX
+
+        # ---- frozen base model ----
+        self.base_model = base_model
+        for p in self.base_model.parameters():
+            p.requires_grad = False
+        self.base_model.eval()
+
+        self.max_seq_len = base_model.max_seq_len
+        base_dim: int = base_model.decoder.emb_dim
+
+        # ---- harmony GRU steering module ----
+        num_movements: int = self.cfg.get('num_harmony_movements', 8)
+        harm_dim: int = self.cfg.get('harm_emb_dim', 64)
+        gru_hidden: int = self.cfg.get('harm_gru_hidden', 128)
+        self.harm_ctx_len: int = self.cfg.get('harm_ctx_len', 32)
+        self.harmony_span_dropout: float = self.cfg.get('harmony_span_dropout', 0.6)
+
+        self.harm_regime_emb = nn.Embedding(num_movements, harm_dim)
+        self.harm_gru = nn.GRU(
+            input_size=harm_dim + base_dim,
+            hidden_size=gru_hidden,
+            num_layers=1,
+            batch_first=True,
+        )
+        self.harm_proj = nn.Linear(gru_hidden, VOCAB_SIZE_PITCH)
+
+        nn.init.kaiming_normal_(self.harm_regime_emb.weight)
+        nn.init.zeros_(self.harm_proj.bias)
+        nn.init.zeros_(self.harm_proj.weight)
+
+    # -------------------------------------------------------------- #
+    #  Base model helpers                                              #
+    # -------------------------------------------------------------- #
+
+    def _run_base_decoder(
+        self,
+        pitch: Tensor,
+        button: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Run the frozen base decoder and return (base_logits, hidden_state).
+        Both are detached so no gradient flows through the base model."""
+        dec = self.base_model.decoder
+        p = dec.pitch_emb(pitch)
+        b = button.float().unsqueeze(-1)
+        x = dec.input_proj(torch.cat([p, b], dim=-1))
+        x = dec.emb_dropout(x)
+        x, _ = dec.attn_layers(x, return_hiddens=True)
+        logits = dec.to_logits(x)
+        return logits.detach(), x.detach()
+
+    # -------------------------------------------------------------- #
+    #  Harmony GRU                                                     #
+    # -------------------------------------------------------------- #
+
+    def _harmony_correction(
+        self,
+        harm_regime: Tensor,
+        harm_strength: Tensor,
+        base_hidden: Tensor,
+    ) -> Tensor:
+        """Compute logit correction from the harmony GRU.
+
+        Args:
+            harm_regime:  [B, T] long   -- movement type per position
+            harm_strength:[B, T] float  -- linear decay strength
+            base_hidden:  [B, T, dim]   -- detached hidden state from base decoder
+
+        Returns:
+            correction:   [B, T, VOCAB_SIZE_PITCH]
+        """
+        B, T, _ = base_hidden.shape
+
+        h_emb = self.harm_regime_emb(harm_regime)                    # [B, T, harm_dim]
+        h_emb = h_emb * harm_strength.unsqueeze(-1)                 # scale by strength
+
+        # Crop to last harm_ctx_len tokens (GRU sees a short window)
+        ctx = min(self.harm_ctx_len, T)
+        h_emb = h_emb[:, -ctx:]                                     # [B, ctx, harm_dim]
+        bh = base_hidden[:, -ctx:]                                   # [B, ctx, dim]
+
+        gru_in = torch.cat([h_emb, bh], dim=-1)                     # [B, ctx, harm_dim+dim]
+        gru_out, _ = self.harm_gru(gru_in)                          # [B, ctx, gru_hidden]
+
+        correction = self.harm_proj(gru_out)                         # [B, ctx, VOCAB]
+
+        # Pad to full sequence length (positions before the window get zero correction)
+        if ctx < T:
+            pad = torch.zeros(B, T - ctx, correction.shape[-1],
+                              device=correction.device, dtype=correction.dtype)
+            correction = torch.cat([pad, correction], dim=1)         # [B, T, VOCAB]
+
+        return correction
+
+    # -------------------------------------------------------------- #
+    #  Masking (reuse the same span-dropout logic)                     #
+    # -------------------------------------------------------------- #
+
+    def _mask_harmony_spans(
+        self,
+        harm_regime: Tensor,
+        harm_strength: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Drop entire harmony spans during training."""
+        B, T = harm_strength.shape
+        strength_out = harm_strength.clone()
+
+        onsets = (harm_strength > 0.95)
+        if not onsets.any():
+            return harm_regime, strength_out
+
+        harm_group = torch.cumsum(onsets.long(), dim=1)
+        num_groups = int(harm_group.max().item()) + 1
+
+        onset_b, onset_t = torch.where(onsets)
+        onset_groups = harm_group[onset_b, onset_t]
+        drop_decisions = (torch.rand(onset_b.shape[0], device=harm_strength.device)
+                          < self.harmony_span_dropout)
+
+        group_dropped = torch.zeros(B, num_groups, dtype=torch.bool,
+                                    device=harm_strength.device)
+        group_dropped[onset_b, onset_groups] = drop_decisions
+        span_dropped = group_dropped.gather(1, harm_group)
+
+        strength_out = strength_out.masked_fill(span_dropped, 0.0)
+        return harm_regime, strength_out
+
+    # -------------------------------------------------------------- #
+    #  Training forward                                                #
+    # -------------------------------------------------------------- #
+
+    def forward(
+        self,
+        note_tokens: Dict[str, Tensor],
+    ) -> Tuple[Dict[str, Tensor], Tensor]:
+        """
+        Training forward pass.
+
+        note_tokens keys:
+            - 'pitch':         LongTensor  [B, T+1]
+            - 'harm_regime':   LongTensor  [B, T+1]
+            - 'harm_strength': FloatTensor [B, T+1]
+        """
+        # ---- encoder: pitch -> buttons (frozen) ----
+        with torch.no_grad():
+            encoder_ctx = {'pitch': note_tokens['pitch'][:, 1:]}
+            e = self.base_model.encoder(encoder_ctx)
+            b = self.base_model.quantizer(e)
+
+        # ---- harmony masking ----
+        harm_regime = note_tokens['harm_regime'][:, 1:]
+        harm_strength = note_tokens['harm_strength'][:, 1:]
+
+        if self.training:
+            harm_regime, harm_strength = self._mask_harmony_spans(
+                harm_regime, harm_strength
+            )
+
+        # ---- base decoder (frozen, detached) ----
+        pitch_hist = note_tokens['pitch'][:, :-1]
+        base_logits, base_hidden = self._run_base_decoder(pitch_hist, b)
+
+        # ---- harmony correction (trainable) ----
+        correction = self._harmony_correction(
+            harm_regime, harm_strength, base_hidden
+        )
+
+        # Scale correction by strength: unguided positions -> zero correction
+        final_logits = base_logits + correction * harm_strength.unsqueeze(-1)
+
+        # ---- loss ----
+        target = note_tokens['pitch'][:, 1:]
+        loss_recons = F.cross_entropy(
+            rearrange(final_logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index,
+        )
+
+        acc = self.compute_accuracy(final_logits, target)
+
+        loss = {'loss_total': loss_recons, 'loss_recons': loss_recons}
+        return loss, acc
+
+    # -------------------------------------------------------------- #
+    #  Inference                                                       #
+    # -------------------------------------------------------------- #
+
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self,
+        note_tokens: Dict[str, Tensor],
+        temperature: float = 1.0,
+    ) -> int:
+        """
+        Generate next pitch token.
+
+        note_tokens keys:
+            - 'pitch':         [B=1, T+1]
+            - 'button':        [B=1, T+1]  discrete button values
+            - 'harm_regime':   [B=1, T+1]
+            - 'harm_strength': [B=1, T+1]
+        """
+        b_real = self.base_model.quantizer.discrete_to_real(note_tokens['button'])
+
+        pitch_hist = note_tokens['pitch'][:, :-1]
+        button_hist = b_real[:, 1:]
+        harm_regime = note_tokens['harm_regime'][:, 1:]
+        harm_strength = note_tokens['harm_strength'][:, 1:]
+
+        base_logits, base_hidden = self._run_base_decoder(pitch_hist, button_hist)
+
+        correction = self._harmony_correction(
+            harm_regime, harm_strength, base_hidden
+        )
+
+        final_logits = base_logits + correction * harm_strength.unsqueeze(-1)
+        logits_last = final_logits[:, -1]
+
+        probs = F.softmax(logits_last / temperature, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+        return next_token.item()
+
+    @torch.inference_mode()
+    def real_to_discrete(self, x: Tensor, eps: float = 1e-6) -> Tensor:
+        return self.base_model.quantizer.real_to_discrete(x, eps)
+
+    @torch.inference_mode()
+    def gen_buttons(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        e = self.base_model.encoder(note_tokens)
+        b = self.real_to_discrete(e)
+        return b
+
+    def compute_accuracy(self, logits: Tensor, labels: Tensor) -> Tensor:
+        out = torch.argmax(logits, dim=-1).flatten()
+        labels = labels.flatten()
+        mask = (labels != self.ignore_index)
+        out = out[mask]
+        labels = labels[mask]
+        num_right = (out == labels).sum().float()
+        return num_right / len(labels) if len(labels) > 0 else torch.tensor(0.0)
