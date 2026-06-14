@@ -248,11 +248,11 @@ def main():
     #==========================================================================
 
 
-    NSTEPS_INIT = 568
+    NSTEPS_INIT = 252
 
     ''' MODEL & HYPERPARAMETERS '''
     project_name = 'buttons&jokers'
-    model_name = 'no_dtime_joker_v1'
+    model_name = 'no_dtime_joker_18buttons_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)

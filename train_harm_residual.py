@@ -1,9 +1,9 @@
 #===================================================================================================
 # Monster Genie train_harm_residual.py Python module
-# Training the residual harmony steering GRU on top of a frozen base autoencoder.
+# Training the chord-conditioned residual adapter on top of a frozen base autoencoder.
 # The base model (AutoregressiveAutoencoder_no_dtime) is loaded from a checkpoint and frozen.
-# Only the GRU + embedding + projection parameters are trained.
-# Pickle format: flat [dtime, dur, pitch, vel, chan] with harmony movements as [0, 0, move_type, 0, 3]
+# Only the chord encoder + adapter MLP parameters are trained.
+# Pickle format: flat [dtime, dur, pitch, vel, chan] with chord events as [0, dur, pitch, vel, 4]
 # 
 # Copyright 2025 Alex Barrachina
 #
@@ -29,8 +29,9 @@ import os
 import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
 
-import time
 import tqdm
+import glob
+import re
 
 os.environ['USE_FLASH_ATTENTION'] = '1'
 
@@ -45,19 +46,114 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
+NSTEPS_INIT = 256
+RESUME = True
+
+#==========================================================================
+
+def find_latest_checkpoint(checkpoint_dir: str = './save_models') -> tuple[str, int, int]:
+    """
+    Find the latest checkpoint in the save_models directory.
+    
+    Returns:
+        tuple: (checkpoint_path, epoch, steps) or (None, 0, 0) if no checkpoint found
+    """
+    if not os.path.exists(checkpoint_dir):
+        print(f"Checkpoint directory {checkpoint_dir} does not exist.")
+        return None, 0, 0
+    
+    # Pattern to match checkpoint files: MODEL_NAME_epoch_eps_steps_steps_loss_loss_acc_acc.pth
+    pattern = os.path.join(checkpoint_dir, "*.pth")
+    checkpoint_files = glob.glob(pattern)
+    
+    if not checkpoint_files:
+        print(f"No checkpoint files found in {checkpoint_dir}")
+        return None, 0, 0
+    
+    # Extract epoch and steps from filename
+    latest_checkpoint = None
+    max_steps = -1
+    max_epoch = -1
+    
+    for checkpoint_file in checkpoint_files:
+        filename = os.path.basename(checkpoint_file)
+        # Parse filename: MODEL_NAME_epoch_eps_steps_steps_loss_loss_acc_acc.pth
+        match = re.search(r'(\d+)_eps_(\d+)_steps', filename)
+        if match:
+            epoch = int(match.group(1))
+            steps = int(match.group(2))
+            
+            # Choose checkpoint with highest steps (most recent)
+            if steps > max_steps or (steps == max_steps and epoch > max_epoch):
+                max_steps = steps
+                max_epoch = epoch
+                latest_checkpoint = checkpoint_file
+    
+    if latest_checkpoint:
+        print(f"Found latest checkpoint: {latest_checkpoint}")
+        print(f"Resuming from epoch {max_epoch}, step {max_steps}")
+        return latest_checkpoint, max_epoch, max_steps
+    else:
+        print("No valid checkpoint files found")
+        return None, 0, 0
+
+def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer, 
+                   checkpoint_path: str, device: torch.device) -> tuple[int, int]:
+    """
+    Load model and optimizer state from checkpoint.
+    
+    Returns:
+        tuple: (start_epoch, start_steps)
+    """
+    print(f"Loading checkpoint from {checkpoint_path}")
+    
+    # Load the state dict
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # If checkpoint is just the model state dict (as saved in original code)
+    if isinstance(checkpoint, dict) and 'model_state_dict' not in checkpoint:
+        # This is just the model state dict
+        model.load_state_dict(checkpoint)
+        print("Loaded model state dict from checkpoint")
+        
+        # Extract epoch and steps from filename
+        filename = os.path.basename(checkpoint_path)
+        match = re.search(r'(\d+)_eps_(\d+)_steps', filename)
+        if match:
+            start_epoch = int(match.group(1))
+            start_steps = int(match.group(2))
+        else:
+            start_epoch = 0
+            start_steps = 0
+            
+    else:
+        # This is a full checkpoint with model, optimizer, etc.
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0)
+        start_steps = checkpoint.get('steps', 0)
+        print("Loaded full checkpoint with model and optimizer state")
+    
+    return start_epoch, start_steps
+
+
 #==========================================================================
 
 class MusicSamplerDataset(Dataset):
     """
-    Dataset for dual-conditioned model (melodic shape buttons + harmony movements).
+    Dataset for chord-conditioned residual adapter training.
     
     Reads flat pickle format: [dtime, dur, pitch, vel, chan] (5 tokens per event).
-    Harmony movement events: [0, 0, movement_type, 0, 3] (chan=3).
+    Chord events: [0, dur, pitch, vel, 4] (chan=CHORDS_CHANNEL).
+    Chord-off markers: [0, 0, 0, 0, 4] (vel=0 distinguishes from real chords).
     Note events have chan in {0, 10, ...}.
     
     For each note, builds:
-    - harm_regime: forward-filled movement type from the most recent harmony event
-    - harm_strength: linear decay from that event's position (1.0 at onset -> 0.0 at next onset)
+    - chord_pcs: 12-dim pitch-class multi-hot of the currently active chord
+    - bass_pc:   bass pitch class (lowest note of the active chord, 0-11)
+    
+    A chord is active from its onset until its notes expire (chord-off marker).
+    After chord-off, notes get zero multi-hot until the next chord appears.
     """
     def __init__(self, data, seq_len, is_eval=False, cfg=None):
         super().__init__()
@@ -67,15 +163,13 @@ class MusicSamplerDataset(Dataset):
         self.tokens_per_note = 5  # dtime, dur, pitch, vel, chan
         self.cfg = cfg if cfg is not None else {}
 
-        # To sample, we need enough tokens to extract seq_len notes after filtering
-        # Oversample by 2x to account for harmony events mixed in
+        # Oversample by 2x to account for chord/harmony events mixed in
         self.seq_tot_tokens = self.seq_len * self.tokens_per_note * 2
 
     def __len__(self):
-        # return int(self.data.size(0) / self.seq_tot_tokens)  #  self.seq_len if you want exact training time per epoch
         return int(self.data.size(0) / (self.seq_len * self.tokens_per_note + self.tokens_per_note))
 
-    def __getitem__(self, index): # TODO concatenates all data, end of files with begining of files
+    def __getitem__(self, index):
         seq_tot_tokens = self.seq_tot_tokens
         # Pick a random starting position aligned to 5-token boundaries
         max_start = (self.data.size(0) - seq_tot_tokens) // self.tokens_per_note
@@ -86,74 +180,86 @@ class MusicSamplerDataset(Dataset):
         x = self.data[rand: rand + seq_tot_tokens]
 
         # Reshape to (num_events, 5): [dtime, dur, pitch, vel, chan]
-        # Harmony events follow the same layout: [0, 0, movement_type, 0, 3]
         num_events = len(x) // self.tokens_per_note
         if num_events == 0:
-            return self._create_dummy_sample()
+            # print("********** No events found, retrying **********")
+            return self.__getitem__(randint(0, len(self) - 1))
         events = x[:num_events * self.tokens_per_note].view(num_events, self.tokens_per_note).long()
 
-        # --- Vectorized harmony regime + strength computation (no for loops) ---
-        is_harmony = (events[:, 4] == HARMONY_CHANNEL)
-        is_note = ~is_harmony
+        # --- Identify event types ---
+        is_chord = (events[:, 4] == CHORDS_CHANNEL)
+        is_note = (events[:, 4] != CHORDS_CHANNEL) & (events[:, 4] != HARMONY_CHANNEL)
         note_indices = torch.where(is_note)[0]
 
         if len(note_indices) == 0:
-            return self._create_dummy_sample()
+            print("********** note indices is empty, retrying **********")
+            return self.__getitem__(randint(0, len(self) - 1))
 
         target_len = self.seq_len + 1
 
-        # Forward-fill movement type via cumsum grouping over all events
-        harm_cumsum = torch.cumsum(is_harmony.long(), dim=0)  # group id per event (0 = before any harmonyunguided, 1 = after first harmony event, etc.)
-        harm_event_indices = torch.where(is_harmony)[0]
-        num_harm = harm_event_indices.shape[0]
+        # --- Build chord multi-hot table per chord group ---
+        # A new chord group starts when is_chord transitions from False→True
+        prev_is_chord = torch.cat([torch.tensor([False]), is_chord[:-1]])
+        chord_group_starts = is_chord & ~prev_is_chord
+        # Cumulative group IDs: 0 = before any chord, 1 = first chord group, etc.
+        chord_group_ids = torch.cumsum(chord_group_starts.long(), dim=0)
 
-        # Lookup table: group_id -> movement_type (group 0 = before any harmony = unguided)
-        move_lookup = torch.zeros(num_harm + 1, dtype=torch.long)
-        if num_harm > 0:
-            move_lookup[1:] = torch.clamp(events[harm_event_indices, 2] - 60, min=0, max=7) # MIDI note numbers are 0-127, but we want to map to 0-7 for the movement types
+        # Only real chord notes (vel > 0) contribute to multi-hot.
+        # Chord-off markers [0,0,0,0,4] have vel=0 and form their own group
+        # whose multi-hot stays all-zero (= no active chord).
+        real_chord_mask = is_chord & (events[:, 3] > 0)
+        num_real_chord = real_chord_mask.sum().item()
+        num_groups = int(chord_group_ids.max().item()) + 1
 
-        # Project to note-space
-        harm_group_notes = harm_cumsum[note_indices]
-        harm_regime_notes = move_lookup[harm_group_notes]
+        # Build pitch-class multi-hot per group (group 0 = no chord = zeros)
+        chord_pcs_table = torch.zeros(num_groups, 12)
+        # Build bass (minimum pitch) per group
+        bass_min_pitch = torch.full((num_groups,), 127, dtype=torch.long)
 
-        # Position within each group (in note-space) via diff on group boundaries
-        group_changes = torch.cat([
-            torch.tensor([True]),
-            harm_group_notes[1:] != harm_group_notes[:-1]
-        ])
-        group_start_indices = torch.where(group_changes)[0]
-        note_arange = torch.arange(len(harm_group_notes))
-        group_of_note = torch.searchsorted(group_start_indices, note_arange, side='right') - 1
-        position_in_group = note_arange - group_start_indices[group_of_note]
+        if num_real_chord > 0:
+            chord_pitches = events[real_chord_mask, 2]                # raw pitches
+            chord_pcs_idx = (chord_pitches % 12).long()               # pitch classes
+            chord_grps = chord_group_ids[real_chord_mask].long()
 
-        # Span lengths per group, broadcast to each note
-        span_lengths = torch.diff(group_start_indices, append=torch.tensor([len(harm_group_notes)]))
-        span_length_per_note = span_lengths[group_of_note]
+            # Scatter-add one-hot pitch classes into per-group multi-hot
+            pcs_one_hot = torch.zeros(num_real_chord, 12)
+            pcs_one_hot.scatter_(1, chord_pcs_idx.unsqueeze(1), 1.0)
+            chord_pcs_table.scatter_add_(
+                0, chord_grps.unsqueeze(1).expand_as(pcs_one_hot), pcs_one_hot
+            )
+            chord_pcs_table = (chord_pcs_table > 0).float()          # clamp to binary
 
-        # Linear decay from 1.0 at onset to 0.0 at next onset
-        harm_strength_notes = 1.0 - position_in_group.float() / span_length_per_note.float()
+            # Bass: minimum pitch per group via scatter_reduce
+            bass_min_pitch.scatter_reduce_(
+                0, chord_grps, chord_pitches, reduce='amin', include_self=True
+            )
 
-        # Zero out unguided notes (group 0 = before any harmony event)
-        unguided = (harm_group_notes == 0)
-        harm_strength_notes = harm_strength_notes.masked_fill(unguided, 0.0)
+        # Groups with no real chord notes (group 0 or chord-off groups): zero multi-hot
+        no_chord_groups = (chord_pcs_table.sum(dim=1) == 0)
+        bass_pc_table = (bass_min_pitch % 12).long()
+        bass_pc_table[no_chord_groups] = 0
+
+        # --- Forward-fill chord group to note events ---
+        chord_group_per_event = chord_group_ids
+        chord_group_per_note = chord_group_per_event[note_indices].long()
+        chord_pcs_notes = chord_pcs_table[chord_group_per_note]       # [N_notes, 12]
+        bass_pc_notes = bass_pc_table[chord_group_per_note]           # [N_notes]
 
         # --- Filter to note events and truncate to target_len ---
         note_events = events[note_indices]
         if len(note_events) < target_len:
             num_repeats = (target_len // len(note_events)) + 1
             note_events = note_events.repeat(num_repeats, 1)[:target_len]
-            harm_regime_notes = harm_regime_notes.repeat(num_repeats)[:target_len]
-            harm_strength_notes = harm_strength_notes.repeat(num_repeats)[:target_len]
+            chord_pcs_notes = chord_pcs_notes.repeat(num_repeats, 1)[:target_len]
+            bass_pc_notes = bass_pc_notes.repeat(num_repeats)[:target_len]
         else:
             note_events = note_events[:target_len]
-            harm_regime_notes = harm_regime_notes[:target_len]
-            harm_strength_notes = harm_strength_notes[:target_len]
+            chord_pcs_notes = chord_pcs_notes[:target_len]
+            bass_pc_notes = bass_pc_notes[:target_len]
 
         pitches = note_events[:, 2]
         dtimes = note_events[:, 0]
         durs = note_events[:, 1]
-        harm_regime = harm_regime_notes
-        harm_strength = harm_strength_notes
 
         # Data augmentation
         # Time stretching
@@ -171,7 +277,7 @@ class MusicSamplerDataset(Dataset):
         # Convert to absolute times for easier chord detection
         abs_times = torch.cumsum(dtimes, dim=0)
               
-        # Find chord groups
+        # Find chord groups (simultaneous note groups)
         chord_groups = []
         current_chord = [0]  # Start with first note
         
@@ -196,42 +302,32 @@ class MusicSamplerDataset(Dataset):
         abs_times = abs_times[sorted_indices]
         durs = durs[sorted_indices]
         pitches = pitches[sorted_indices]
-        harm_regime = harm_regime[sorted_indices]
-        harm_strength = harm_strength[sorted_indices]
+        chord_pcs_notes = chord_pcs_notes[sorted_indices]
+        bass_pc_notes = bass_pc_notes[sorted_indices]
         
         # Convert back to delta times
         dtimes = torch.cat([abs_times[0:1], abs_times[1:] - abs_times[:-1]])
         dtimes = torch.clamp(dtimes, min=0, max=RANGE_DTIME_SHIFT)
 
-        # Transposition
+        # Transposition: shift note pitches AND rotate chord pitch classes
         transposition_factor = randint(
             -self.cfg['data_augment_transpose_max'], self.cfg['data_augment_transpose_max']
         )
-        # Apply transposition and ensure pitches stay within valid range (0-127)
         # TODO: Clamp isn't a good idea as we alter the interval relationships. But we hope transposing +-6 we don't clamp
         pitches = torch.clamp(pitches + transposition_factor, min=0, max=VOCAB_SIZE_PITCH-1)
 
+        # Rotate multi-hot by the transposition amount to keep chord aligned
+        if transposition_factor != 0:
+            shift = transposition_factor % 12
+            chord_pcs_notes = torch.roll(chord_pcs_notes, shifts=shift, dims=1)
+            bass_pc_notes = (bass_pc_notes + transposition_factor) % 12
+
         feature_data = {
-            #'dtime': dtime,
-            #'dur': dur,
-            #'channel': channel,
             'pitch': pitches,
-            'harm_regime': harm_regime,
-            'harm_strength': harm_strength,
+            'chord_pcs': chord_pcs_notes,   # [T+1, 12] float
+            'bass_pc': bass_pc_notes,        # [T+1] long
         }
         return feature_data
-    
-    def _create_dummy_sample(self) -> dict:
-        target_len = self.seq_len + 1
-        print("********** Creating dummy sample **********")
-        return {
-            #'dtime': torch.full((target_len,), 1, dtype=torch.long),
-            #'dur': torch.full((target_len,), 1, dtype=torch.long),
-            # 'channel': torch.zeros(target_len, dtype=torch.long),
-            'pitch': torch.full((target_len,), 60, dtype=torch.long),
-            'harm_regime': torch.zeros(target_len, dtype=torch.long),
-            'harm_strength': torch.zeros(target_len, dtype=torch.float),
-        }
 
 
 def main():
@@ -251,16 +347,17 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'monsterGenie_harm_residual'
+    project_name = 'monsterGenie_chord_residual'
     model_name = 'AE_residual_v1'
     cfg = get_model_hparams(model_name)
 
     # ---- Load frozen base model from its pretrained checkpoint ----
     base_model_name = cfg['base_model_name']
     base_cfg = get_model_hparams(base_model_name)
-    base_model = load_model(model_name=base_model_name, cfg=base_cfg, set_only=False)
+    base_model = load_model(model_name=base_model_name, cfg=base_cfg,
+                            set_only=False, compile_mode='none')
 
-    # ---- Wrap in residual steering module ----
+    # ---- Wrap in residual chord adapter ----
     model = AE_buttons_p_residual(base_model=base_model, cfg=cfg)
     model.to(device)
 
@@ -291,7 +388,7 @@ def main():
     data_eval = torch.Tensor(eval_data)
 
     # Dataloader
-    train_dataset = MusicSamplerDataset(data_train, cfg['seq_len'], cfg=cfg)  # train in chunks of SEQ_LEN
+    train_dataset = MusicSamplerDataset(data_train, cfg['seq_len'], cfg=cfg)
     print(f"BATCH_SIZE: {cfg['batch_size']}")
     print(f"Dataset size: {len(train_dataset)}")
     train_loader  = DataLoader(train_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=True)
@@ -299,8 +396,7 @@ def main():
     val_dataset = MusicSamplerDataset(data_eval, cfg['seq_len'], is_eval=True, cfg=cfg)
     val_loader  = DataLoader(val_dataset, batch_size = cfg['batch_size'], num_workers=cfg['num_workers'], shuffle=False)
 
-    # Right after val_loader is created and before model definition, add a reusable iterator for streaming validation
-    val_iter = iter(val_loader)  # will be cycled through inside training loop
+    val_iter = iter(val_loader)
 
     #==========================================================================
 
@@ -308,7 +404,7 @@ def main():
 
     dtype = torch.bfloat16
 
-    # Only optimize the residual GRU parameters (base model is frozen)
+    # Only optimize the chord adapter parameters (base model is frozen)
     optim = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=cfg['learning_rate'],
@@ -316,9 +412,23 @@ def main():
 
     scaler = torch.amp.GradScaler(device_type)
 
-    ''' TRAINING '''
-
+    ''' LOAD CHECKPOINT '''
     nsteps = 0
+
+    if RESUME:
+        checkpoint_path, start_epoch, start_steps = find_latest_checkpoint()
+    
+        if checkpoint_path:
+            start_epoch, start_steps = load_checkpoint(model, optim, checkpoint_path, device)
+            print(f"Resuming training from epoch {start_epoch}, step {start_steps}")
+            nsteps = NSTEPS_INIT
+        else:
+            start_epoch = 0
+            start_steps = 0
+            print("Starting training from scratch (no checkpoint found)")
+
+
+    ''' TRAINING '''
 
     for ep in range(cfg['epochs']):
         print('Epoch #', ep)
@@ -331,8 +441,8 @@ def main():
                 # move to device
                 x = {
                     'pitch': batch['pitch'].to(device),
-                    'harm_regime': batch['harm_regime'].to(device),
-                    'harm_strength': batch['harm_strength'].to(device),
+                    'chord_pcs': batch['chord_pcs'].to(device),
+                    'bass_pc': batch['bass_pc'].to(device),
                 }
 
                 with torch.amp.autocast(device_type=device_type, dtype=dtype):
@@ -373,8 +483,8 @@ def main():
                         with torch.amp.autocast(device_type=device_type, dtype=dtype):
                             vx = {
                                 'pitch': val_batch['pitch'].to(device),
-                                'harm_regime': val_batch['harm_regime'].to(device),
-                                'harm_strength': val_batch['harm_strength'].to(device),
+                                'chord_pcs': val_batch['chord_pcs'].to(device),
+                                'bass_pc': val_batch['bass_pc'].to(device),
                             }
                             val_loss, val_acc = model(vx)
 

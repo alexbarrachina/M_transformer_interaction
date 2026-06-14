@@ -393,9 +393,9 @@ def load_model(model_name='default',
             ),
 
         )
-    elif cfg['model_type'] == 'autoencoder_no_dtime_style':
+    elif cfg['model_type'] == 'AE_style':
         # Style-conditioned autoencoder (no harmony): buttons + cross-attention to style reference
-        mpt_model = AutoregressiveAutoencoder_no_dtime_style(
+        mpt_model = AE_style(
             cfg = cfg,
             decoder = Decoder_no_dtime_style(
                 max_seq_len = cfg['seq_len'],
@@ -416,18 +416,78 @@ def load_model(model_name='default',
             style_encoder = StyleEncoder(
                 max_seq_len = cfg.get('style_seq_len', 256),
                 dim = cfg['emb_dim'],
-                depth = cfg.get('style_encoder_depth', 2),
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
+    elif cfg['model_type'] == 'AE_antic_style':
+        # Style-conditioned autoencoder + anticipation: buttons + cross-attention to
+        # style reference + anticipated-pitch signal for user-injected notes
+        mpt_model = AE_antic_style(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_antic_style(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
+    elif cfg['model_type'] == 'AE_style_joker':
+        # Style-conditioned autoencoder (no harmony): buttons + cross-attention to style reference
+        mpt_model = AE_style_joker(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
                 heads = cfg['heads'],
                 rotary_pos_emb = True,
                 attn_flash = True
             ),
         )
     elif cfg['model_type'] == 'ae_buttons_p_residual':
-        # Residual harmony steering: build base model architecture, then wrap.
-        # Base weights come from the residual checkpoint (state_dict includes base_model.*).
+        # Residual chord adapter: load base model with pretrained weights (no compile
+        # to avoid _orig_mod. prefix mismatch), then wrap in residual adapter.
         base_model_name = cfg['base_model_name']
         base_cfg = get_model_hparams(base_model_name)
-        base_model = load_model(model_name=base_model_name, cfg=base_cfg, set_only=True)
+        base_model = load_model(model_name=base_model_name, cfg=base_cfg,
+                                set_only=False, compile_mode='none')
         mpt_model = AE_buttons_p_residual(base_model=base_model, cfg=cfg)
     if set_only == False:
         model_path = cfg['ckpt_file_name']

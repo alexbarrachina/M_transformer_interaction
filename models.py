@@ -346,7 +346,8 @@ MODELS_PARAMETERS = {
         'loss_margin': 0.1,
         'loss_contour': 0.1,
         'loss_deviate': 0.1,
-        'dataset': 'full'
+        'dataset': 'full',
+        'num_buttons': 12,
         },
     'no_dtime_19_buttons': {
         'model_type': 'autoencoder_no_dtime',
@@ -361,8 +362,25 @@ MODELS_PARAMETERS = {
         'loss_margin': 0.1,
         'loss_contour': 0.1,
         'loss_deviate': 0.1,
-        'dataset': 'full'
-        },    
+        'dataset': 'full',
+        'num_buttons': 19,
+        },   
+    'no_dtime_8_buttons': {
+        'model_type': 'autoencoder_no_dtime',
+        'description': 'full model, autoencoder, no encoder, no button loss, full dataset',
+        'train_log': '',
+        'ckpt_file_name': '',
+        'seq_len': 1024,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.1,
+        'dataset': 'full',
+        'num_buttons': 8,
+        },   
     'encoder_only_antic': {
         'model_type': 'encoder_only_antic',
         'description': 'encoder only, with an error in dtime embedding, full dataset, light model',
@@ -1541,7 +1559,7 @@ MODELS_PARAMETERS = {
         "dataset_train_path": "./Training-Data/giantmidi_full_accom_only_train.pickle",
         "dataset_val_path": "./Training-Data/giantmidi_full_accom_only_test.pickle",
         # Training settings
-        "save_every": 15, 
+        "save_every": 2, 
         "batch_size": 16,
         "num_workers": 8,
         "num_buttons": 18,
@@ -1570,6 +1588,7 @@ MODELS_PARAMETERS = {
         "num_workers": 10,
         "num_buttons": 18,
     },
+
    'AE_non_linear_compression_12but_tester_v1': {
         'model_type': 'autoencoder_no_dtime',
         'description': 'light model, autoencoder, 5-highest-button companded warp, 12 buttons',
@@ -1761,17 +1780,17 @@ MODELS_PARAMETERS = {
         "batch_size": 16,
         "num_workers": 8,
         },
-    'anticipation_5buttons_tester': {
+    'anticipation_tester_v1': {
         'model_type': 'autoencoder_anticipation',
         'description': 'Light tester for anticipation model.',
         'train_log': '',
-        'ckpt_file_name': '',
-        'seq_len': 512,
+        'ckpt_file_name': './save_models/anticipation_tester_v1_145_eps_2592_steps_0.8195_loss_0.8071_acc.pth',
+        'seq_len': 256,
         'pad_idx': 128,
         'emb_dim': 512,
         'num_layers': 4,
         'heads': 32,
-        'num_buttons': 5,
+        'num_buttons': 19,
         # Anticipation parameters
         'anticipation_delta': 4,
         'anticipation_rate': 0.15,
@@ -1791,6 +1810,38 @@ MODELS_PARAMETERS = {
         # Training settings
         "save_every": 5,
         "batch_size": 16,
+        "num_workers": 8,
+        },
+    'anticipation_v1': {
+        'model_type': 'autoencoder_anticipation',
+        'description': 'Light tester for anticipation model.',
+        'train_log': '',
+        'ckpt_file_name': './save_models/anticipation_v1_14_eps_496_steps_0.7573_loss_0.8945_acc.pth',
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 2048,
+        'num_layers': 4,
+        'heads': 32,
+        'num_buttons': 19,
+        # Anticipation parameters
+        'anticipation_delta': 4,
+        'anticipation_rate': 0.15,
+        'ar_prob': 0.5,
+        'random_prob': 0.25,
+        'anticipation_min_span': 5,
+        'anticipation_max_span': 20,
+        # Loss weights
+        'loss_recons': 1.0,
+        'loss_margin': 0.1,
+        'loss_contour': 0.1,
+        'loss_deviate': 0.2,
+        # Dataset
+        'dataset': 'full',
+        "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_test.pickle",
+        # Training settings
+        "save_every": 1,
+        "batch_size": 8,
         "num_workers": 8,
         },
     'good_ref_88buttons': {
@@ -1869,12 +1920,12 @@ MODELS_PARAMETERS = {
     "batch_size": 24,
     "num_workers": 10,
     },
-# Style-conditioned autoencoder (no harmony): buttons + cross-attention to style reference
+# Style-conditioned autoencoder: buttons + cross-attention to style reference
 'AE_style_tester': {
-    'model_type': 'autoencoder_no_dtime_style',
-    'description': 'Style-conditioned: buttons + cross-attention to a style reference MIDI sequence (no harmony)',
+    'model_type': 'AE_style',
+    'description': 'Style-conditioned: buttons + cross-attention to a style reference MIDI sequence',
     'train_log': '',
-    'ckpt_file_name': '',
+    'ckpt_file_name': './save_models/AE_style_tester_30_eps_434_steps_0.5793_loss_0.8586_acc.pth',
     'seq_len': 512,
     'style_seq_len': 256,
     'pad_idx': 128,
@@ -1882,18 +1933,126 @@ MODELS_PARAMETERS = {
     'num_layers': 4,
     'style_encoder_depth': 2,
     'heads': 32,
-    'num_buttons': 12,
+    'num_buttons': 19,
     # Loss weights
     'loss_margin': 0.1,
     'loss_contour': 0.1,
     'loss_deviate': 0.1,
     # Dataset paths
-    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_train",
-    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_test",
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
     # Training settings
-    "save_every": 15,
+    "save_every": 5,
     "batch_size": 16,
-    "num_workers": 10,
+    "num_workers": 0,
+    },
+'AE_style_tester_v2': {
+    'model_type': 'AE_style',
+    'description': 'more style context window',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 2,
+    'heads': 32,
+    'num_buttons': 19,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 16,
+    "num_workers": 0,
+    },
+# Style-conditioned autoencoder: buttons + cross-attention to style reference
+'AE_style_v1': {
+    'model_type': 'AE_style_joker',
+    'description': 'Style-conditioned: 19 buttons + joker button + cross-attention',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_v1_0_eps_1092_steps_0.773_loss_0.7658_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 16,
+    "num_workers": 2,
+    },
+'AE_style_v2': {
+    'model_type': 'AE_style',
+    'description': 'Style-conditioned: no joker, less seq_len, more style_seq_len, more deviate',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 256,
+    'style_seq_len': 512, 
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.2,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 8,
+    "num_workers": 0,
+    },
+'AE_antic_style_v1': {
+    'model_type': 'AE_antic_style',
+    'description': 'Style cross-attention + anticipation for user-injected notes (AE_style_v2 base).',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 256,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Anticipation parameters
+    'anticipation_delta': 4,
+    'anticipation_rate': 0.15,
+    'ar_prob': 0.5,
+    'random_prob': 0.25,
+    'anticipation_min_span': 5,
+    'anticipation_max_span': 20,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.2,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 8,
+    "num_workers": 0,
     },
 'no_dtime_joker_tester_v1': {
     'model_type': 'autoencoder_no_dtime_joker',
@@ -1941,12 +2100,61 @@ MODELS_PARAMETERS = {
     "batch_size": 16,
     "num_workers": 8,
     },
-# Residual harmony steering: frozen base + GRU logit correction
-'AE_residual_v1': {
-    'model_type': 'ae_buttons_p_residual',
-    'description': 'Residual GRU harmony steering on frozen base autoencoder',
+
+'no_dtime_joker_18buttons_v1': {
+    'model_type': 'autoencoder_no_dtime_joker',
+    'description': 'full model',
+    'train_log': '',
+    'ckpt_file_name': './save_models/no_dtime_joker_18buttons_v1_6_eps_280_steps_0.9987_loss_0.7017_acc.pth',
+    'seq_len': 1024,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 18,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_chann_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_chann_test",
+    # Training settings
+    "save_every": 2,
+    "batch_size": 16,
+    "num_workers": 6,
+    },
+
+'no_dtime_21buttons_v1': {
+    'model_type': 'autoencoder_no_dtime',
+    'description': 'full model, 21 buttons',
     'train_log': '',
     'ckpt_file_name': '',
+    'seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'heads': 32,
+    'num_buttons': 21,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 5,
+    "batch_size": 16,
+    "num_workers": 8,
+    },
+# Residual harmony steering: frozen base + GRU logit correction
+# Residual chord adapter: frozen base + MLP hidden-state correction
+'AE_residual_v1': {
+    'model_type': 'ae_buttons_p_residual',
+    'description': 'Chord-conditioned MLP residual adapter on frozen base autoencoder',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_residual_v1_105_eps_954_steps_1.397_loss_0.5571_acc.pth',
     'base_model_name': 'no_dtime_joker_v1',
     'seq_len': 512,
     'pad_idx': 128,
@@ -1954,22 +2162,24 @@ MODELS_PARAMETERS = {
     'num_layers': 4,
     'heads': 32,
     'num_buttons': 8,
-    'num_harmony_movements': 8,
-    'harm_emb_dim': 64,
-    'harm_gru_hidden': 128,
-    'harm_ctx_len': 32,
-    'harmony_span_dropout': 0.6,
+    # Chord adapter params
+    'chord_emb_dim': 256,
+    'use_bass': True,
+    'adapter_hidden': 1024,
+    'adapter_lambda': 5.0,
+    'logit_bias_scale': 1.0,
+    'chord_dropout': 0.,
     # Loss weights (only recons for residual training)
     'loss_margin': 0,
     'loss_contour': 0,
     'loss_deviate': 0,
     # Dataset paths
-    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_train",
-    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_test",
+    "dataset_train_path": "./Training-Data/giantmidi_full_w_chords_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_w_chords_test",
     # Training settings
-    "save_every": 5,
+    "save_every": 15,
     "batch_size": 16,
-    "num_workers": 8,
+    "num_workers": 10,
     },
 }
 

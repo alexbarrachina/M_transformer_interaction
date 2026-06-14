@@ -49,9 +49,8 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
-NSTEPS_INIT = 256
+NSTEPS_INIT = 567
 RESUME = True
-
 #==========================================================================
 
 def find_latest_checkpoint(checkpoint_dir: str = './save_models') -> tuple[str, int, int]:
@@ -138,9 +137,6 @@ def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
         print("Loaded full checkpoint with model and optimizer state")
     
     return start_epoch, start_steps
-
-
-#==========================================================================
 
 class StyleMusicSamplerDataset(Dataset):
     """
@@ -447,8 +443,8 @@ def main():
     #==========================================================================
 
     ''' MODEL & HYPERPARAMETERS '''
-    project_name = 'monsterGenie_style'
-    model_name = 'AE_style_v2'
+    project_name = 'monsterGenie_antic_style'
+    model_name = 'AE_antic_style_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)
     model.to(device)
@@ -523,8 +519,8 @@ def main():
             start_steps = 0
             print("Starting training from scratch (no checkpoint found)")
 
-
     ''' TRAINING '''
+
 
     for ep in range(cfg['epochs']):
         print('Epoch #', ep)

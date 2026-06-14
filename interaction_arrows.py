@@ -20,6 +20,7 @@
 
 
 import time
+import datetime
 import sys
 from tkinter import TRUE
 import fluidsynth
@@ -66,18 +67,25 @@ model.eval()
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-sample_midi_path = './seed_midis/test_mono3.midi'
-sample_midi_path = './samples/clairTester_to_end_monophonic.midi'
+#sample_midi_path = './seed_midis/test_mono3.midi'
+#sample_midi_path = './samples/clairTester_to_end_monophonic.midi'
+#sample_midi_path = './samples/Bach_Prelude_and_Fugue_in_C_major.mid'
+#sample_midi_path = './samples/clairTester_to_end.midi'
+sample_midi_path = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path2 = './samples/clara.mid'
+# Base path; save_performance appends _YYYYMMDD_HHMMSS before .mid
 output_midi_name = './out/interactive_performance'
 
-CTX_LEN = 512 # num notes in context. tokens = CTX_LENGTH * 3
-TOTAL_GEN_LEN = 2048 # num notes to generate
+CTX_LEN = 128 # num notes in context. tokens = CTX_LENGTH * 3
+# Audible primer preview: only the tail of the stored primer in visualizer.
+PRIMER_PLAYBACK_LAST_N = 40
+PRIMER_PLAYBACK_SPEED = 1
+TOTAL_GEN_LEN = 1024 # num notes to generate
 temperature = 0.0001 # sampling temperature
 
 '''VISUALIZER'''
-visualizer = Visualizer() 
-51
+visualizer = Visualizer(button_slots=cfg.get('num_buttons', 12))
+
 '''KEY MAPPING'''
 # Fine arrows (0-6): specific interval ranges
 # Coarse arrows (7-8): direction only (any down / any up)
@@ -122,24 +130,28 @@ def save_performance():
   global dict_input_tokens
   global i
 
-  # Use generated pitches with original dtime/dur for saving
+  if i <= 0:
+      print("nothing recorded to save")
+      return
+
+  end = CTX_LEN + i
+  # Only generated continuation (indices CTX_LEN .. CTX_LEN+i-1), not the seed primer.
   context = {
-      'dtime': dict_input_tokens['dtime'][:i+CTX_LEN+1],
-      'pitch': pitch_buffer[:i+CTX_LEN+1],
-      'dur': dict_input_tokens['dur'][:i+CTX_LEN+1],
+      'dtime': dict_input_tokens['dtime'][CTX_LEN:end],
+      'pitch': pitch_buffer[CTX_LEN:end],
+      'dur': dict_input_tokens['dur'][CTX_LEN:end],
     }
 
   if TRACES:
-    print("Saving performance with", i+CTX_LEN+1, "notes")
+    print("Saving performance with", i, "generated notes (no primer)")
 
-  # generate a midi file from generated pitches
   song_d = dict_to_song(context)
 
-  detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,
-                                                            timings_multiplier=2
+  stamped_path = output_midi_name + '_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+  detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name=stamped_path,
+                                                            timings_multiplier=1
                                                             )
-  if TRACES:
-    print("saved performance")
+  print("saved performance", stamped_path + '.mid')
 
 def reset_context(dict_input):
     global i
@@ -193,6 +205,14 @@ def reset_context(dict_input):
     new_arrows = model.pitch_to_arrow(current_pitch_tensor).squeeze(0).tolist()
     arrows = new_arrows # Update the global arrows list
     print("RESET_CONTEXT")
+    visualizer.primer(
+        pitch_buffer[:CTX_LEN + 1],
+        dict_input['dtime'][:CTX_LEN + 1],
+        arrows[:CTX_LEN + 1],
+        dict_input['dur'][:CTX_LEN + 1],
+    )
+    visualizer.play_primer(playNote, last_n=PRIMER_PLAYBACK_LAST_N,
+                           playback_speed=PRIMER_PLAYBACK_SPEED)
 
 ''' VARIABLES '''
 
@@ -224,9 +244,10 @@ context = to_device(context, device)
   
 # Visualizer needs lists and dtimes for time axis
 visualizer.primer(
-    pitch_buffer[:CTX_LEN+1], 
-    dict_input_tokens['dtime'][:CTX_LEN+1], 
-    original_arrows[:CTX_LEN+1]
+    pitch_buffer[:CTX_LEN + 1],
+    dict_input_tokens['dtime'][:CTX_LEN + 1],
+    original_arrows[:CTX_LEN + 1],
+    dict_input_tokens['dur'][:CTX_LEN + 1],
 )
 
 def manage_button_input(key, velocity): 
@@ -355,9 +376,15 @@ try:
     print("Starting interaction loop. Use QWERTY keys Z,X,C,A,S,D,F for arrows.")
     print("P to Save, 0 to Reset.")
 
+    startup_primer_done = False
     while True:
         time.sleep(0.0001)
-        
+
+        if not startup_primer_done:
+            visualizer.play_primer(playNote, last_n=PRIMER_PLAYBACK_LAST_N,
+                                   playback_speed=PRIMER_PLAYBACK_SPEED)
+            startup_primer_done = True
+
         # Handle Pygame events for QWERTY input
         for event in pygame.event.get():
             if event.type == QUIT:

@@ -35,7 +35,13 @@ from params import *
 # HARMONY MOVEMENT EVENTS (from MIDI channel 4, stored as channel 3 in pickle):
 #   Stored as [0, 0, movement_type, 0, 3] following the [dtime, dur, pitch, vel, chan] layout.
 #   Harmony events do NOT update pe, so subsequent notes compute dtime from the last playable note.
-#   Channel 5 (chord references) is discarded entirely.
+#
+# CHORD REFERENCE EVENTS (from MIDI channel 5, stored as channel 4 in pickle):
+#   Stored as [0, dur, pitch, vel, 4] following the normal layout but with dtime=0.
+#   Chord events do NOT update pe, so subsequent notes compute dtime from the last playable note.
+#   Multiple simultaneous chord notes form one chord group (consecutive chan=4 events).
+#   When all chord notes expire (abs_time >= onset + max_dur), a chord-off marker
+#   [0, 0, 0, 0, 4] (vel=0) is inserted so the dataset knows the chord is no longer active.
 
 # Process MIDIs
 
@@ -76,6 +82,7 @@ total_notes = 0
 channel_0_notes = 0
 channel_10_notes = 0
 channel_4_movements = 0
+channel_5_chords = 0
 
 ###########
 
@@ -130,21 +137,20 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           events_matrix.sort(key=lambda x: x[4], reverse=True) # pitch
           events_matrix.sort(key=lambda x: x[1]) # time
 
-          # Include channel 4 (harmony movements) in the event stream
-          # Channel 5 (chord references) is discarded entirely
+          # Include channel 4 (harmony movements) and channel 5 (chord references) in the event stream
           if useful_channels == MELODY_ONLY:
-            filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, HARMONY_CHANNEL)]
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, HARMONY_CHANNEL, CHORDS_CHANNEL)]
           elif useful_channels == ACCOMP_ONLY:
-            filtered_events_matrix = [e for e in events_matrix if e[3] in (ACCOMP_CHANNEL, HARMONY_CHANNEL)]
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (ACCOMP_CHANNEL, HARMONY_CHANNEL, CHORDS_CHANNEL)]
           elif useful_channels == MELODY_AND_ACCOMP:
-            filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, ACCOMP_CHANNEL, HARMONY_CHANNEL)]
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, ACCOMP_CHANNEL, HARMONY_CHANNEL, CHORDS_CHANNEL)]
           elif useful_channels == MELODY_AND_ACCOMP_NOT_HARMONY:
             filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, ACCOMP_CHANNEL)]
           else:
             filtered_events_matrix = events_matrix
 
           # Skip files with no playable notes
-          if not any(e[3] != HARMONY_CHANNEL for e in filtered_events_matrix):
+          if not any(e[3] not in (HARMONY_CHANNEL, CHORDS_CHANNEL) for e in filtered_events_matrix):
               continue
 
           # Quantize timings for all events
@@ -160,8 +166,12 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           target_data.extend([126, 126, 0, 0, 0])  # dtime, dur, pitch, vel, chan
 
           # pe tracks the last PLAYABLE note for dtime calculation
-          # Harmony events (channel 3) do NOT update pe
-          pe = next(e for e in filtered_events_matrix if e[3] != HARMONY_CHANNEL)
+          # Harmony events (channel 3) and chord events (channel 4) do NOT update pe
+          pe = next(e for e in filtered_events_matrix if e[3] not in (HARMONY_CHANNEL, CHORDS_CHANNEL))
+
+          # Track when the current chord expires (abs time, quantized)
+          chord_end_abs_time = -1
+
           for e in filtered_events_matrix:
 
               if e[3] == HARMONY_CHANNEL:
@@ -169,7 +179,25 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
                   movement_type = max(0, min(126, e[4]))
                   target_data.extend([0, 0, movement_type, 0, HARMONY_CHANNEL])
                   channel_4_movements += 1
+              elif e[3] == CHORDS_CHANNEL:
+                  # Chord reference: [0, dur, pitch, vel, chan=4], pe NOT updated
+                  dur = max(1, min(126, e[2]))
+                  ptc = max(1, min(126, e[4]))
+                  vel = max(1, min(126, e[5]))
+                  target_data.extend([0, dur, ptc, vel, CHORDS_CHANNEL])
+                  channel_5_chords += 1
+                  # Track chord expiry: onset + duration (whichever note lasts longest)
+                  this_end = e[1] + e[2]
+                  if this_end > chord_end_abs_time:
+                      chord_end_abs_time = this_end
               else:
+                  # Before writing the playable note, check if the chord has expired
+                  if chord_end_abs_time >= 0 and e[1] >= chord_end_abs_time:
+                      # Insert chord-off marker: [0, 0, 0, 0, CHORDS_CHANNEL]
+                      # vel=0 distinguishes it from real chord notes in the dataset
+                      target_data.extend([0, 0, 0, 0, CHORDS_CHANNEL])
+                      chord_end_abs_time = -1
+
                   # Playable note: compute dtime from last playable note
                   time = max(0, min(126, e[1]-pe[1]))
                   dur = max(1, min(126, e[2]))
@@ -223,8 +251,10 @@ if total_notes > 0:
     print(f'Channel 0 (melody) notes: {channel_0_notes} ({channel_0_pct:.2f}%)')
     print(f'Channel 10 (accompaniment) notes: {channel_10_notes} ({channel_10_pct:.2f}%)')
 print(f'Channel 4 harmony movement events inserted: {channel_4_movements}')
+print(f'Channel 5 chord reference events inserted: {channel_5_chords}')
 if total_notes > 0:
     print(f'Movement events per note ratio: {channel_4_movements / total_notes:.4f}')
+    print(f'Chord events per note ratio: {channel_5_chords / total_notes:.4f}')
 print('=' * 70)
 
 print('Done!')

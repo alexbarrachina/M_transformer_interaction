@@ -45,7 +45,6 @@ from visualizer import Visualizer
 TRACES = True
 AUTOMATIC_ARROWS = False # if True, use original midi file arrows for guidance
 USE_CACHE = False
-CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 
 K_ENYE = 241
 K_ACCENT = 180
@@ -337,7 +336,6 @@ i = 0 # num current tokens in context after CTX_LEN
 noteOn_dict = {}
 first_note = True
 kv_cache = None
-last_gen_time: float = 0.0
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -392,7 +390,6 @@ def manage_midi_button_input(user_value, velocity):
     global first_note
     global visualizer
     global kv_cache
-    global last_gen_time
     
     # Map MIDI note to button value (0-23)
     #button_value = midi_note_to_button(user_value)
@@ -403,9 +400,6 @@ def manage_midi_button_input(user_value, velocity):
     timeNew = time.perf_counter() * 1000 / 32  # in milliseconds /32 as in midi_to_dict()
     
     if velocity > 0:  # Note-on
-        now = time.perf_counter()
-        if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
-            kv_cache = None
         dtime = max(0, min(127, int(timeNew) - int(timeLast)))
         if first_note:
             dtime = 0
@@ -458,7 +452,6 @@ def manage_midi_button_input(user_value, velocity):
                 new_pitch_token, kv_cache = model.gen_pitch_token(context, temperature=temperature, cache=kv_cache, use_cache=True)
             else:
                 new_pitch_token = model.gen_pitch_token(context, temperature=temperature)
-        last_gen_time = time.perf_counter()
         
         if TRACES:
             print("new_pitch_token (MIDI)", new_pitch_token)
@@ -514,7 +507,6 @@ def manage_key_input(user_value, velocity, is_arrow_key):
   global KEY_MAPPING_ARROWS
   global KEY_MAPPING_BUTTONS
   global kv_cache
-  global last_gen_time
   
 
   # Get the value from the appropriate mapping
@@ -526,9 +518,6 @@ def manage_key_input(user_value, velocity, is_arrow_key):
   timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_dict()
 
   if velocity > 0: # noteOn
-    now = time.perf_counter()
-    if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
-        kv_cache = None
     # Update position token
     dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
     if first_note:
@@ -591,7 +580,6 @@ def manage_key_input(user_value, velocity, is_arrow_key):
             new_pitch_token, kv_cache = model.gen_pitch_token(context, temperature=temperature, cache=kv_cache, use_cache=True)
         else:
             new_pitch_token = model.gen_pitch_token(context, temperature=temperature)
-    last_gen_time = time.perf_counter()
     if TRACES:
         print("new_pitch_token", new_pitch_token)
 

@@ -30,7 +30,7 @@ from rtmidi.midiconstants import NOTE_ON, NOTE_OFF
 from rtmidi.midiutil import open_midiinput
 import rtmidi
 # pip install python-rtmidi
-from threading import Lock
+from threading import Lock, Event
 
 from sympy import false
 import torch
@@ -41,25 +41,32 @@ from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
 
-TRACES = False
-KEY_OFFSET = 0 
-NUM_BUTTONS = 8
+TRACES = True
 USE_CACHE = False
 CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 
-''' DEVICE '''
+''' DEVICE SPECIFIC PARAMETERS '''
 if torch.backends.mps.is_available():
+    # CASA
     device = torch.device('mps')
+    CTX_LEN = 128 # num notes in context. tokens = CTX_LENGTH * 3
+    TOTAL_GEN_LEN = 512 # num notes to generate
+    KEY_OFFSET = 48 # esmuc 34, casa 48 
 else:
+    # ESMUC
     device = torch.device('cuda')
+    CTX_LEN = 512 # num notes in context. tokens = CTX_LENGTH * 3
+    TOTAL_GEN_LEN = 1024 # num notes to generate
+    KEY_OFFSET = 34 # esmuc 34, casa 48 
 
 
 ''' MODEL '''
-#model_name = 'no_dtime_good_reference' # original Genie
+#model_name = 'no_dtime_good_reference' # 12 original Genie
 #model_name = 'no_dtime_button_concentration_tester_v3' # 12 buttons the button extremes pushes the pitch up/down
 #model_name = 'AE_non_linear_compression_12but_tester_v1' # 12 buttons non-linear compression: more control in middle, less at extremes
-#model_name = 'AE_non_linear_compression_tester_v1' # 18 buttons
-model_name = 'no_dtime_joker_v1' # 8 buttons
+model_name = 'AE_non_linear_compression_tester_v1' # 18 buttons
+#model_name = 'good_ref_5buttons_tester' # 5 buttons
+model_name = 'no_dtime_19_buttons'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -72,13 +79,19 @@ model.eval()
 sample_midi_path = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 output_midi_name = './out/interactive_performance'
 
-CTX_LEN = 128 # num notes in context. tokens = CTX_LENGTH * 3
-TOTAL_GEN_LEN = 512 # num notes to generate
+# Audible primer preview: only the tail of the context (model + visualizer still use full CTX_LEN).
+PRIMER_PLAYBACK_LAST_N = 40
+# >1.0 shortens wall-clock waits during play_primer (musical spacing unchanged in tokens).
+PRIMER_PLAYBACK_SPEED = 1
+
+NUM_BUTTONS = cfg['num_buttons']
 
 '''THREADING'''
 # Add these at the global scope after your imports
 buffer_lock = Lock()
 save_lock = Lock()
+# pygame/SDL must run on the main thread (macOS); MIDI callback is on another thread
+reset_requested = Event()
 
 '''VISUALIZER'''
 visualizer = Visualizer(button_slots=cfg['num_buttons'])
@@ -107,23 +120,19 @@ def midiin_callback(event, data=None):
             sys.exit(0)
 
         if message[1] == 17 and message[2] > 0: # Using PLAY button as a trigger to reset the context
-          with save_lock:
-            print("resetting context")
-            reset_context()
+          print("resetting context")
+          reset_requested.set()
 
 def key_to_button(key):
-    print("key_to__button()", key)
-    key = key - 48 + KEY_OFFSET # keyboard starts at C = 48
+    key = key - KEY_OFFSET # keyboard starts at C = 48
     button = key #% 20 # 12 white keys, 8 black keys
+
     toWhite = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11, 12, 12, 13, 14, 14, 15, 15, 16, 17, 17, 18, 18, 19, 19, 20, 21, 21, 22,22,23,23,24]
-    button = toWhite[button] # convert to white key index
-
-    if key in [21,22,23,24,25,26,27,28,29,30,31]: # 77,78,79 - 48
-        if TRACES:
-            print("joker button", key)
-        button = 8 # joker button
-
-        #print("k_2_b", button)
+    if key < 0 or key >= len(toWhite):
+        button = 0
+    else:
+        button = toWhite[button] # convert to white key index
+    button = max(0, min(cfg['num_buttons'] - 1, button))
     if TRACES:
         print("button", button)
     return button
@@ -160,20 +169,25 @@ def save_performance():
   global dict_output_tokens
   global i
 
+  if i <= 0:
+      print("nothing recorded to save")
+      return
+
+  # Only the generated continuation (indices CTX_LEN .. CTX_LEN+i-1), not the seed primer.
   context = {
-      'dtime': dict_output_tokens['dtime'][:i+CTX_LEN+1],
-      'pitch': dict_output_tokens['pitch'][:i+CTX_LEN+1],
-      'dur': dict_output_tokens['dur'][:i+CTX_LEN+1],
+      'dtime': dict_output_tokens['dtime'][CTX_LEN:CTX_LEN + i],
+      'pitch': dict_output_tokens['pitch'][CTX_LEN:CTX_LEN + i],
+      'dur': dict_output_tokens['dur'][CTX_LEN:CTX_LEN + i],
     }
 
   if TRACES:
-    print("dtime_save", dict_output_tokens['dtime'][i:i+CTX_LEN+1])
+    print("dtime_save", dict_output_tokens['dtime'][CTX_LEN:CTX_LEN + i])
 
   # generate a midi file from generated pitches
   song_d = dict_to_song(context)
 
   detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,
-                                                            timings_multiplier=2
+                                                            timings_multiplier=1
                                                             )
   print("saved performance")
 
@@ -182,13 +196,16 @@ def reset_context():
     global dict_output_tokens, dict_input_tokens
     global kv_cache
 
-    i = 0
-    kv_cache = None
-    # Reset and extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
-    for key in dict_input_tokens.keys():
-        extended_list = dict_input_tokens[key].copy()
-        extended_list.extend([0] * (TOTAL_GEN_LEN + CTX_LEN - len(extended_list)))
-        dict_output_tokens[key] = extended_list 
+    with buffer_lock:
+        i = 0
+        kv_cache = None
+        # Reset and extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
+        for key in dict_input_tokens.keys():
+            extended_list = dict_input_tokens[key].copy()
+            extended_list.extend([0] * (TOTAL_GEN_LEN + CTX_LEN - len(extended_list)))
+            dict_output_tokens[key] = extended_list
+        #visualizer.play_primer(playNote, last_n=PRIMER_PLAYBACK_LAST_N,
+        #                       playback_speed=PRIMER_PLAYBACK_SPEED)
 
 ''' VARIABLES '''
 context = None
@@ -227,7 +244,9 @@ with torch.inference_mode():
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     b = b.clone().detach().tolist()
 
-visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN ], b[:CTX_LEN])
+# Full CTX_LEN in the primer strip and in the model; audible tail runs after MIDI opens (main loop).
+visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
+                  b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
 
 def manageNote(note, velocity): 
   global context  # Access the global context
@@ -263,9 +282,10 @@ def manageNote(note, velocity):
 
     try:
         but = key_to_button(note)
-        b[i+CTX_LEN] = but
     except:
-        print("ERROR", b[i+CTX_LEN])
+        but = 0
+        print("ERROR key_to_button", note)
+    b[i+CTX_LEN] = but
     context = {
       'dtime': torch.tensor(dict_output_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
       'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
@@ -331,8 +351,17 @@ try:
 
     midiin.set_callback(midiin_callback)
 
+    startup_primer_done = False
     while True:
       time.sleep(0.0001)
+      if not startup_primer_done:
+          with buffer_lock:
+              visualizer.play_primer(playNote, last_n=PRIMER_PLAYBACK_LAST_N,
+                                     playback_speed=PRIMER_PLAYBACK_SPEED)
+          startup_primer_done = True
+      if reset_requested.is_set():
+          reset_requested.clear()
+          reset_context()
       #visualizer.get_note(60, 100)
       #visualizer.get_button(0, 100)
       visualizer.draw()
