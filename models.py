@@ -1794,15 +1794,47 @@ MODELS_PARAMETERS = {
         # Anticipation parameters
         'anticipation_delta': 4,
         'anticipation_rate': 0.15,
-        'ar_prob': 0.5,
-        'random_prob': 0.25,
+        'ar_prob': 0.5, # probability of using AR mode, no anticipation
+        'random_prob': 0.25, # probability of individual tokens being controls
         'anticipation_min_span': 5,
         'anticipation_max_span': 20,
         # Loss weights
         'loss_recons': 1.0,
         'loss_margin': 0.1,
-        'loss_contour': 0.1,
-        'loss_deviate': 0.1,
+        'loss_contour': 0.3,
+        'loss_deviate': 0.2,
+        # Dataset
+        'dataset': 'full',
+        "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
+        "dataset_val_path": "./Training-Data/giantmidi_full_test.pickle",
+        # Training settings
+        "save_every": 5,
+        "batch_size": 16,
+        "num_workers": 8,
+        },
+    'anticipation_tester_v2': {
+        'model_type': 'autoencoder_anticipation',
+        'description': 'Only span anticipation. delta=12, reinforce contour and deviate loss',
+        'train_log': '',
+        'ckpt_file_name': '',
+        'seq_len': 256,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'num_buttons': 19,
+        # Anticipation parameters
+        'anticipation_delta': 12,
+        'anticipation_rate': 0.15,
+        'ar_prob': 0.5,
+        'random_prob': 0.,
+        'anticipation_min_span': 5,
+        'anticipation_max_span': 50,
+        # Loss weights
+        'loss_recons': 1.0,
+        'loss_margin': 0.1,
+        'loss_contour': 0.3,
+        'loss_deviate': 0.2,
         # Dataset
         'dataset': 'full',
         "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
@@ -1834,7 +1866,7 @@ MODELS_PARAMETERS = {
         'loss_recons': 1.0,
         'loss_margin': 0.1,
         'loss_contour': 0.1,
-        'loss_deviate': 0.2,
+        'loss_deviate': 0.1,
         # Dataset
         'dataset': 'full',
         "dataset_train_path": "./Training-Data/giantmidi_full_train.pickle",
@@ -2026,7 +2058,7 @@ MODELS_PARAMETERS = {
     'model_type': 'AE_antic_style',
     'description': 'Style cross-attention + anticipation for user-injected notes (AE_style_v2 base).',
     'train_log': '',
-    'ckpt_file_name': '',
+    'ckpt_file_name': './save_models/AE_antic_style_v1_1_eps_2322_steps_0.8459_loss_0.7852_acc.pth',
     'seq_len': 256,
     'style_seq_len': 512,
     'pad_idx': 128,
@@ -2050,7 +2082,7 @@ MODELS_PARAMETERS = {
     "dataset_train_path": "./Training-Data/giantmidi_full_train",
     "dataset_val_path": "./Training-Data/giantmidi_full_test",
     # Training settings
-    "save_every": 5,
+    "save_every": 1,
     "batch_size": 8,
     "num_workers": 0,
     },

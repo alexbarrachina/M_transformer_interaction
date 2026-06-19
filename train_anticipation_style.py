@@ -30,7 +30,6 @@ import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 import torch.multiprocessing as mp
-mp.set_start_method('spawn', force=True)
 
 import tqdm
 import glob
@@ -49,7 +48,7 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
-NSTEPS_INIT = 567
+NSTEPS_INIT = 2268
 RESUME = True
 #==========================================================================
 
@@ -612,5 +611,6 @@ def main():
 
 
 if __name__ == '__main__':
+    mp.set_start_method('spawn', force=True)
     mp.freeze_support()
     main()

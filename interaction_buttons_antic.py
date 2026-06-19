@@ -77,7 +77,7 @@ else:
 
 ''' MODEL '''
 
-model_name = 'anticipation_v1' 
+model_name = 'anticipation_tester_v1' 
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)

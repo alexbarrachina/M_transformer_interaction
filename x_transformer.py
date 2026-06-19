@@ -3765,23 +3765,23 @@ class AutoregressiveAutoencoder_anticipation(AutoregressiveAutoencoder_no_dtime)
         but longer wait before the user can switch back to button mode.
 
     Larger delta improves transition quality but increases latency.
-    Recommended starting point: 2–4.
+    Recommended starting point: 2-4.
 
     ── Training augmentation strategies (matching the paper §3.2) ──
     Per batch element one of three strategies is selected at random:
-      0. No anticipation (pure AR) – so the model still works without controls.
-      1. Random anticipation – each position independently becomes a control.
-      2. Span anticipation  – a contiguous phrase becomes a control span
+      0. No anticipation (pure AR) - so the model still works without controls.
+      1. Random anticipation - each position independently becomes a control.
+      2. Span anticipation  - a contiguous phrase becomes a control span
          (simulates a user playing several consecutive notes).
 
     Config keys (all optional, sensible defaults provided):
-      anticipation_delta      – lookahead in note positions  (default 4)
-      anticipation_rate       – per-position control probability for random mode  (default 0.15)
-      ar_prob                 – probability of pure-AR strategy  (default 0.5)
-      random_prob             – probability of random-control strategy  (default 0.25)
-          (span_prob = 1 − ar_prob − random_prob)
-      anticipation_min_span   – minimum span length in positions  (default 5)
-      anticipation_max_span   – maximum span length in positions  (default 20)
+      anticipation_delta      - lookahead in note positions  (default 4)
+      anticipation_rate       - per-position control probability for random mode  (default 0.15)
+      ar_prob                 - probability of pure-AR strategy  (default 0.5)
+      random_prob             - probability of random-control strategy  (default 0.25)
+          (span_prob = 1 - ar_prob - random_prob)
+      anticipation_min_span   - minimum span length in positions  (default 5)
+      anticipation_max_span   - maximum span length in positions  (default 20)
     """
 
     MIN_DELTA: int = 4

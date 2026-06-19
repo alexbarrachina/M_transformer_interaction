@@ -18,6 +18,7 @@
 # limitations under the License.'''
 
 
+from operator import truediv
 import time
 import sys
 from tkinter.constants import FALSE
@@ -43,13 +44,10 @@ from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Con
 from visualizer import Visualizer
 
 TRACES = False
+TRACE_BUTTONS = True
 USE_CACHE = False
 CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 XINXE_INTERFACE = False
-
-# Joker detection: fast alternation of exactly 2 keys triggers joker mode
-JOKER_WINDOW_SIZE = 4       # minimum note-on events to detect the pattern
-JOKER_MAX_INTERVAL_MS = 200.0  # max ms between consecutive notes to count as "fast"
 
 TEMPERATURE = 1#0.0001
 
@@ -75,7 +73,7 @@ else:
 
 ''' MODEL '''
 
-model_name = 'AE_style_v1' 
+model_name = 'AE_antic_style_v1' 
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -89,8 +87,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 
-sample_midi_path_init = sample_midi_path1
-STYLE_IDX_INIT = 1
+sample_midi_path_init = sample_midi_path3
+STYLE_IDX_INIT = 3
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [
@@ -108,72 +106,6 @@ PRIMER_PLAYBACK_LAST_N = 40
 PRIMER_PLAYBACK_SPEED = 1
 
 NUM_BUTTONS = cfg['num_buttons']
-HIGHLIGHT_MOTIF_LEN = 30
-MOTIF_STYLE_KEY = '6'
-
-class JokerDetector:
-    """Detects fast repetitive alternation of exactly 2 keys and tracks
-    which specific keys are the current joker pair.
-
-    Only the 2 keys involved in the fast alternation become joker keys;
-    all other keys remain normal buttons. The joker pair stays active as
-    long as the performer keeps pressing those keys fast. Once the gap
-    exceeds max_interval_ms the pair is cleared. A new fast 2-key pattern
-    (possibly with different keys) establishes a new joker pair."""
-
-    def __init__(self, window_size: int = JOKER_WINDOW_SIZE,
-                 max_interval_ms: float = JOKER_MAX_INTERVAL_MS):
-        self.window_size: int = window_size
-        self.max_interval_ms: float = max_interval_ms
-        self.history: List[tuple] = []  # (key, timestamp_ms) sliding window
-        self.joker_keys: set = set()    # the 2 MIDI keys currently acting as joker (empty = no joker)
-        self.last_joker_time_ms: float = 0.0  # timestamp of last joker-key press
-
-    def update(self, key: int, timestamp_ms: float) -> bool:
-        """Register a note-on event. Returns True if THIS key is a joker key."""
-
-        # Expire joker pair if the performer stopped pressing them fast
-        if self.joker_keys and (timestamp_ms - self.last_joker_time_ms) > self.max_interval_ms:
-            self.joker_keys = set()
-
-        # If this key is already one of the active joker keys, keep it joker
-        if key in self.joker_keys:
-            self.last_joker_time_ms = timestamp_ms
-            self._push_history(key, timestamp_ms)
-            return True
-
-        # Not a current joker key — add to history for new-pattern detection
-        self._push_history(key, timestamp_ms)
-
-        # Check if the history now shows a new fast 2-key alternation
-        if self._detect_pattern():
-            self.joker_keys = set(h[0] for h in self.history)
-            self.last_joker_time_ms = timestamp_ms
-            return True  # this key is part of the newly detected pair
-
-        return False
-
-    def _push_history(self, key: int, timestamp_ms: float) -> None:
-        self.history.append((key, timestamp_ms))
-        if len(self.history) > self.window_size:
-            self.history.pop(0)
-
-    def _detect_pattern(self) -> bool:
-        if len(self.history) < self.window_size:
-            return False
-        # All consecutive intervals must be fast
-        for idx in range(1, len(self.history)):
-            if self.history[idx][1] - self.history[idx - 1][1] > self.max_interval_ms:
-                return False
-        # Exactly 2 distinct keys
-        keys = set(h[0] for h in self.history)
-        return len(keys) == 2
-
-    def reset(self) -> None:
-        self.history.clear()
-        self.joker_keys = set()
-        self.last_joker_time_ms = 0.0
-
 
 '''THREADING'''
 # Add these at the global scope after your imports
@@ -319,7 +251,6 @@ noteOn_dict = {} # note: (pitch, timeIn, button)
 first_note = True
 kv_cache = None
 last_gen_time: float = 0.0
-joker_detector = JokerDetector()
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -344,19 +275,14 @@ context = {
     }
 context = to_device(context, device)
 
+delta: int = int(cfg.get('anticipation_delta', 4))
 style_seq_len = int(cfg.get('style_seq_len', CTX_LEN))
-MOTIF_STYLE_IDX = len(style_prompt_midi_paths)
 
-def _encode_style_pitch_list(pitch_list: List[int], repeat_to_style_len: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+def _encode_style_pitch_list(pitch_list: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
     valid_len = min(len(pitch_list), style_seq_len)
     if valid_len <= 0:
         _spp = torch.full((1, style_seq_len), PAD_IDX, dtype=torch.long, device=device)
         _smask = torch.zeros((1, style_seq_len), dtype=torch.bool, device=device)
-    elif repeat_to_style_len:
-        _motif = torch.tensor(pitch_list[:valid_len], dtype=torch.long, device=device)
-        _repeat_count = (style_seq_len + valid_len - 1) // valid_len
-        _spp = _motif.repeat(_repeat_count)[:style_seq_len].unsqueeze(0)
-        _smask = torch.ones((1, style_seq_len), dtype=torch.bool, device=device)
     else:
         _pitch_list = pitch_list[:style_seq_len]
         if valid_len < style_seq_len:
@@ -380,46 +306,79 @@ for _spath in style_prompt_midi_paths:
     print(f"Style {len(style_contexts)} encoded: {_spath}")
 
 active_style_idx: int = STYLE_IDX_INIT - 1 # -1 because list is 0-indexed
-highlight_motif_pitch_tokens: List[int] = []
-motif_style_ready = False
-style_contexts.append(style_contexts[active_style_idx])
-style_context_masks_list.append(style_context_masks_list[active_style_idx])
 style_context = style_contexts[active_style_idx]
 style_context_mask = style_context_masks_list[active_style_idx]
 
-def capture_highlight_motif() -> None:
-    global highlight_motif_pitch_tokens
-    global motif_style_ready
-    global kv_cache
-
-    with buffer_lock:
-        end_idx = CTX_LEN + i
-        start_idx = max(CTX_LEN, end_idx - HIGHLIGHT_MOTIF_LEN)
-        _pitch_list = list(dict_output_tokens['pitch'][start_idx:end_idx])
-
-    if len(_pitch_list) <= 0:
-        print("No generated pitch tokens yet for highlight motif")
-        return
-
-    _sctx, _smask = _encode_style_pitch_list(_pitch_list, repeat_to_style_len=True)
-    with buffer_lock:
-        highlight_motif_pitch_tokens = _pitch_list
-        style_contexts[MOTIF_STYLE_IDX] = _sctx
-        style_context_masks_list[MOTIF_STYLE_IDX] = _smask
-        motif_style_ready = True
-        kv_cache = None
-    print(f"Highlight motif saved: {len(highlight_motif_pitch_tokens)} pitch tokens. Press {MOTIF_STYLE_KEY} to activate.")
-
 with torch.inference_mode():
-    #style_context = model.encode_style(style_prompt_pitch, style_context_mask)
     e = model.encoder(context) # encoder output (batch, seq_len)
     b = model.real_to_discrete(e).squeeze(0) # generate buttons (batch, seq_len)
     b = b.clone().detach().tolist()
     b.extend([0] * (TOTAL_GEN_LEN + CTX_LEN - len(b)))
 
+''' INJECTION MODE STATE '''
+injection_mode: bool = False   # True while SPACE is held
+need_gap: bool = False         # True after SPACE press, before first injection
+n_injected: int = 0            # total injected notes in current span
+i_before_injection: int = 0   # value of i when SPACE was pressed
+
 # Full CTX_LEN in the primer strip and in the model; audible tail runs after MIDI opens (main loop).
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
+
+def gen_anticipation_gap_style(
+    pitch_history: torch.Tensor,
+    button_history: torch.Tensor,
+    injected_pitch: int,
+    temperature: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    device: torch.device = pitch_history.device
+    held_button: torch.Tensor = button_history[:, -1:]
+    antic_pos: int = pitch_history.shape[1] - 1
+    cur_pitch: torch.Tensor = pitch_history.clone()
+    cur_button: torch.Tensor = button_history.clone()
+    gap_pitches_list: List[int] = []
+
+    for _ in range(delta):
+        cur_pitch = torch.cat(
+            [cur_pitch, torch.zeros(1, 1, dtype=torch.long, device=device)], dim=1
+        )
+        cur_button = torch.cat([cur_button, held_button], dim=1)
+
+        L: int = cur_pitch.shape[1]
+        antic_pitch_t: torch.Tensor = torch.zeros(1, L, dtype=torch.long, device=device)
+        antic_mask_t: torch.Tensor = torch.zeros(1, L, device=device)
+        antic_pitch_t[0, antic_pos] = injected_pitch
+        antic_mask_t[0, antic_pos] = 1.0
+        mode_t: torch.Tensor = torch.ones(1, dtype=torch.long, device=device)
+
+        gen_tokens = {
+            'pitch':       cur_pitch,
+            'button':      cur_button,
+            'antic_pitch': antic_pitch_t,
+            'antic_mask':  antic_mask_t,
+            'mode':        mode_t,
+        }
+
+        next_p: int = model.gen_pitch_token(
+            gen_tokens,
+            style_context=style_contexts[active_style_idx],
+            style_context_mask=style_context_masks_list[active_style_idx],
+            temperature=temperature
+        )
+        gap_pitches_list.append(next_p)
+        cur_pitch[0, -1] = next_p
+
+    cur_pitch = torch.cat(
+        [cur_pitch, torch.tensor([[injected_pitch]], dtype=torch.long, device=device)], dim=1
+    )
+    encoder_input = {'pitch': cur_pitch[:, 1:]}
+    all_buttons: torch.Tensor = model.gen_buttons(encoder_input)
+    gap_buttons: torch.Tensor = all_buttons[0, antic_pos:]
+
+    gap_pitches_tensor: torch.Tensor = torch.tensor(
+        gap_pitches_list, dtype=torch.long, device=device
+    )
+    return gap_pitches_tensor, gap_buttons
 
 def manageNote(note, velocity): 
   global context  # Access the global context
@@ -432,10 +391,14 @@ def manageNote(note, velocity):
   global visualizer
   global kv_cache
   global last_gen_time
+  global injection_mode, need_gap, n_injected
   global active_style_idx
   
   if TRACES:
     print("key", note)
+    print("injection_mode", injection_mode)
+    print("need_gap", need_gap)
+    print("n_injected", n_injected)
 
   timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_dict()
 
@@ -443,64 +406,83 @@ def manageNote(note, velocity):
     now = time.perf_counter()
     if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
         kv_cache = None
-    # Update position token
 
     dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
     if first_note:
         dtime = 0
         first_note = False
-
     timeLast = timeNew
-    dict_output_tokens['dtime'][i+CTX_LEN] = dtime
-    # MIDI note to button — joker detector overrides when fast 2-key alternation
-    timestamp_ms = time.perf_counter() * 1000
-    is_joker = joker_detector.update(note, timestamp_ms)
 
-    if is_joker:
-        but = model.joker_button_idx
-        if TRACES:
-            print("JOKER detected")
+    if injection_mode:
+      if need_gap:
+        # First injection: gen_anticipation_gap fills delta bridge pitches (Phase 1) and
+        # computes coherent buttons for gap + injected note (Phase 2).
+        # History length = CTX_LEN; internally grows to CTX_LEN+delta+1 (caveat 2 overrun accepted).
+        pitch_hist: torch.Tensor = torch.tensor(
+            dict_output_tokens['pitch'][i:i+CTX_LEN], dtype=torch.long
+        ).unsqueeze(0).to(device)
+        btn_hist: torch.Tensor = torch.tensor(
+            b[i:i+CTX_LEN], dtype=torch.long
+        ).unsqueeze(0).to(device)
+        gap_pitches, gap_buttons = gen_anticipation_gap_style(
+            pitch_hist, btn_hist, note, temperature=TEMPERATURE
+        )
+        # Write delta gap notes (dtime=0, not played)
+        for g_idx in range(delta):
+            dict_output_tokens['dtime'][i + CTX_LEN + g_idx] = 0
+            dict_output_tokens['pitch'][i + CTX_LEN + g_idx] = gap_pitches[g_idx].item()
+            b[i + CTX_LEN + g_idx] = gap_buttons[g_idx].item()
+        # Write injected note
+        dict_output_tokens['dtime'][i + CTX_LEN + delta] = dtime
+        dict_output_tokens['pitch'][i + CTX_LEN + delta] = note
+        b[i + CTX_LEN + delta] = gap_buttons[delta].item()
+        i += delta + 1
+        need_gap = False
+        n_injected = 1
+      else:
+        # Subsequent injection: write pitch + placeholder button.
+        # Full button recompute deferred to SPACE release (caveat 1).
+        dict_output_tokens['dtime'][i + CTX_LEN] = dtime
+        dict_output_tokens['pitch'][i + CTX_LEN] = note
+        b[i + CTX_LEN] = b[i + CTX_LEN - 1]  # placeholder: copy previous button
+        i += 1
+        n_injected += 1
+      playNote(note, velocity)
+      visualizer.get_note(note, velocity)
+      visualizer.get_button(0, velocity)
+      noteOn_dict[note] = (note, timeNew, 0)
+
     else:
-        try:
+      # Button mode: key → button → gen_pitch_token
+      dict_output_tokens['dtime'][i+CTX_LEN] = dtime
+      try:
             but = key_to_button(note)
-        except:
+      except:
             but = 0
             print("ERROR key_to_button", note)
-
-    b[i+CTX_LEN] = but
-    context = {
-      'dtime': torch.tensor(dict_output_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'dur': torch.tensor(dict_output_tokens['dur'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
-    }
-    context = to_device(context, device)
-    if TRACES:
+      b[i+CTX_LEN] = but
+      context = {
+        'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
+        'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
+      }
+      context = to_device(context, device)
+      if TRACES:
         print("ctx", i+CTX_LEN+1, "of", TOTAL_GEN_LEN+CTX_LEN)
-    with torch.inference_mode():
-        if USE_CACHE:
-            new_pitch_token, kv_cache = model.gen_pitch_token(
-                context,
-                style_context=style_contexts[active_style_idx],
-                style_context_mask=style_context_masks_list[active_style_idx],
-                cache=kv_cache
-            )
-        else:
-            new_pitch_token, _ = model.gen_pitch_token(
-                context,
-                style_context=style_contexts[active_style_idx],
-                style_context_mask=style_context_masks_list[active_style_idx]
-            , temperature=TEMPERATURE)
+      with torch.inference_mode():
+        new_pitch_token = model.gen_pitch_token(
+            context,
+            style_context=style_contexts[active_style_idx],
+            style_context_mask=style_context_masks_list[active_style_idx],
+            temperature=TEMPERATURE
+        )
         last_gen_time = time.perf_counter()
-    dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
-
-    playNote(new_pitch_token, velocity) 
-    visualizer.get_note(new_pitch_token, velocity)
-    visualizer.get_button(but, velocity)
-
-    # add (pitch, time, button) to dictionary using original MIDI note as key
-    noteOn_dict[note] = (new_pitch_token, timeNew, but)
-    i += 1
+      dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
+      playNote(new_pitch_token, velocity)
+      visualizer.get_note(new_pitch_token, velocity)
+      visualizer.get_button(but, velocity)
+      # add (pitch, time, button) to dictionary using original MIDI note as key
+      noteOn_dict[note] = (new_pitch_token, timeNew, but)
+      i += 1
 
   else: # noteOff
     # Use original MIDI note as key to find corresponding noteOn
@@ -516,15 +498,43 @@ def manageNote(note, velocity):
       #visualizer.update(noteOn_time)
 
 
-"""# KEYBOARD LISTENER — keys 1/2/3/4/5 switch MIDI style, space saves motif, 6 activates motif """
+"""# KEYBOARD LISTENER — SPACE toggles injection mode; keys 1/2/3/4/5 switch MIDI style, r=reset, s=save """
+def _recompute_buttons_for_injection() -> None:
+    """Recompute encoder buttons for ALL gap + injected positions at once (caveat 1).
+    Called once on SPACE release. Caller must hold buffer_lock.
+    Encoder input length = CTX_LEN+delta+n_injected-1; slight overrun vs seq_len is
+    accepted because USE_CACHE=False and rotary positions handle it (caveat 2)."""
+    global b
+    if n_injected == 0:
+        return
+    # Full pitch slice: pre-injection window (CTX_LEN) + gap (delta) + all injections
+    total_len: int = CTX_LEN + delta + n_injected
+    pitch_seq: torch.Tensor = torch.tensor(
+        dict_output_tokens['pitch'][i_before_injection : i_before_injection + total_len],
+        dtype=torch.long
+    ).unsqueeze(0).to(device)
+    # Training convention: encoder receives pitch[:, 1:]
+    enc_input = {'pitch': pitch_seq[:, 1:]}
+    with torch.inference_mode():
+        all_buttons: torch.Tensor = model.gen_buttons(enc_input)  # [1, total_len-1]
+    # Gap+injected buttons start at encoder index CTX_LEN-1 (= N-1 in gen_anticipation_gap)
+    new_buttons: torch.Tensor = all_buttons[0, CTX_LEN - 1:]  # [delta + n_injected]
+    write_start: int = i_before_injection + CTX_LEN
+    for idx in range(delta + n_injected):
+        b[write_start + idx] = new_buttons[idx].item()
+    if TRACES:
+        print(f"recomputed {delta + n_injected} buttons for injection span of {n_injected} notes")
+
 def _on_key_press(key: pkeyboard.Key) -> None:
-    global active_style_idx
-    global kv_cache
-    global style_context
-    global style_context_mask
-    global motif_style_ready
+    global injection_mode, need_gap, n_injected, i_before_injection
+    global active_style_idx, kv_cache, style_context, style_context_mask
     if key == pkeyboard.Key.space:
-        capture_highlight_motif()
+        with buffer_lock:
+            if not injection_mode:  # avoid re-triggering on key-repeat
+                injection_mode = True
+                need_gap = True
+                n_injected = 0
+                i_before_injection = i
         return
     try:
         c = key.char  # type: ignore[union-attr]
@@ -534,15 +544,6 @@ def _on_key_press(key: pkeyboard.Key) -> None:
             style_context_mask = style_context_masks_list[active_style_idx]
             kv_cache = None
             print(f"Style {c} active: {style_prompt_midi_paths[active_style_idx]}")
-        if c == MOTIF_STYLE_KEY:
-            if motif_style_ready:
-                active_style_idx = MOTIF_STYLE_IDX
-                style_context = style_contexts[active_style_idx]
-                style_context_mask = style_context_masks_list[active_style_idx]
-                kv_cache = None
-                print("Highlight motif active")
-            else:
-                print("No highlight motif saved yet. Press space first.")
         if c in ('r'):
             print("resetting context")
             reset_context()
@@ -552,7 +553,14 @@ def _on_key_press(key: pkeyboard.Key) -> None:
     except AttributeError:
         pass
 
-_key_listener = pkeyboard.Listener(on_press=_on_key_press)
+def _on_key_release(key: pkeyboard.Key) -> None:
+    global injection_mode
+    if key == pkeyboard.Key.space:
+        with buffer_lock:
+            injection_mode = False
+            _recompute_buttons_for_injection()
+
+_key_listener = pkeyboard.Listener(on_press=_on_key_press, on_release=_on_key_release)
 _key_listener.start()
 
 """# MIDI IN """

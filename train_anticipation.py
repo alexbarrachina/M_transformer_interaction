@@ -44,7 +44,7 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
-NSTEPS_INIT = 256
+NSTEPS_INIT = 1952
 RESUME = True
 
 #==========================================================================
@@ -252,7 +252,7 @@ def main():
 
     ''' MODEL & HYPERPARAMETERS '''
     project_name = 'anticipation'
-    model_name = 'anticipation_v1'
+    model_name = 'anticipation_tester_v2'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)  
     model.to(device)
