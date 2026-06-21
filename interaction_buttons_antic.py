@@ -77,7 +77,7 @@ else:
 
 ''' MODEL '''
 
-model_name = 'anticipation_tester_v1' 
+model_name = 'anticipation_tester_v2' 
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -91,8 +91,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 
-sample_midi_path_init = sample_midi_path3
-STYLE_IDX_INIT = 3
+sample_midi_path_init = sample_midi_path1
+STYLE_IDX_INIT = 1
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [

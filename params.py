@@ -169,3 +169,116 @@ MOVE_RESOLVE = 4 #64
 MOVE_EVADE = 5 #65
 MOVE_CHROMATIC = 6 #66
 MOVE_MODULATE = 7 #67
+MOVE_JOKER = 8        # "move now, model decides which" (not a stored MIDI pitch; used in training/inference)
+NUM_MOVEMENTS = 9     # 0..7 real movements + 8 = joker
+MOVE_PITCH_BASE = 60  # channel-3 movement notes encode move as pitch (60 + move)
+
+# ---------------------------------------------------------------------------
+#  HARMONY V3: compact chord-label + key conditioning (stage-1 pickle format)
+# ---------------------------------------------------------------------------
+# Rich harmony info (root, chord quality, harmonic function, local key) is
+# stored as SPARSE pseudo-events (one per chord / one per key change), keeping
+# the flat "5 tokens per event" layout so the dataset stays memory-light.
+# Chroma / bass are NOT stored: they are derived at load time from the existing
+# channel-4 chord-tone events. The marker values are >15 (outside the MIDI
+# channel range 0..15) so they never collide with real note channels.
+
+CHORD_LABEL_CHANNEL = 120  # pseudo-event: [0, root_pc, quality_id, function_id, 120]
+KEY_CHANNEL = 121          # pseudo-event: [0, key_pc, mode, 0, 121] (emitted on key change)
+
+# "unknown" sentinels (used when the analyzer provides null / no label)
+PC_UNKNOWN = 12            # pitch class 0..11, 12 = unknown
+MODE_MAJOR = 0
+MODE_MINOR = 1
+MODE_UNKNOWN = 2
+
+# Chord-quality enum (0 = unknown). Kept small/coarse on purpose.
+QUALITY_UNKNOWN = 0
+QUALITY_MAJOR = 1
+QUALITY_MINOR = 2
+QUALITY_DIMINISHED = 3
+QUALITY_AUGMENTED = 4
+QUALITY_DOMINANT_SEVENTH = 5
+QUALITY_MAJOR_SEVENTH = 6
+QUALITY_MINOR_SEVENTH = 7
+QUALITY_MINOR_MAJOR_SEVENTH = 8
+QUALITY_DIMINISHED_SEVENTH = 9          # fully-diminished 7th (°7)
+QUALITY_HALF_DIMINISHED_SEVENTH = 10    # half-diminished 7th (ø7 / m7b5)
+QUALITY_DOMINANT_EXT = 11               # 9/11/13 etc. over a dominant
+QUALITY_OTHER = 12
+NUM_QUALITIES = 13
+
+# Maps the analyzer's chord-quality names (see docs examples like
+# "DOMINANT_SEVENTH", "MINOR_MAJOR_SEVENTH", "DIMINISHED_MINOR_SEVENTH") to ids.
+# NOTE: "DIMINISHED_MINOR_SEVENTH" = half-diminished 7th (dim triad + minor 7th).
+QUALITY_NAME_MAP = {
+    'MAJOR': QUALITY_MAJOR,
+    'MINOR': QUALITY_MINOR,
+    'DIMINISHED': QUALITY_DIMINISHED,
+    'AUGMENTED': QUALITY_AUGMENTED,
+    'DOMINANT_SEVENTH': QUALITY_DOMINANT_SEVENTH,
+    'MAJOR_SEVENTH': QUALITY_MAJOR_SEVENTH,
+    'MINOR_SEVENTH': QUALITY_MINOR_SEVENTH,
+    'MINOR_MAJOR_SEVENTH': QUALITY_MINOR_MAJOR_SEVENTH,
+    'DIMINISHED_SEVENTH': QUALITY_DIMINISHED_SEVENTH,
+    'DIMINISHED_MINOR_SEVENTH': QUALITY_HALF_DIMINISHED_SEVENTH,
+    'HALF_DIMINISHED_SEVENTH': QUALITY_HALF_DIMINISHED_SEVENTH,
+    'DOMINANT_NINTH': QUALITY_DOMINANT_EXT,
+    'DOMINANT_ELEVENTH': QUALITY_DOMINANT_EXT,
+    'DOMINANT_THIRTEENTH': QUALITY_DOMINANT_EXT,
+}
+
+# Interval-template -> quality id, for the notes-derived fallback when no label
+# string is present (intervals are pitch classes relative to the candidate root).
+QUALITY_TEMPLATES = {
+    frozenset({0, 4, 7}): QUALITY_MAJOR,
+    frozenset({0, 3, 7}): QUALITY_MINOR,
+    frozenset({0, 3, 6}): QUALITY_DIMINISHED,
+    frozenset({0, 4, 8}): QUALITY_AUGMENTED,
+    frozenset({0, 4, 7, 10}): QUALITY_DOMINANT_SEVENTH,
+    frozenset({0, 4, 7, 11}): QUALITY_MAJOR_SEVENTH,
+    frozenset({0, 3, 7, 10}): QUALITY_MINOR_SEVENTH,
+    frozenset({0, 3, 7, 11}): QUALITY_MINOR_MAJOR_SEVENTH,
+    frozenset({0, 3, 6, 9}): QUALITY_DIMINISHED_SEVENTH,
+    frozenset({0, 3, 6, 10}): QUALITY_HALF_DIMINISHED_SEVENTH,
+}
+
+# Harmonic-function enum (0 = unknown). Coarse German functional categories.
+FUNC_UNKNOWN = 0
+FUNC_TONIC = 1          # T / t
+FUNC_SUBDOMINANT = 2    # S / s
+FUNC_DOMINANT = 3       # D / d
+FUNC_DOUBLE_DOMINANT = 4  # DD
+NUM_FUNCTIONS = 5
+
+FUNCTION_NAME_MAP = {
+    'T': FUNC_TONIC, 't': FUNC_TONIC,
+    'S': FUNC_SUBDOMINANT, 's': FUNC_SUBDOMINANT,
+    'D': FUNC_DOMINANT, 'd': FUNC_DOMINANT,
+    'DD': FUNC_DOUBLE_DOMINANT,
+}
+
+# Note-name (English spelling, e.g. "C#", "Gb") -> pitch class 0..11.
+_NOTE_BASE_PC = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
+
+
+def note_name_to_pc(name: str) -> int:
+    """Convert a note-name token ('C', 'C#', 'Db', 'F##', 'Gb') to pitch class 0..11.
+    Returns PC_UNKNOWN for null/empty/unparseable input."""
+    if name is None:
+        return PC_UNKNOWN
+    name = name.strip()
+    if name == '' or name.lower() == 'null':
+        return PC_UNKNOWN
+    base = name[0].upper()
+    if base not in _NOTE_BASE_PC:
+        return PC_UNKNOWN
+    pc = _NOTE_BASE_PC[base]
+    for ch in name[1:]:
+        if ch == '#':
+            pc += 1
+        elif ch == 'b' or ch == 'B':
+            pc -= 1
+        else:
+            break
+    return pc % 12

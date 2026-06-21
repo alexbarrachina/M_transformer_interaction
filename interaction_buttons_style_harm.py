@@ -53,6 +53,13 @@ JOKER_MAX_INTERVAL_MS = 200.0  # max ms between consecutive notes to count as "f
 
 TEMPERATURE = 1#0.0001
 
+''' HARMONY INFERENCE PARAMS '''
+HARM_CFG_WEIGHT = 2.0          # classifier-free guidance strength on harmony (1.0 = off)
+HARM_PC_BIAS = 3.0             # soft pitch-class logit bias toward chord tones (0.0 = off)
+HARM_MOVE_WEIGHT = 4.0         # movement-compatibility weight in constrained chord planning
+HARM_PLAN_HIST = 32            # pitch-history length fed to the chord planner
+HARM_DECAY_STEP = 1.0 / 30.0   # intensity decay per generated note (harmony release in ~30 notes)
+
 ''' DEVICE SPECIFIC PARAMETERS '''
 if torch.backends.mps.is_available():
     # CASA
@@ -75,7 +82,7 @@ else:
 
 ''' MODEL '''
 
-model_name = 'AE_style_v1' 
+model_name = 'AE_style_harm_v1'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -110,6 +117,48 @@ PRIMER_PLAYBACK_SPEED = 1
 NUM_BUTTONS = cfg['num_buttons']
 HIGHLIGHT_MOTIF_LEN = 30
 MOTIF_STYLE_KEY = '6'
+
+# --- Harmonic movement keys (QWERTY): pressing one requests a harmonic movement.
+# The chord planner picks the next chord realising that movement (JOKER = model
+# decides) and the conditioning intensity decays back to "released" over time. ---
+HARMONY_KEY_MAPPING = {
+    'z': MOVE_STABILIZE,
+    'x': MOVE_RECOLOR,
+    'c': MOVE_PREPARE,
+    'v': MOVE_TENSION,
+    'b': MOVE_RESOLVE,
+    'n': MOVE_EVADE,
+    'm': MOVE_CHROMATIC,
+    ',': MOVE_MODULATE,
+    '.': MOVE_JOKER,
+}
+MOVEMENT_NAMES = {
+    MOVE_STABILIZE: 'STABILIZE', MOVE_RECOLOR: 'RECOLOR', MOVE_PREPARE: 'PREPARE',
+    MOVE_TENSION: 'TENSION', MOVE_RESOLVE: 'RESOLVE', MOVE_EVADE: 'EVADE',
+    MOVE_CHROMATIC: 'CHROMATIC', MOVE_MODULATE: 'MODULATE', MOVE_JOKER: 'JOKER',
+}
+
+
+def _neutral_harm_factors():
+    return {'root_pc': PC_UNKNOWN, 'quality_id': QUALITY_UNKNOWN,
+            'function_id': FUNC_UNKNOWN, 'key_pc': PC_UNKNOWN, 'mode': MODE_UNKNOWN}
+
+
+def _init_harm_buffers(n: int) -> dict:
+    """Per-position harmony buffers (parallel to the button buffer `b`). The
+    seed/context region stays neutral with intensity 0 (== unconditional)."""
+    return {
+        'harm_movement': [MOVE_STABILIZE] * n,
+        'transition_phase': [0.0] * n,
+        'bass_pc': [PC_UNKNOWN] * n,
+        'root_pc': [PC_UNKNOWN] * n,
+        'quality_id': [QUALITY_UNKNOWN] * n,
+        'function_id': [FUNC_UNKNOWN] * n,
+        'key_pc': [PC_UNKNOWN] * n,
+        'mode': [MODE_UNKNOWN] * n,
+        'intensity': [0.0] * n,
+        'chroma': [[0.0] * 12 for _ in range(n)],
+    }
 
 class JokerDetector:
     """Detects fast repetitive alternation of exactly 2 keys and tracks
@@ -289,10 +338,21 @@ def reset_context():
     global dict_output_tokens, dict_input_tokens
     global kv_cache
     global b
+    global harm_buffers
+    global current_movement, current_intensity, current_factors
+    global current_bass_pc, current_chroma, pending_plan
 
     with buffer_lock:
         i = 0
         kv_cache = None
+        # Reset harmony state + buffers to neutral (released / unconditional)
+        current_movement = MOVE_STABILIZE
+        current_intensity = 0.0
+        current_factors = _neutral_harm_factors()
+        current_bass_pc = PC_UNKNOWN
+        current_chroma = [0.0] * 12
+        pending_plan = False
+        harm_buffers = _init_harm_buffers(TOTAL_GEN_LEN + CTX_LEN)
         # Reset and extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
         for key in dict_input_tokens.keys():
             extended_list = dict_input_tokens[key].copy()
@@ -320,6 +380,15 @@ first_note = True
 kv_cache = None
 last_gen_time: float = 0.0
 joker_detector = JokerDetector()
+
+''' HARMONY STATE '''
+current_movement = MOVE_STABILIZE
+current_intensity = 0.0                      # 0 == released (unconditional)
+current_factors = _neutral_harm_factors()    # active chord factors
+current_bass_pc = PC_UNKNOWN
+current_chroma: List[float] = [0.0] * 12
+pending_plan = False                          # set by a movement key, consumed on the next note
+harm_buffers: dict = {}
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -417,6 +486,58 @@ with torch.inference_mode():
     b = b.clone().detach().tolist()
     b.extend([0] * (TOTAL_GEN_LEN + CTX_LEN - len(b)))
 
+harm_buffers = _init_harm_buffers(TOTAL_GEN_LEN + CTX_LEN)
+
+
+def _write_harm(idx: int) -> None:
+    """Record the current harmony state at position idx (called per generated note)."""
+    harm_buffers['harm_movement'][idx] = int(current_movement)
+    harm_buffers['intensity'][idx] = float(current_intensity)
+    harm_buffers['transition_phase'][idx] = float(current_intensity)
+    harm_buffers['bass_pc'][idx] = int(current_bass_pc)
+    harm_buffers['root_pc'][idx] = int(current_factors['root_pc'])
+    harm_buffers['quality_id'][idx] = int(current_factors['quality_id'])
+    harm_buffers['function_id'][idx] = int(current_factors['function_id'])
+    harm_buffers['key_pc'][idx] = int(current_factors['key_pc'])
+    harm_buffers['mode'][idx] = int(current_factors['mode'])
+    harm_buffers['chroma'][idx] = list(current_chroma)
+
+
+def _harm_window(lo: int, hi: int) -> dict:
+    """Build the harm_fields tensor window [1, hi-lo, ...] for gen_pitch_token."""
+    win = {}
+    for k in ('harm_movement', 'bass_pc', 'root_pc', 'quality_id',
+              'function_id', 'key_pc', 'mode'):
+        win[k] = torch.tensor(harm_buffers[k][lo:hi], dtype=torch.long).unsqueeze(0).to(device)
+    for k in ('transition_phase', 'intensity'):
+        win[k] = torch.tensor(harm_buffers[k][lo:hi], dtype=torch.float).unsqueeze(0).to(device)
+    win['chroma'] = torch.tensor(harm_buffers['chroma'][lo:hi], dtype=torch.float).unsqueeze(0).to(device)
+    return win
+
+
+def _plan_next_chord(idx: int) -> None:
+    """Plan the next chord that realises current_movement from recent pitch history
+    (movement-constrained; JOKER lets the model decide), then update the active
+    chord factors + chroma. Runs in the MIDI/inference thread under buffer_lock."""
+    global current_factors, current_chroma, current_bass_pc
+    lo = max(0, idx - HARM_PLAN_HIST)
+    hist = dict_output_tokens['pitch'][lo:idx]
+    if len(hist) <= 0:
+        return
+    pitch_t = torch.tensor(hist, dtype=torch.long).unsqueeze(0).to(device)
+    mvt = torch.full((1, pitch_t.shape[1]), int(current_movement), dtype=torch.long, device=device)
+    cur_f = {k: torch.tensor([int(current_factors[k])], dtype=torch.long, device=device)
+             for k in current_factors}
+    with torch.inference_mode():
+        planned = model.plan_factors_constrained(
+            pitch_t, mvt, current_factors=cur_f, move_weight=HARM_MOVE_WEIGHT)
+        ch = model.chroma_from_factors(planned['root_pc'], planned['quality_id'])
+    current_factors = {k: int(planned[k].item()) for k in planned}
+    current_bass_pc = current_factors['root_pc']
+    current_chroma = ch.squeeze(0).cpu().tolist()
+    if TRACES:
+        print("planned chord", current_factors)
+
 # Full CTX_LEN in the primer strip and in the model; audible tail runs after MIDI opens (main loop).
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
@@ -433,7 +554,9 @@ def manageNote(note, velocity):
   global kv_cache
   global last_gen_time
   global active_style_idx
-  
+  global current_intensity
+  global pending_plan
+
   if TRACES:
     print("key", note)
 
@@ -457,7 +580,7 @@ def manageNote(note, velocity):
     is_joker = joker_detector.update(note, timestamp_ms)
 
     if is_joker:
-        but = model.joker_button_idx
+        but = getattr(model, 'joker_button_idx', NUM_BUTTONS - 1)
         if TRACES:
             print("JOKER detected")
     else:
@@ -468,6 +591,17 @@ def manageNote(note, velocity):
             print("ERROR key_to_button", note)
 
     b[i+CTX_LEN] = but
+
+    # --- Harmony: on a movement request, plan the next chord; then record the
+    # (decaying) harmony state for this position so the decoder is FiLM-conditioned.
+    idx = i + CTX_LEN
+    if pending_plan:
+        _plan_next_chord(idx)
+        current_intensity = 1.0
+        pending_plan = False
+    _write_harm(idx)
+    harm_window = _harm_window(i, i + CTX_LEN + 1)
+
     context = {
       'dtime': torch.tensor(dict_output_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
       'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
@@ -479,20 +613,32 @@ def manageNote(note, velocity):
         print("ctx", i+CTX_LEN+1, "of", TOTAL_GEN_LEN+CTX_LEN)
     with torch.inference_mode():
         if USE_CACHE:
+            # CFG needs two passes (would corrupt the cache) -> no guidance when cached.
             new_pitch_token, kv_cache = model.gen_pitch_token(
                 context,
                 style_context=style_contexts[active_style_idx],
                 style_context_mask=style_context_masks_list[active_style_idx],
-                cache=kv_cache
+                harm_fields=harm_window,
+                cfg_weight=1.0,
+                pc_bias_weight=HARM_PC_BIAS,
+                cache=kv_cache,
+                temperature=TEMPERATURE,
             )
         else:
             new_pitch_token, _ = model.gen_pitch_token(
                 context,
                 style_context=style_contexts[active_style_idx],
-                style_context_mask=style_context_masks_list[active_style_idx]
-            , temperature=TEMPERATURE)
+                style_context_mask=style_context_masks_list[active_style_idx],
+                harm_fields=harm_window,
+                cfg_weight=HARM_CFG_WEIGHT,
+                pc_bias_weight=HARM_PC_BIAS,
+                temperature=TEMPERATURE,
+            )
         last_gen_time = time.perf_counter()
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
+
+    # Release: decay the conditioning strength toward 0 (unconditional) per note.
+    current_intensity = max(0.0, current_intensity - HARM_DECAY_STEP)
 
     playNote(new_pitch_token, velocity) 
     visualizer.get_note(new_pitch_token, velocity)
@@ -523,11 +669,18 @@ def _on_key_press(key: pkeyboard.Key) -> None:
     global style_context
     global style_context_mask
     global motif_style_ready
+    global current_movement
+    global pending_plan
     if key == pkeyboard.Key.space:
         capture_highlight_motif()
         return
     try:
         c = key.char  # type: ignore[union-attr]
+        if c in HARMONY_KEY_MAPPING:
+            current_movement = HARMONY_KEY_MAPPING[c]
+            pending_plan = True  # the next generated note plans + applies the chord
+            print(f"Movement: {MOVEMENT_NAMES.get(current_movement, current_movement)}")
+            return
         if c in ('1', '2', '3', '4', '5'):
             active_style_idx = int(c) - 1
             style_context = style_contexts[active_style_idx]

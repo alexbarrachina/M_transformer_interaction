@@ -1091,7 +1091,9 @@ class AttentionLayers(nn.Module):
         seq_start_pos: Optional[Tensor] = None,
         cache: Optional[LayerIntermediates] = None,
         cache_age = 1,
-        return_hiddens = False
+        return_hiddens = False,
+        film_table = None,
+        film_intensity = None
     ):
 
         # initialize accums
@@ -1186,6 +1188,14 @@ class AttentionLayers(nn.Module):
 
             if exists(pre_norm):
                 x = pre_norm(x)
+
+            # AdaLN-Zero-style harmony FiLM (default off). Modulates the normed
+            # branch INPUT only, scaled by per-position intensity, so intensity=0
+            # exactly recovers the base model (classifier-free-guidance / null-safe)
+            # and the zero-initialised modulator starts as identity.
+            if (film_table is not None) and (film_intensity is not None) and (ind in film_table):
+                f_scale, f_shift = film_table[ind]
+                x = x * (1.0 + film_intensity * f_scale) + film_intensity * f_shift
 
             if layer_type == 'a':
                 out, inter = block(x, mask = mask, context_mask = self_attn_kv_mask, attn_mask = attn_mask, rel_pos = self.rel_pos, rotary_pos_emb = rotary_pos_emb, prev_attn = prev_attn, cache = next(iter_attn_cache, None), mem = layer_mem, return_intermediates = True)
@@ -11475,6 +11485,19 @@ class AE_style(Module):
     #  Training                                                            #
     # ------------------------------------------------------------------ #
 
+    def _decode_with_conditioning(self, decoder_context, style_context,
+                                  style_context_mask, note_tokens):
+        """Run the decoder. Base implementation has no extra conditioning and
+        returns an empty dict of additional loss terms. Subclasses (e.g.
+        AE_style_harm) override this to inject harmony FiLM and return extra
+        weighted loss terms {name: (weight, value_tensor)}."""
+        logits = self.decoder(
+            decoder_context,
+            style_context=style_context,
+            style_context_mask=style_context_mask,
+        )
+        return logits, {}
+
     def forward(self, note_tokens: Dict[str, Tensor]):
         """
         Training forward pass.
@@ -11504,11 +11527,11 @@ class AE_style(Module):
             'button': b[:, :],
         }
 
-        logits = self.decoder(
-            decoder_context,
-            style_context=style_context,
-            style_context_mask=style_context_mask,
-        )
+        # Decode (overridable hook): subclasses may inject extra conditioning and
+        # return additional weighted loss terms {name: (weight, value)}. Base
+        # AE_style returns no extras, preserving its behavior exactly.
+        logits, harm_loss_terms = self._decode_with_conditioning(
+            decoder_context, style_context, style_context_mask, note_tokens)
 
         target = note_tokens['pitch'][:, 1:]
 
@@ -12800,3 +12823,520 @@ class AE_buttons_p_residual(Module):
         labels = labels[mask]
         num_right = (out == labels).sum().float()
         return num_right / len(labels) if len(labels) > 0 else torch.tensor(0.0)
+
+
+#===================================================================================================================
+#  STAGE 2: Harmony movement conditioning (hidden chord planner + AdaLN-Zero FiLM)
+#
+#  Adds a third conditioning channel (harmonic movement) on top of AE_style's
+#  button (concat) + style (cross-attention) channels:
+#    movement (+ chord factors) -> HarmonyConditioner -> per-layer AdaLN-Zero FiLM
+#  FiLM modulates the self-attn / feed-forward branches of the UPPER decoder
+#  blocks only, gated by `intensity` so that intensity=0 exactly recovers the base
+#  style model (classifier-free guidance / null-harmony safe). A separate causal
+#  ChordPlanner predicts chord factors from pitch history + movement so the model
+#  can be driven at inference from a movement command alone, and auxiliary heads
+#  predict chord factors from the decoder hidden states to force the representation
+#  to encode harmony. All modulator/aux projections are zero-initialised so the
+#  model is identical to AE_style at start and is resumable from an AE_style_v2
+#  checkpoint (strict=False).
+#
+#  NOTE: movement-compatibility-constrained planner sampling and the soft
+#  pitch-class logit bias are deferred to stage 3.
+#===================================================================================================================
+
+class HarmonyConditioner(nn.Module):
+    """Embed the per-note harmony fields into a single per-timestep conditioning
+    vector consumed by HarmonyFiLM."""
+    def __init__(self, d_cond: int, dim: int):
+        super().__init__()
+        self.move_emb = nn.Embedding(NUM_MOVEMENTS, d_cond)
+        self.root_emb = nn.Embedding(PC_UNKNOWN + 1, d_cond)      # 0..11 + 12=unknown
+        self.quality_emb = nn.Embedding(NUM_QUALITIES, d_cond)
+        self.function_emb = nn.Embedding(NUM_FUNCTIONS, d_cond)
+        self.key_emb = nn.Embedding(PC_UNKNOWN + 1, d_cond)       # 0..11 + 12=unknown
+        self.mode_emb = nn.Embedding(3, d_cond)                   # maj/min/unknown
+        self.chroma_proj = nn.Linear(12, d_cond)
+        self.scalar_proj = nn.Linear(2, d_cond)                   # transition_phase, intensity
+        self.out = nn.Sequential(nn.SiLU(), nn.Linear(d_cond, d_cond))
+
+    def forward(self, h: Dict[str, Tensor]) -> Tensor:
+        c = (self.move_emb(h['harm_movement'])
+             + self.root_emb(h['root_pc'])
+             + self.quality_emb(h['quality_id'])
+             + self.function_emb(h['function_id'])
+             + self.key_emb(h['key_pc'])
+             + self.mode_emb(h['mode'])
+             + self.chroma_proj(h['chroma'].float()))
+        scal = torch.stack([h['transition_phase'].float(), h['intensity'].float()], dim=-1)
+        c = c + self.scalar_proj(scal)
+        return self.out(c)
+
+
+class HarmonyFiLM(nn.Module):
+    """Produce per-sub-layer (scale, shift) AdaLN-Zero modulation parameters from
+    the harmony condition. Zero-initialised => identity modulation at start."""
+    def __init__(self, d_cond: int, dim: int, mod_inds: List[int]):
+        super().__init__()
+        self.mod_inds: List[int] = list(mod_inds)
+        self.dim = dim
+        self.n = len(self.mod_inds)
+        self.proj = nn.Linear(d_cond, max(1, self.n) * 2 * dim)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, c: Tensor) -> Dict[int, Tuple[Tensor, Tensor]]:
+        table: Dict[int, Tuple[Tensor, Tensor]] = {}
+        if self.n == 0:
+            return table
+        B, T, _ = c.shape
+        params = self.proj(c).view(B, T, self.n, 2, self.dim)
+        for j, ind in enumerate(self.mod_inds):
+            table[ind] = (params[:, :, j, 0, :], params[:, :, j, 1, :])
+        return table
+
+
+class ChordPlanner(nn.Module):
+    """Causal module that predicts chord factors (root, quality, function, key,
+    mode) from pitch history + the requested movement. Decoupled from the main
+    decoder (no circular dependency); used at inference when the performer supplies
+    only a movement command."""
+    def __init__(self, dim: int, depth: int = 2, heads: int = 8, attn_flash: bool = True):
+        super().__init__()
+        self.pitch_emb = nn.Embedding(VOCAB_SIZE_PITCH, dim)
+        self.move_emb = nn.Embedding(NUM_MOVEMENTS, dim)
+        self.attn_layers = AttentionLayers(dim=dim, depth=depth, heads=heads,
+                                           rotary_pos_emb=True, attn_flash=attn_flash,
+                                           causal=True)
+        self.to_root = nn.Linear(dim, PC_UNKNOWN + 1)
+        self.to_quality = nn.Linear(dim, NUM_QUALITIES)
+        self.to_function = nn.Linear(dim, NUM_FUNCTIONS)
+        self.to_key = nn.Linear(dim, PC_UNKNOWN + 1)
+        self.to_mode = nn.Linear(dim, 3)
+
+    def forward(self, pitch: Tensor, movement: Tensor) -> Dict[str, Tensor]:
+        x = self.pitch_emb(pitch) + self.move_emb(movement)
+        x, _ = self.attn_layers(x, return_hiddens=True)
+        return {
+            'root_pc': self.to_root(x),
+            'quality_id': self.to_quality(x),
+            'function_id': self.to_function(x),
+            'key_pc': self.to_key(x),
+            'mode': self.to_mode(x),
+        }
+
+
+# Interval content (relative to root, pitch-class 0) per quality id, used to
+# synthesise a chroma vector for a planned (root, quality) chord at inference.
+# Rows 0 (unknown) and 12 (other) are intentionally empty (-> all-zero chroma).
+_QUALITY_INTERVALS: List[List[int]] = [
+    [],                 # 0  QUALITY_UNKNOWN
+    [0, 4, 7],          # 1  MAJOR
+    [0, 3, 7],          # 2  MINOR
+    [0, 3, 6],          # 3  DIMINISHED
+    [0, 4, 8],          # 4  AUGMENTED
+    [0, 4, 7, 10],      # 5  DOMINANT_SEVENTH
+    [0, 4, 7, 11],      # 6  MAJOR_SEVENTH
+    [0, 3, 7, 10],      # 7  MINOR_SEVENTH
+    [0, 3, 7, 11],      # 8  MINOR_MAJOR_SEVENTH
+    [0, 3, 6, 9],       # 9  DIMINISHED_SEVENTH
+    [0, 3, 6, 10],      # 10 HALF_DIMINISHED_SEVENTH
+    [0, 2, 4, 7, 10],   # 11 DOMINANT_EXT (9/11/13)
+    [],                 # 12 QUALITY_OTHER
+]
+
+
+def _build_quality_interval_mask() -> Tensor:
+    m = torch.zeros(NUM_QUALITIES, 12)
+    for q, ivals in enumerate(_QUALITY_INTERVALS):
+        for iv in ivals:
+            m[q, iv % 12] = 1.0
+    return m
+
+
+_QUALITY_INTERVAL_MASK = _build_quality_interval_mask()  # [NUM_QUALITIES, 12]
+
+
+class MovementClassifier(nn.Module):
+    """Learns the chord-transition -> harmonic-movement relation directly from the
+    dataset labels (the same algorithmic relation that produced the channel-3
+    movement events). Given the previous and candidate chord factors it predicts
+    the movement category, so at inference the ChordPlanner's candidate chords can
+    be reweighted to realise the performer's requested movement (JOKER bypasses
+    the constraint, letting the model decide the movement)."""
+    def __init__(self, dim: int = 128):
+        super().__init__()
+        self.root_emb = nn.Embedding(PC_UNKNOWN + 1, dim)
+        self.quality_emb = nn.Embedding(NUM_QUALITIES, dim)
+        self.function_emb = nn.Embedding(NUM_FUNCTIONS, dim)
+        self.key_emb = nn.Embedding(PC_UNKNOWN + 1, dim)
+        self.mode_emb = nn.Embedding(3, dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * dim, dim), nn.SiLU(), nn.Linear(dim, dim), nn.SiLU())
+        self.to_move = nn.Linear(dim, NUM_MOVEMENTS)
+
+    def _embed(self, f: Dict[str, Tensor]) -> Tensor:
+        return (self.root_emb(f['root_pc']) + self.quality_emb(f['quality_id'])
+                + self.function_emb(f['function_id']) + self.key_emb(f['key_pc'])
+                + self.mode_emb(f['mode']))
+
+    def forward(self, prev: Dict[str, Tensor], cur: Dict[str, Tensor]) -> Tensor:
+        h = torch.cat([self._embed(prev), self._embed(cur)], dim=-1)
+        return self.to_move(self.mlp(h))
+
+
+class Decoder_no_dtime_style_harm(Decoder_no_dtime_style):
+    """Decoder_no_dtime_style + harmony AdaLN-Zero FiLM.
+
+    Self-attn ('a') and feed-forward ('f') sub-layers of the UPPER blocks are
+    modulated by the harmony condition; the style cross-attention ('c') path keeps
+    its normal LayerNorm. Identity at init (zero-init FiLM) and identity at
+    intensity=0, so it is resumable from AE_style_v2 and CFG/null-safe.
+    """
+    def __init__(self, *, harm_cond_dim: int = 256, harm_film_start_frac: float = 0.5, **kwargs):
+        super().__init__(**kwargs)
+        dim = self.emb_dim
+        self.harm_conditioner = HarmonyConditioner(harm_cond_dim, dim)
+        layer_types = self.attn_layers.layer_types
+        num_blocks = sum(1 for t in layer_types if t == 'a')
+        start_block = int(num_blocks * harm_film_start_frac)
+        mod_inds: List[int] = []
+        block_idx = -1
+        for ind, t in enumerate(layer_types):
+            if t == 'a':
+                block_idx += 1
+            if t in ('a', 'f') and block_idx >= start_block:
+                mod_inds.append(ind)
+        self.harm_film = HarmonyFiLM(harm_cond_dim, dim, mod_inds)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],
+        style_context: Optional[Tensor] = None,
+        style_context_mask: Optional[Tensor] = None,
+        harm_fields: Optional[Dict[str, Tensor]] = None,
+        return_intermediates: bool = False,
+        return_hidden: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[List[Tensor]] = None,
+        seq_start_pos: Optional[Tensor] = None,
+        cache: Optional[LayerIntermediates] = None,
+        **kwargs
+    ):
+        pitch = self.pitch_emb(past_tokens['pitch'])
+        button = past_tokens['button'].float().unsqueeze(-1)
+        x = self.input_proj(torch.cat([pitch, button], dim=-1))
+        x = self.emb_dropout(x)
+
+        film_table = None
+        film_intensity = None
+        if harm_fields is not None:
+            c = self.harm_conditioner(harm_fields)                       # [B,T,d_cond]
+            film_table = self.harm_film(c)                               # {ind:(scale,shift)}
+            film_intensity = harm_fields['intensity'].float().unsqueeze(-1)  # [B,T,1]
+
+        x, intermediates = self.attn_layers(
+            x, context=style_context, context_mask=style_context_mask,
+            mask=mask, mems=mems, cache=cache, return_hiddens=True,
+            seq_start_pos=seq_start_pos,
+            film_table=film_table, film_intensity=film_intensity, **kwargs
+        )
+
+        logits = self.to_logits(x)
+        if return_hidden:
+            return logits, x
+        if return_intermediates:
+            return logits, intermediates
+        return logits
+
+
+class AE_style_harm(AE_style):
+    """AE_style + harmony conditioning (stage 2).
+
+    Inherits the style cross-attention + button encoder unchanged. Adds:
+      - per-note harmony AdaLN-Zero FiLM in the decoder (teacher-forced on the
+        ground-truth chord factors during training);
+      - harmony dropout (intensity -> 0) to train the unconditional branch for
+        classifier-free guidance / harmony-release;
+      - a JOKER movement augmentation ("move now, model decides which");
+      - a hidden ChordPlanner trained to predict chord factors from pitch history
+        + movement (used at inference for movement-only control);
+      - auxiliary chord-factor heads off the decoder hidden states.
+    """
+    HARM_FIELDS = ('harm_movement', 'transition_phase', 'chroma', 'bass_pc',
+                   'root_pc', 'quality_id', 'function_id', 'key_pc', 'mode', 'intensity')
+    FACTOR_KEYS = ('root_pc', 'quality_id', 'function_id', 'key_pc', 'mode')
+
+    def __init__(self, encoder: nn.Module, decoder: nn.Module,
+                 style_encoder: nn.Module, cfg: Optional[Dict[str, Any]] = None):
+        super().__init__(encoder, decoder, style_encoder, cfg)
+        c = self.cfg
+        self.planner = ChordPlanner(
+            dim=c.get('planner_dim', 256),
+            depth=c.get('planner_depth', 2),
+            heads=c.get('planner_heads', 8),
+            attn_flash=c.get('planner_attn_flash', True),
+        )
+        dim = decoder.emb_dim
+        self.aux_root = nn.Linear(dim, PC_UNKNOWN + 1)
+        self.aux_quality = nn.Linear(dim, NUM_QUALITIES)
+        self.aux_function = nn.Linear(dim, NUM_FUNCTIONS)
+        self.aux_key = nn.Linear(dim, PC_UNKNOWN + 1)
+        self.aux_mode = nn.Linear(dim, 3)
+        # zero-init aux heads so they start neutral (do not perturb resumed model)
+        for head in (self.aux_root, self.aux_quality, self.aux_function, self.aux_key, self.aux_mode):
+            nn.init.zeros_(head.weight); nn.init.zeros_(head.bias)
+
+        # Stage 3: chord-transition -> movement compatibility model (learns the
+        # dataset's chord->movement labelling so planner candidates can be
+        # constrained to the requested movement at inference).
+        self.movement_clf = MovementClassifier(dim=c.get('movement_clf_dim', 128))
+
+        self.harmony_drop_prob = c.get('harmony_drop_prob', 0.3)
+        self.joker_prob = c.get('joker_prob', 0.1)
+        self.w_chord_plan = c.get('loss_chord_plan', 0.5)
+        self.w_aux_chord = c.get('loss_aux_chord', 0.5)
+        self.w_move_recover = c.get('loss_move_recover', 0.5)
+        self.pc_bias_weight = c.get('pc_bias_weight', 0.0)   # default soft PC-bias at inference
+        self._factor_ignore = {
+            'root_pc': PC_UNKNOWN, 'quality_id': QUALITY_UNKNOWN,
+            'function_id': FUNC_UNKNOWN, 'key_pc': PC_UNKNOWN, 'mode': MODE_UNKNOWN,
+        }
+        self._last_harm_terms: Dict[str, Tuple[float, Tensor]] = {}
+
+    # ------------------------------------------------------------------ #
+    def _slice_harm(self, note_tokens: Dict[str, Tensor], sl) -> Dict[str, Tensor]:
+        return {k: note_tokens[k][:, sl] for k in self.HARM_FIELDS if k in note_tokens}
+
+    def _augment_harm(self, harm: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        harm = dict(harm)
+        B = harm['intensity'].shape[0]
+        device = harm['intensity'].device
+        if self.training and self.harmony_drop_prob > 0:
+            keep = (torch.rand(B, 1, device=device) >= self.harmony_drop_prob).float()
+            harm['intensity'] = harm['intensity'].float() * keep
+        if self.training and self.joker_prob > 0:
+            mv = harm['harm_movement']
+            relabel = (torch.rand(B, 1, device=device) < self.joker_prob) & (mv != MOVE_STABILIZE)
+            harm['harm_movement'] = torch.where(relabel, torch.full_like(mv, MOVE_JOKER), mv)
+        return harm
+
+    def _factor_loss(self, logits_d: Dict[str, Tensor], gt_d: Dict[str, Tensor]) -> Tensor:
+        total = None
+        for k in self.FACTOR_KEYS:
+            gt = gt_d[k]
+            valid = (gt != self._factor_ignore[k])
+            if valid.any():
+                l = F.cross_entropy(rearrange(logits_d[k], 'b n c -> b c n'),
+                                    gt, ignore_index=self._factor_ignore[k])
+            else:
+                l = logits_d[k].sum() * 0.0
+            total = l if total is None else total + l
+        return total / len(self.FACTOR_KEYS)
+
+    # ------------------------------------------------------------------ #
+    def _decode_with_conditioning(self, decoder_context, style_context,
+                                  style_context_mask, note_tokens):
+        """Harmony-conditioned decode: FiLM (teacher-forced on the ground-truth
+        chord factors), plus chord-planner and auxiliary chord-factor supervision.
+        Returns logits and the extra weighted loss terms folded in by forward()."""
+        harm = self._augment_harm(self._slice_harm(note_tokens, slice(1, None)))
+        logits, hidden = self.decoder(
+            decoder_context, style_context=style_context,
+            style_context_mask=style_context_mask, harm_fields=harm, return_hidden=True)
+
+        gt = {k: note_tokens[k][:, 1:] for k in self.FACTOR_KEYS}
+
+        planner_logits = self.planner(note_tokens['pitch'][:, :-1], harm['harm_movement'])
+        loss_chord_plan = self._factor_loss(planner_logits, gt)
+
+        aux_logits = {
+            'root_pc': self.aux_root(hidden), 'quality_id': self.aux_quality(hidden),
+            'function_id': self.aux_function(hidden), 'key_pc': self.aux_key(hidden),
+            'mode': self.aux_mode(hidden),
+        }
+        loss_aux_chord = self._factor_loss(aux_logits, gt)
+
+        # --- Movement-recovery: learn (prev chord -> cur chord) => movement ---
+        # Uses the RAW (un-augmented) movement label so the classifier learns the
+        # true chord->movement relation, restricted to chord-change positions.
+        raw_move = note_tokens['harm_movement'][:, 1:]                     # [B,T]
+        cur_f = {k: gt[k][:, 1:] for k in self.FACTOR_KEYS}               # [B,T-1]
+        prev_f = {k: gt[k][:, :-1] for k in self.FACTOR_KEYS}            # [B,T-1]
+        move_t = raw_move[:, 1:]                                          # [B,T-1]
+        change = torch.zeros_like(move_t, dtype=torch.bool)
+        for k in self.FACTOR_KEYS:
+            change = change | (cur_f[k] != prev_f[k])
+        valid = change & (move_t != MOVE_JOKER) & (cur_f['root_pc'] != PC_UNKNOWN)
+        move_logits = self.movement_clf(prev_f, cur_f)                   # [B,T-1,NUM_MOVEMENTS]
+        if valid.any():
+            loss_move_recover = F.cross_entropy(move_logits[valid], move_t[valid])
+        else:
+            loss_move_recover = move_logits.sum() * 0.0
+
+        terms = {
+            'loss_chord_plan': (self.w_chord_plan, loss_chord_plan),
+            'loss_aux_chord': (self.w_aux_chord, loss_aux_chord),
+            'loss_move_recover': (self.w_move_recover, loss_move_recover),
+        }
+        self._last_harm_terms = terms
+        return logits, terms
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        # AE_style.forward runs the full style+button pipeline and calls our
+        # _decode_with_conditioning hook (FiLM-conditioned decode). We then fold
+        # the returned harmony loss terms into the total.
+        loss, acc = super().forward(note_tokens)
+        for name, (w, val) in self._last_harm_terms.items():
+            loss['loss_total'] = loss['loss_total'] + w * val
+            loss[name] = val
+        return loss, acc
+
+    # ------------------------------------------------------------------ #
+    #  Inference                                                           #
+    # ------------------------------------------------------------------ #
+    @torch.inference_mode()
+    def plan_factors(self, pitch: Tensor, movement: Tensor) -> Dict[str, Tensor]:
+        """Predict chord factors (argmax) from pitch history + movement, for
+        movement-only inference. Returns one factor tensor per key, shape [B, T]."""
+        logits = self.planner(pitch, movement)
+        return {k: logits[k].argmax(dim=-1) for k in logits}
+
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self,
+        note_tokens: Dict[str, Tensor],
+        style_context: Tensor,
+        style_context_mask: Optional[Tensor] = None,
+        harm_fields: Optional[Dict[str, Tensor]] = None,
+        cfg_weight: float = 1.0,
+        temperature: float = 1.0,
+        cache: Optional[LayerIntermediates] = None,
+        pc_bias_weight: Optional[float] = None,
+    ) -> Tuple[int, LayerIntermediates]:
+        """Generate the next pitch with optional classifier-free guidance and a
+        soft pitch-class logit bias.
+
+        cfg_weight > 1 amplifies harmony adherence via
+        logits = logits_uncond + w * (logits_cond - logits_uncond).
+        NOTE: CFG runs two decoder passes; use it with the KV cache disabled
+        (cache=None) so the unconditional pass does not corrupt the cache.
+
+        pc_bias_weight (defaults to cfg['pc_bias_weight']) adds a soft additive
+        bias to the logits of MIDI pitches whose pitch class is in the target
+        chord chroma, scaled by intensity. It nudges (does not mask) the sampler
+        toward chord tones while leaving non-chord tones reachable.
+        """
+        b = self.quantizer.discrete_to_real(note_tokens['button'])
+        if cache is not None:
+            decoder_context = {'pitch': note_tokens['pitch'][:, -2:-1], 'button': b[:, -1:]}
+            hsl = slice(-1, None)
+        else:
+            decoder_context = {'pitch': note_tokens['pitch'][:, :-1], 'button': b[:, 1:]}
+            hsl = slice(1, None)
+
+        harm = None
+        if harm_fields is not None:
+            harm = {k: harm_fields[k][:, hsl] for k in self.HARM_FIELDS if k in harm_fields}
+
+        def run(h, c):
+            logits, inter = self.decoder(
+                decoder_context, style_context=style_context,
+                style_context_mask=style_context_mask, harm_fields=h,
+                return_intermediates=True, cache=c, seq_start_pos=None)
+            return logits[:, -1], inter
+
+        if harm is not None and cfg_weight != 1.0:
+            logits_c, inter = run(harm, cache)
+            h0 = dict(harm); h0['intensity'] = torch.zeros_like(harm['intensity'].float())
+            logits_u, _ = run(h0, cache)
+            logits = logits_u + cfg_weight * (logits_c - logits_u)
+        else:
+            logits, inter = run(harm, cache)
+
+        # --- Soft pitch-class logit bias toward the target chord chroma ---
+        w_pc = self.pc_bias_weight if pc_bias_weight is None else pc_bias_weight
+        if harm is not None and w_pc != 0.0 and 'chroma' in harm:
+            chroma = harm['chroma'][:, -1].float()                       # [B,12]
+            inten = harm['intensity'][:, -1].float().unsqueeze(-1)        # [B,1]
+            pc_idx = torch.arange(logits.shape[-1], device=logits.device) % 12  # [V]
+            bias = chroma[:, pc_idx]                                      # [B,V] chord weight per MIDI pitch
+            logits = logits + w_pc * inten * bias
+
+        probs = F.softmax(logits / temperature, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+        return next_token.item(), inter
+
+    @staticmethod
+    def chroma_from_factors(root_pc: Tensor, quality_id: Tensor) -> Tensor:
+        """Synthesise a 12-d chroma vector from (root_pc, quality_id) so a planned
+        chord can drive FiLM + the PC-bias. Returns [..., 12] (all-zero for
+        unknown/other quality). Pure tensor ops."""
+        mask = _QUALITY_INTERVAL_MASK.to(root_pc.device)                 # [NUM_QUALITIES,12]
+        base = mask[quality_id]                                          # [...,12] (root at pc 0)
+        flat_base = base.reshape(-1, 12)
+        roots = root_pc.reshape(-1)
+        pc = torch.arange(12, device=root_pc.device).view(1, 12)
+        idx = (pc - roots.view(-1, 1)) % 12                              # [N,12]
+        out = torch.gather(flat_base, 1, idx)                           # roll by root
+        return out.reshape(root_pc.shape + (12,))
+
+    @torch.inference_mode()
+    def plan_factors_constrained(
+        self,
+        pitch: Tensor,                                   # [B, T] pitch history
+        movement: Tensor,                                # [B, T] requested movement
+        current_factors: Optional[Dict[str, Tensor]] = None,  # [B] current chord factors
+        move_weight: float = 4.0,
+        temperature: float = 1.0,
+        sample: bool = False,
+    ) -> Dict[str, Tensor]:
+        """Plan the next chord factors for the LAST position, reweighting the
+        ChordPlanner's root x quality candidates by the learned movement
+        compatibility so the realised movement (current_factors -> candidate)
+        matches the requested movement. JOKER leaves the planner unconstrained.
+
+        Returns one factor tensor per key (shape [B]); use chroma_from_factors to
+        obtain the chord chroma for FiLM / PC-bias.
+        """
+        logits = self.planner(pitch, movement)
+        root_lp = F.log_softmax(logits['root_pc'][:, -1], dim=-1)        # [B,nr]
+        qual_lp = F.log_softmax(logits['quality_id'][:, -1], dim=-1)     # [B,nq]
+        B, nr = root_lp.shape
+        nq = qual_lp.shape[-1]
+        func = logits['function_id'][:, -1].argmax(-1)                   # [B]
+        key = logits['key_pc'][:, -1].argmax(-1)
+        mode = logits['mode'][:, -1].argmax(-1)
+
+        cand_root = torch.arange(nr, device=root_lp.device).view(1, nr, 1).expand(B, nr, nq)
+        cand_qual = torch.arange(nq, device=root_lp.device).view(1, 1, nq).expand(B, nr, nq)
+        score = root_lp.unsqueeze(-1) + qual_lp.unsqueeze(1)             # [B,nr,nq]
+
+        req = movement[:, -1]                                            # [B]
+        if current_factors is not None:
+            flat = nr * nq
+            prev = {k: current_factors[k].reshape(B, 1).expand(B, flat) for k in self.FACTOR_KEYS}
+            cur = {
+                'root_pc': cand_root.reshape(B, flat),
+                'quality_id': cand_qual.reshape(B, flat),
+                'function_id': func.view(B, 1).expand(B, flat),
+                'key_pc': key.view(B, 1).expand(B, flat),
+                'mode': mode.view(B, 1).expand(B, flat),
+            }
+            move_lp = F.log_softmax(self.movement_clf(prev, cur), dim=-1)  # [B,flat,NUM_MOVEMENTS]
+            req_lp = move_lp.gather(-1, req.view(B, 1, 1).expand(B, flat, 1)).squeeze(-1)
+            req_lp = req_lp.view(B, nr, nq)
+            joker = (req == MOVE_JOKER).view(B, 1, 1)
+            score = torch.where(joker, score, score + move_weight * req_lp)
+
+        flat_score = score.view(B, -1)
+        if sample:
+            idx = torch.multinomial(F.softmax(flat_score / temperature, dim=-1), 1).squeeze(-1)
+        else:
+            idx = flat_score.argmax(-1)
+        chosen_root = (idx // nq)
+        chosen_qual = (idx % nq)
+        return {
+            'root_pc': chosen_root, 'quality_id': chosen_qual,
+            'function_id': func, 'key_pc': key, 'mode': mode,
+        }

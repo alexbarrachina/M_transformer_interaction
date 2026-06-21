@@ -422,6 +422,38 @@ def load_model(model_name='default',
                 attn_flash = True
             ),
         )
+    elif cfg['model_type'] == 'AE_style_harm':
+        # Style + button + harmony (movement) conditioning via AdaLN-Zero FiLM,
+        # hidden chord planner and auxiliary chord-factor supervision (stage 2).
+        mpt_model = AE_style_harm(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style_harm(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                harm_cond_dim = cfg.get('harm_cond_dim', 256),
+                harm_film_start_frac = cfg.get('harm_film_start_frac', 0.5),
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
     elif cfg['model_type'] == 'AE_antic_style':
         # Style-conditioned autoencoder + anticipation: buttons + cross-attention to
         # style reference + anticipated-pitch signal for user-injected notes
