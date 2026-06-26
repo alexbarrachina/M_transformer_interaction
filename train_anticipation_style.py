@@ -591,6 +591,7 @@ def main():
                                 'style_mask': val_batch['style_mask'].to(device),
                             }
                             val_loss, val_acc = model(vx)
+                            val_loss_temp = val_loss['loss_total'].item()
 
                         if cfg['use_logs']:
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
@@ -605,6 +606,7 @@ def main():
                 str(ep) + '_eps_' +
                 str(nsteps) + '_steps_' +
                 str(round(float(loss['loss_total'].item()), 4)) + '_loss_' +
+                str(round(float(val_loss_temp), 4)) + '_val_loss_' +
                 str(round(float(acc.item()), 4)) + '_acc.pth'
             )
             torch.save(model.state_dict(), fname)

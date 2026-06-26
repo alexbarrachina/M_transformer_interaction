@@ -49,7 +49,7 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
-NSTEPS_INIT = 256
+NSTEPS_INIT = 252
 RESUME = True
 
 #==========================================================================
@@ -448,7 +448,7 @@ def main():
 
     ''' MODEL & HYPERPARAMETERS '''
     project_name = 'monsterGenie_style'
-    model_name = 'AE_style_v2'
+    model_name = 'AE_style_tester_v2'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)
     model.to(device)
@@ -526,6 +526,7 @@ def main():
 
     ''' TRAINING '''
 
+    val_loss_temp = 0.0
     for ep in range(cfg['epochs']):
         print('Epoch #', ep)
 
@@ -596,6 +597,7 @@ def main():
                                 'style_mask': val_batch['style_mask'].to(device),
                             }
                             val_loss, val_acc = model(vx)
+                            val_loss_temp = val_loss['loss_total'].item()
 
                         if cfg['use_logs']:
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
@@ -609,7 +611,7 @@ def main():
                 './save_models/' + cfg['model_name'] + '_' +
                 str(ep) + '_eps_' +
                 str(nsteps) + '_steps_' +
-                str(round(float(loss['loss_total'].item()), 4)) + '_loss_' +
+                str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(val_loss_temp), 4)) + '_val_loss_' +
                 str(round(float(acc.item()), 4)) + '_acc.pth'
             )
             torch.save(model.state_dict(), fname)

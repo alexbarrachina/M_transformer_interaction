@@ -65,21 +65,8 @@ HARM_CFG_WEIGHT = 1.0# 2.0          # classifier-free guidance strength on harmo
 HARM_PC_BIAS = 0.0 #3.0             # soft pitch-class logit bias toward chord tones (0.0 = off)
 HARM_MOVE_WEIGHT = 4.0         # movement-compatibility weight in constrained chord planning. Reduces/increases the number of possible chords.
 HARM_PLAN_HIST = 32            # pitch-history length fed to the chord planner
-HARM_DECAY_STEP = 1.0 / 30.0   # transition_phase decay per generated note (harmony release span ~30 notes); intensity stays binary 1.0 while active
-HARM_REPLAN_EVERY = 0          # while a movement is active, re-plan the chord every N generated notes so the FiLM chord tracks the evolving melody (0 = freeze for the whole span)
-# First test (intensity spatial-pattern diagnosis): force FiLM ON at EVERY position
-# of the harm_window (context included), so the decoder sees the same constant
-# intensity=1.0 regime it saw in training (where intensity was 1.0 over the whole
-# sequence, never a partly-conditioned window). True = override the per-note
-# intensity buffer with all-ones when building the window.
-FORCE_FULL_INTENSITY = True
-# Test 1 (FiLM gain sweep): scale the harmony AdaLN-Zero modulation. 1.0 = original
-# strength; sweep {0.1, 0.25, 0.5, 1.0} to check whether weaker modulation stays
-# coherent (=> magnitude blow-up). Applied as x*(1 + g*I*scale) + g*I*shift.
-FILM_GAIN = 1.0
-# Test 2 (instrumentation): print conditioner/FiLM norms at the conditioned (last)
-# position each generated note, so the pre- vs post-keypress jump is visible.
-HARM_FILM_DEBUG = True
+HARM_DECAY_STEP = 1.0 / 4.0   # transition_phase decay per generated note (harmony release span ~30 notes); intensity stays binary 1.0 while active
+HARM_REPLAN_EVERY = 4          # while a movement is active, re-plan the chord every N generated notes so the FiLM chord tracks the evolving melody (0 = freeze for the whole span)
 
 ''' DEVICE SPECIFIC PARAMETERS '''
 if torch.backends.mps.is_available():
@@ -386,7 +373,6 @@ def reset_context():
     global harm_buffers
     global current_movement, current_intensity, current_phase, current_factors
     global current_bass_pc, current_chroma, pending_plan
-    global harm_gen_hits, harm_gen_total
 
     with buffer_lock:
         i = 0
@@ -395,8 +381,6 @@ def reset_context():
         current_movement = MOVE_STABILIZE
         current_intensity = 0.0
         current_phase = 0.0
-        harm_gen_hits = 0
-        harm_gen_total = 0
         current_factors = _neutral_harm_factors()
         current_bass_pc = PC_UNKNOWN
         current_chroma = [0.0] * 12
@@ -439,9 +423,6 @@ current_bass_pc = PC_UNKNOWN
 current_chroma: List[float] = [0.0] * 12
 pending_plan = False                          # set by a movement key, consumed on the next note
 harm_buffers: dict = {}
-# TRACES diagnostics: chord-tone match stats for notes generated during the current transition (intensity>0)
-harm_gen_hits = 0                             # generated notes whose pitch-class is in the FiLM chord chroma
-harm_gen_total = 0                            # generated notes while a movement is active
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -564,10 +545,6 @@ def _harm_window(lo: int, hi: int) -> dict:
         win[k] = torch.tensor(harm_buffers[k][lo:hi], dtype=torch.long).unsqueeze(0).to(device)
     for k in ('transition_phase', 'intensity'):
         win[k] = torch.tensor(harm_buffers[k][lo:hi], dtype=torch.float).unsqueeze(0).to(device)
-    # First test: force FiLM ON across the whole window (context included) to match
-    # the training distribution (constant intensity=1.0 over the sequence).
-    if FORCE_FULL_INTENSITY:
-        win['intensity'] = torch.ones_like(win['intensity'])
     win['chroma'] = torch.tensor(harm_buffers['chroma'][lo:hi], dtype=torch.float).unsqueeze(0).to(device)
     return win
 
@@ -642,7 +619,6 @@ def manageNote(note, velocity):
   global current_intensity
   global current_phase
   global pending_plan
-  global harm_gen_hits, harm_gen_total
 
   if TRACES:
     print("key", note)
@@ -692,8 +668,6 @@ def manageNote(note, velocity):
         current_intensity = 1.0
         current_phase = 1.0
         pending_plan = False
-        harm_gen_hits = 0      # restart chord-tone match stats for this transition
-        harm_gen_total = 0
     elif current_phase > 0.0 and HARM_REPLAN_EVERY > 0 and (i % HARM_REPLAN_EVERY == 0):
         # Re-plan while the movement is still active so the FiLM chord tracks the
         # evolving (autoregressive) melody instead of staying frozen for the span.
@@ -722,8 +696,6 @@ def manageNote(note, velocity):
                 pc_bias_weight=HARM_PC_BIAS,
                 cache=kv_cache,
                 temperature=TEMPERATURE,
-                film_gain=FILM_GAIN,
-                film_debug=HARM_FILM_DEBUG,
             )
         else:
             new_pitch_token, _ = model.gen_pitch_token(
@@ -734,34 +706,9 @@ def manageNote(note, velocity):
                 cfg_weight=HARM_CFG_WEIGHT,
                 pc_bias_weight=HARM_PC_BIAS,
                 temperature=TEMPERATURE,
-                film_gain=FILM_GAIN,
-                film_debug=HARM_FILM_DEBUG,
             )
         last_gen_time = time.perf_counter()
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
-
-    # Overlay the predicted chord (white rows) on the visualizer pitch roll so the
-    # performer can see whether generated pitches follow the chord (only while a
-    # movement is active, i.e. intensity>0).
-    visualizer.set_chord_chroma(current_chroma, current_intensity > 0.0)
-
-    # --- TRACES: verify the FiLM chord influences generation during a transition.
-    # For each note generated while intensity>0, check if its pitch-class (p%12)
-    # is a chord tone (chroma>0) and compare the running chord-tone hit rate to the
-    # chance rate (#chord pcs / 12). observed >> chance => FiLM is steering pitches.
-    if TRACES and current_intensity > 0.0:
-        _pc = int(new_pitch_token) % 12
-        _chord_pcs = [p for p in range(12) if current_chroma[p] > 0.0]
-        _in_chord = _pc in _chord_pcs
-        harm_gen_total += 1
-        if _in_chord:
-            harm_gen_hits += 1
-        _rate = harm_gen_hits / harm_gen_total
-        _chance = (len(_chord_pcs) / 12.0) if len(_chord_pcs) > 0 else 0.0
-        print(f"[harm] gen {new_pitch_token} ({_pc_name(_pc)}) "
-              f"{'IN ' if _in_chord else 'OUT'} chord [{' '.join(_PC_NAMES[p] for p in _chord_pcs)}]  "
-              f"int={current_intensity:.2f} phase={current_phase:.2f}  "
-              f"hit_rate={_rate:.2f} ({harm_gen_hits}/{harm_gen_total}) vs chance={_chance:.2f}")
 
     # Release: transition_phase decays toward 0 across the movement span (matching
     # the training span-decay); intensity stays binary 1.0 while active and drops

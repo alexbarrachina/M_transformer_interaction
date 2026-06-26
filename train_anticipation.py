@@ -413,6 +413,7 @@ def main():
                             }
                             # run the model
                             val_loss, val_acc = model(vx)  # Update your model to accept target separately
+                            val_loss_temp = val_loss['loss_total'].item()
 
                         if(cfg['use_logs']):                
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
@@ -423,7 +424,7 @@ def main():
 
         
         if ep % cfg['save_every'] == 0:
-            fname = './save_models/' + cfg['model_name'] + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
+            fname = './save_models/' + cfg['model_name'] + '_' + str(ep) + '_eps_' + str(nsteps) + '_steps_' + str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(val_loss_temp), 4)) + '_val_loss_' + str(round(float(acc.item()), 4)) + '_acc.pth'
             torch.save(model.state_dict(), fname)
 
 

@@ -2359,5 +2359,77 @@ def midi_to_dict(input_midi,
 
     return feature_data, notes_counter
 
+from params import note_name_to_pc, PC_UNKNOWN, QUALITY_NAME_MAP, QUALITY_OTHER, QUALITY_TEMPLATES, QUALITY_UNKNOWN, MODE_UNKNOWN, MODE_MAJOR, MODE_MINOR, FUNC_UNKNOWN, FUNCTION_NAME_MAP
+
+def parse_harmony_label(text):
+    """Parse an analyzer harmony-label string into a tuple
+    (root_pc, quality_id, key_pc, mode, function_id).
+
+    Expected format (German functional analysis), e.g.:
+        'C# DOMINANT_SEVENTH:SEPT(7):F# MOLL:D (V)'
+        'C# DIMINISHED_MINOR_SEVENTH:TERZQUART(3,4):null:null:'
+    Layout: '<root> <QUALITY>:<figbass>(...):<keyroot> <KEYMODE>:<FUNC> (<roman>)'
+    Trailing key/function fields may be 'null'. The figured-bass field is ignored
+    (inversion is recoverable from the chord-tone bass). Returns None if the text
+    does not look like a harmony label.
+    """
+    if not text:
+        return None
+    text = text.strip()
+    if ':' not in text:
+        return None
+    parts = text.split(':')
+
+    # parts[0] = '<root> <QUALITY>'
+    head = parts[0].strip().split(None, 1)
+    if len(head) < 2:
+        return None
+    root_tok, quality_tok = head[0], head[1].strip().upper()
+    root_pc = note_name_to_pc(root_tok)
+    if root_pc == PC_UNKNOWN:
+        return None  # not a real chord label
+    quality_id = QUALITY_NAME_MAP.get(quality_tok, QUALITY_OTHER)
+
+    # parts[2] = '<keyroot> <KEYMODE>' or 'null'
+    key_pc, mode = PC_UNKNOWN, MODE_UNKNOWN
+    if len(parts) >= 3:
+        kf = parts[2].strip()
+        if kf and kf.lower() != 'null':
+            ktoks = kf.split(None, 1)
+            key_pc = note_name_to_pc(ktoks[0])
+            if len(ktoks) > 1:
+                km = ktoks[1].strip().upper()
+                if km.startswith('MOLL'):
+                    mode = MODE_MINOR
+                elif km.startswith('DUR'):
+                    mode = MODE_MAJOR
+
+    # parts[3] = '<FUNC> (<roman>)' or 'null'
+    function_id = FUNC_UNKNOWN
+    if len(parts) >= 4:
+        ff = parts[3].strip()
+        if ff and ff.lower() != 'null':
+            fsym = ff.split('(')[0].strip()
+            if fsym:
+                function_id = FUNCTION_NAME_MAP.get(
+                    fsym, FUNCTION_NAME_MAP.get(fsym[:1], FUNC_UNKNOWN)
+                )
+
+    return (root_pc, quality_id, key_pc, mode, function_id)
+
+
+def identify_chord(pitch_classes):
+    """Notes-derived fallback when no label string is present.
+    Returns (root_pc, quality_id) from a set of pitch classes via interval
+    templates. Falls back to (lowest pc, QUALITY_UNKNOWN) when nothing matches."""
+    pcs = sorted({int(p) % 12 for p in pitch_classes})
+    if not pcs:
+        return PC_UNKNOWN, QUALITY_UNKNOWN
+    for root in pcs:
+        intervals = frozenset((p - root) % 12 for p in pcs)
+        q = QUALITY_TEMPLATES.get(intervals)
+        if q is not None:
+            return root, q
+    return pcs[0], QUALITY_UNKNOWN
 
 

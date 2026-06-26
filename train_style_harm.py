@@ -49,14 +49,14 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
-NSTEPS_INIT = 144
+NSTEPS_INIT = 12
 RESUME = True
 
 #==========================================================================
 
+#def find_latest_checkpoint(checkpoint_dir: str = './save_models') -> tuple[str, int, int]:
 def find_latest_checkpoint(checkpoint_dir: str = './save_models', model_name: str = '') -> tuple[str, int, int]:
-    """
-    Find the latest checkpoint in the save_models directory.
+    """Find the latest checkpoint in the save_models directory.
     
     Returns:
         tuple: (checkpoint_path, epoch, steps) or (None, 0, 0) if no checkpoint found
@@ -84,6 +84,15 @@ def find_latest_checkpoint(checkpoint_dir: str = './save_models', model_name: st
         # Parse filename: MODEL_NAME_epoch_eps_steps_steps_loss_loss_acc_acc.pth
         match = re.search(r'(\d+)_eps_(\d+)_steps', filename)
         if match:
+            # Skip corrupted (truncated) checkpoint files
+            try:
+                import zipfile
+                with zipfile.ZipFile(checkpoint_file, 'r'):
+                    pass
+            except Exception:
+                print(f"Skipping corrupted checkpoint: {checkpoint_file}")
+                continue
+
             epoch = int(match.group(1))
             steps = int(match.group(2))
             
@@ -485,17 +494,6 @@ def main():
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)
     model.to(device)
 
-    # Optional warm-start from a base AE_style_v2 checkpoint (strict=False): the
-    # zero-initialised harmony FiLM / planner / aux heads start as identity, so the
-    # warm-started model reproduces the base style+button model exactly.
-    init_ckpt = cfg.get('init_from_ckpt', '')
-    if init_ckpt:
-        sd = torch.load(init_ckpt, map_location=device)
-        missing, unexpected = model.load_state_dict(sd, strict=False)
-        print(f"Warm-started from {init_ckpt}: "
-              f"{len(missing)} new params (harmony/planner/aux), "
-              f"{len(unexpected)} unexpected keys")
-
     #==========================================================================
 
     ''' WANDB '''
@@ -553,9 +551,12 @@ def main():
 
     ''' LOAD CHECKPOINT '''
     nsteps = 0
+    val_loss_temp = 0.0
 
     if RESUME:
+        #checkpoint_path, start_epoch, start_steps = find_latest_checkpoint()
         checkpoint_path, start_epoch, start_steps = find_latest_checkpoint(model_name=model_name)
+    
     
         if checkpoint_path:
             start_epoch, start_steps = load_checkpoint(model, optim, checkpoint_path, device)
@@ -614,6 +615,8 @@ def main():
                             wandb.log({"loss_aux_chord": cfg.get('loss_aux_chord', 0.0) * loss['loss_aux_chord'].item()}, step=nsteps)
                         if 'loss_move_recover' in loss:
                             wandb.log({"loss_move_recover": cfg.get('loss_move_recover', 0.0) * loss['loss_move_recover'].item()}, step=nsteps)
+                        if 'loss_film_reg' in loss:
+                            wandb.log({"loss_film_reg": cfg.get('loss_film_reg', 0.0) * loss['loss_film_reg'].item()}, step=nsteps)
 
                         nsteps += 1
 
@@ -636,6 +639,7 @@ def main():
                         with torch.amp.autocast(device_type=device_type, dtype=dtype):
                             vx = {k: v.to(device) for k, v in val_batch.items()}
                             val_loss, val_acc = model(vx)
+                            val_loss_temp = val_loss['loss_total'].item()
 
                         if cfg['use_logs']:
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
@@ -650,9 +654,13 @@ def main():
                 str(ep) + '_eps_' +
                 str(nsteps) + '_steps_' +
                 str(round(float(loss['loss_total'].item()), 4)) + '_loss_' +
+                str(round(float(val_loss_temp), 4)) + '_val_loss_' +
                 str(round(float(acc.item()), 4)) + '_acc.pth'
             )
-            torch.save(model.state_dict(), fname)
+            fname_tmp = fname + '.tmp'
+            torch.save(model.state_dict(), fname_tmp)
+            os.replace(fname_tmp, fname)
+
 
 
 if __name__ == '__main__':

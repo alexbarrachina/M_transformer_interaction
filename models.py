@@ -1982,7 +1982,7 @@ MODELS_PARAMETERS = {
     'model_type': 'AE_style',
     'description': 'more style context window',
     'train_log': '',
-    'ckpt_file_name': '',
+    'ckpt_file_name': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
     'seq_len': 512,
     'style_seq_len': 512,
     'pad_idx': 128,
@@ -1999,10 +1999,11 @@ MODELS_PARAMETERS = {
     "dataset_train_path": "./Training-Data/giantmidi_full_train",
     "dataset_val_path": "./Training-Data/giantmidi_full_test",
     # Training settings
-    "save_every": 5,
+    "save_every": 1,
     "batch_size": 16,
     "num_workers": 0,
     },
+
 # Style-conditioned autoencoder: buttons + cross-attention to style reference
 'AE_style_v1': {
     'model_type': 'AE_style_joker',
@@ -2026,14 +2027,14 @@ MODELS_PARAMETERS = {
     "dataset_val_path": "./Training-Data/giantmidi_full_test",
     # Training settings
     "save_every": 5,
-    "batch_size": 16,
+    "batch_size": 8,
     "num_workers": 2,
     },
 'AE_style_v2': {
     'model_type': 'AE_style',
     'description': 'Style-conditioned: no joker, less seq_len, more style_seq_len, more deviate',
     'train_log': '',
-    'ckpt_file_name': '',
+    'ckpt_file_name': './save_models/AE_style_v2_20_eps_567_steps_0.6873_loss_0.7982_acc.pth',
     'seq_len': 256,
     'style_seq_len': 512, 
     'pad_idx': 128,
@@ -2058,12 +2059,12 @@ MODELS_PARAMETERS = {
     'model_type': 'AE_style_harm',
     'description': 'Style + button + harmony movement (AdaLN-Zero FiLM, hidden chord planner). Resumable from AE_style_v2.',
     'train_log': '',
-    'ckpt_file_name': '',
-    # Optional warm-start: path to an AE_style_v2 checkpoint. Loaded strict=False
+    'ckpt_file_name': './save_models/AE_style_harm_v1_10_eps_780_steps_1.392_loss_0.9414_acc.pth',
+    # Optional warm-start: path to an AE_style_v1 checkpoint. Loaded strict=False
     # so the zero-initialised harmony/planner/aux params start as identity and the
     # model reproduces the base style model until harmony training kicks in.
-    'init_from_ckpt': '',
-    'seq_len': 256,
+    'init_from_ckpt': './save_models/AE_style_v1_0_eps_1092_steps_0.773_loss_0.7658_acc.pth',
+    'seq_len': 512,
     'style_seq_len': 512,
     'pad_idx': 128,
     'emb_dim': 2048,
@@ -2074,49 +2075,10 @@ MODELS_PARAMETERS = {
     # Harmony conditioning (stage 2)
     'harm_cond_dim': 256,
     'harm_film_start_frac': 0.5,   # modulate the upper half of decoder blocks
-    'planner_dim': 256,
-    'planner_depth': 2,
-    'planner_heads': 8,
-    'harmony_drop_prob': 0.3,      # train the unconditional branch (CFG / release)
-    'joker_prob': 0.1,             # "move now, model decides which"
-    'loss_chord_plan': 0.5,        # hidden chord planner supervision
-    'loss_aux_chord': 0.5,         # decoder-hidden chord-factor supervision
-    # Stage 3: movement-constrained planner sampling + soft PC-bias
-    'movement_clf_dim': 128,
-    'loss_move_recover': 0.5,      # learn chord-transition -> movement compatibility
-    'pc_bias_weight': 0.0,         # inference soft pitch-class logit bias (0 = off)
-    # Loss weights (style/button, inherited from AE_style)
-    'loss_margin': 0.1,
-    'loss_contour': 0.1,
-    'loss_deviate': 0.2,
-    # Dataset paths (regenerate with midis2pickles.py harmony output)
-    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_labels_train",
-    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_labels_test",
-    # Training settings
-    "save_every": 5,
-    "batch_size": 8,
-    "num_workers": 10,
-    },
-'AE_style_harm_tester_v1': {
-    'model_type': 'AE_style_harm',
-    'description': 'Style + button + harmony movement (AdaLN-Zero FiLM, hidden chord planner). Resumable from AE_style_v2.',
-    'train_log': '',
-    'ckpt_file_name': '',
-    # Optional warm-start: path to an AE_style_v2 checkpoint. Loaded strict=False
-    # so the zero-initialised harmony/planner/aux params start as identity and the
-    # model reproduces the base style model until harmony training kicks in.
-    'init_from_ckpt': './save_models/AE_style_tester_30_eps_434_steps_0.5793_loss_0.8586_acc.pth',
-    'seq_len': 512,
-    'style_seq_len': 256,
-    'pad_idx': 128,
-    'emb_dim': 512,
-    'num_layers': 4,
-    'style_encoder_depth': 2,
-    'heads': 32,
-    'num_buttons': 19,
-    # Harmony conditioning (stage 2)
-    'harm_cond_dim': 256,
-    'harm_film_start_frac': 0.5,   # modulate the upper half of decoder blocks
+    # FiLM stabilisation (fix for the non-neutral-chord modulation blow-up):
+    'harm_film_scale_limit': 0.5,  # Rec 1: bound |scale| (tanh*limit) per element
+    'harm_film_shift_limit': 0.5,  # Rec 1: bound |shift| (tanh*limit) per element
+    'loss_film_reg': 0.01,         # Rec 2: penalty on mean squared FiLM modulation
     'planner_dim': 256,
     'planner_depth': 2,
     'planner_heads': 8,
@@ -2136,7 +2098,54 @@ MODELS_PARAMETERS = {
     "dataset_train_path": "./Training-Data/giantmidi_full_harmony_labels_train",
     "dataset_val_path": "./Training-Data/giantmidi_full_harmony_labels_test",
     # Training settings
-    "save_every": 5,
+    "save_every": 1,
+    "batch_size": 4,
+    "num_workers": 0,
+    },
+'AE_style_harm_tester_v1': {
+    'model_type': 'AE_style_harm',
+    'description': 'Style + button + harmony movement (AdaLN-Zero FiLM, hidden chord planner). Resumable from AE_style_v2.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_harm_tester_v1_15_eps_272_steps_1.4352_loss_0.8621_acc.pth',
+    # Optional warm-start: path to an AE_style_v2 checkpoint. Loaded strict=False
+    # so the zero-initialised harmony/planner/aux params start as identity and the
+    # model reproduces the base style model until harmony training kicks in.
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 2,
+    'heads': 32,
+    'num_buttons': 19,
+    # Harmony conditioning (stage 2)
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,   # modulate the upper half of decoder blocks
+    # FiLM stabilisation (fix for the non-neutral-chord modulation blow-up):
+    'harm_film_scale_limit': 0.5,  # Rec 1: bound |scale| (tanh*limit) per element
+    'harm_film_shift_limit': 0.5,  # Rec 1: bound |shift| (tanh*limit) per element
+    'loss_film_reg': 0.01,         # Rec 2: penalty on mean squared FiLM modulation
+    'planner_dim': 256,
+    'planner_depth': 2,
+    'planner_heads': 8,
+    'harmony_drop_prob': 0.3,      # train the unconditional branch (CFG / release)
+    'joker_prob': 0.1,             # "move now, model decides which"
+    'loss_chord_plan': 0.5,        # hidden chord planner supervision
+    'loss_aux_chord': 0.5,         # decoder-hidden chord-factor supervision
+    # Stage 3: movement-constrained planner sampling + soft PC-bias
+    'movement_clf_dim': 128,
+    'loss_move_recover': 0.5,      # learn chord-transition -> movement compatibility
+    'pc_bias_weight': 0.0,         # inference soft pitch-class logit bias (0 = off)
+    # Loss weights (style/button, inherited from AE_style)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (regenerate with midis2pickles.py harmony output)
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_labels_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_labels_test",
+    # Training settings
+    "save_every": 1,
     "batch_size": 16,
     "num_workers": 0,
     },

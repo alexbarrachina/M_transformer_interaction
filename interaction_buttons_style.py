@@ -75,7 +75,7 @@ else:
 
 ''' MODEL '''
 
-model_name = 'AE_style_v1' 
+model_name = 'AE_style_tester_v2' 
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)

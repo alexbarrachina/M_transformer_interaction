@@ -1093,7 +1093,9 @@ class AttentionLayers(nn.Module):
         cache_age = 1,
         return_hiddens = False,
         film_table = None,
-        film_intensity = None
+        film_intensity = None,
+        film_gain: float = 1.0,
+        film_debug: bool = False
     ):
 
         # initialize accums
@@ -1195,7 +1197,17 @@ class AttentionLayers(nn.Module):
             # and the zero-initialised modulator starts as identity.
             if (film_table is not None) and (film_intensity is not None) and (ind in film_table):
                 f_scale, f_shift = film_table[ind]
-                x = x * (1.0 + film_intensity * f_scale) + film_intensity * f_shift
+                # Test 2: instrument the conditioned (last) position BEFORE applying FiLM.
+                if film_debug:
+                    _x_pre = x[:, -1].norm().item()
+                    _sc = (film_intensity[:, -1] * f_scale[:, -1]).norm().item()
+                    _sh = (film_intensity[:, -1] * f_shift[:, -1]).norm().item()
+                # Test 1: scale the AdaLN-Zero modulation by film_gain (1.0 = original).
+                x = x * (1.0 + film_gain * film_intensity * f_scale) + film_gain * film_intensity * f_shift
+                if film_debug:
+                    print(f"[film] ind={ind} gain={film_gain:.3f} "
+                          f"||I*scale||={_sc:.3f} ||I*shift||={_sh:.3f} "
+                          f"||x_pre||={_x_pre:.3f} ||x_post||={x[:, -1].norm().item():.3f}")
 
             if layer_type == 'a':
                 out, inter = block(x, mask = mask, context_mask = self_attn_kv_mask, attn_mask = attn_mask, rel_pos = self.rel_pos, rotary_pos_emb = rotary_pos_emb, prev_attn = prev_attn, cache = next(iter_attn_cache, None), mem = layer_mem, return_intermediates = True)
@@ -12859,6 +12871,10 @@ class HarmonyConditioner(nn.Module):
         self.chroma_proj = nn.Linear(12, d_cond)
         self.scalar_proj = nn.Linear(2, d_cond)                   # transition_phase, intensity
         self.out = nn.Sequential(nn.SiLU(), nn.Linear(d_cond, d_cond))
+        # Rec 3: normalise the conditioning vector so a non-neutral chord (which
+        # activates many embeddings at once) cannot produce an ~8x larger ||c||
+        # than the neutral state. Keeps the FiLM projection input scale stable.
+        self.norm = nn.LayerNorm(d_cond)
 
     def forward(self, h: Dict[str, Tensor]) -> Tensor:
         c = (self.move_emb(h['harm_movement'])
@@ -12870,20 +12886,32 @@ class HarmonyConditioner(nn.Module):
              + self.chroma_proj(h['chroma'].float()))
         scal = torch.stack([h['transition_phase'].float(), h['intensity'].float()], dim=-1)
         c = c + self.scalar_proj(scal)
-        return self.out(c)
+        return self.norm(self.out(c))
 
 
 class HarmonyFiLM(nn.Module):
     """Produce per-sub-layer (scale, shift) AdaLN-Zero modulation parameters from
-    the harmony condition. Zero-initialised => identity modulation at start."""
-    def __init__(self, d_cond: int, dim: int, mod_inds: List[int]):
+    the harmony condition. Zero-initialised => identity modulation at start.
+
+    Rec 1: scale/shift are bounded with tanh * limit so a non-neutral chord cannot
+    drive an unbounded modulation that pushes the residual stream off-manifold
+    (the observed 1-pitch collapse). tanh(0)=0 keeps the zero-init identity.
+    Rec 2: the mean squared (bounded) modulation magnitude of the most recent
+    forward is exposed via `last_penalty` so training can regularise it.
+    """
+    def __init__(self, d_cond: int, dim: int, mod_inds: List[int],
+                 scale_limit: float = 1.0, shift_limit: float = 1.0):
         super().__init__()
         self.mod_inds: List[int] = list(mod_inds)
         self.dim = dim
         self.n = len(self.mod_inds)
+        self.scale_limit = float(scale_limit)
+        self.shift_limit = float(shift_limit)
         self.proj = nn.Linear(d_cond, max(1, self.n) * 2 * dim)
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
+        # Rec 2: magnitude penalty from the most recent forward (training term).
+        self.last_penalty: Tensor = torch.zeros(())
 
     def forward(self, c: Tensor) -> Dict[int, Tuple[Tensor, Tensor]]:
         table: Dict[int, Tuple[Tensor, Tensor]] = {}
@@ -12891,8 +12919,16 @@ class HarmonyFiLM(nn.Module):
             return table
         B, T, _ = c.shape
         params = self.proj(c).view(B, T, self.n, 2, self.dim)
+        # Rec 1: bound the modulation (tanh * limit).
+        scale = self.scale_limit * torch.tanh(params[:, :, :, 0, :])      # [B,T,n,dim]
+        shift = self.shift_limit * torch.tanh(params[:, :, :, 1, :])      # [B,T,n,dim]
+        # Rec 2: store mean squared modulation magnitude for the training penalty.
+        # Only in training to avoid an attribute side-effect on the compiled
+        # inference path (the penalty is unused at inference).
+        if self.training:
+            self.last_penalty = scale.pow(2).mean() + shift.pow(2).mean()
         for j, ind in enumerate(self.mod_inds):
-            table[ind] = (params[:, :, j, 0, :], params[:, :, j, 1, :])
+            table[ind] = (scale[:, :, j, :], shift[:, :, j, :])
         return table
 
 
@@ -12993,7 +13029,9 @@ class Decoder_no_dtime_style_harm(Decoder_no_dtime_style):
     its normal LayerNorm. Identity at init (zero-init FiLM) and identity at
     intensity=0, so it is resumable from AE_style_v2 and CFG/null-safe.
     """
-    def __init__(self, *, harm_cond_dim: int = 256, harm_film_start_frac: float = 0.5, **kwargs):
+    def __init__(self, *, harm_cond_dim: int = 256, harm_film_start_frac: float = 0.5,
+                 harm_film_scale_limit: float = 1.0, harm_film_shift_limit: float = 1.0,
+                 **kwargs):
         super().__init__(**kwargs)
         dim = self.emb_dim
         self.harm_conditioner = HarmonyConditioner(harm_cond_dim, dim)
@@ -13007,7 +13045,9 @@ class Decoder_no_dtime_style_harm(Decoder_no_dtime_style):
                 block_idx += 1
             if t in ('a', 'f') and block_idx >= start_block:
                 mod_inds.append(ind)
-        self.harm_film = HarmonyFiLM(harm_cond_dim, dim, mod_inds)
+        self.harm_film = HarmonyFiLM(harm_cond_dim, dim, mod_inds,
+                                     scale_limit=harm_film_scale_limit,
+                                     shift_limit=harm_film_shift_limit)
 
     def forward(
         self,
@@ -13021,6 +13061,8 @@ class Decoder_no_dtime_style_harm(Decoder_no_dtime_style):
         mems: Optional[List[Tensor]] = None,
         seq_start_pos: Optional[Tensor] = None,
         cache: Optional[LayerIntermediates] = None,
+        film_gain: float = 1.0,
+        film_debug: bool = False,
         **kwargs
     ):
         pitch = self.pitch_emb(past_tokens['pitch'])
@@ -13034,12 +13076,17 @@ class Decoder_no_dtime_style_harm(Decoder_no_dtime_style):
             c = self.harm_conditioner(harm_fields)                       # [B,T,d_cond]
             film_table = self.harm_film(c)                               # {ind:(scale,shift)}
             film_intensity = harm_fields['intensity'].float().unsqueeze(-1)  # [B,T,1]
+            # Test 2: conditioner output norm at the conditioned (last) position.
+            if film_debug:
+                print(f"[film] ||c||={c[:, -1].norm().item():.3f} "
+                      f"intensity_last={float(film_intensity[:, -1].mean().item()):.3f}")
 
         x, intermediates = self.attn_layers(
             x, context=style_context, context_mask=style_context_mask,
             mask=mask, mems=mems, cache=cache, return_hiddens=True,
             seq_start_pos=seq_start_pos,
-            film_table=film_table, film_intensity=film_intensity, **kwargs
+            film_table=film_table, film_intensity=film_intensity,
+            film_gain=film_gain, film_debug=film_debug, **kwargs
         )
 
         logits = self.to_logits(x)
@@ -13097,6 +13144,7 @@ class AE_style_harm(AE_style):
         self.w_chord_plan = c.get('loss_chord_plan', 0.5)
         self.w_aux_chord = c.get('loss_aux_chord', 0.5)
         self.w_move_recover = c.get('loss_move_recover', 0.5)
+        self.w_film_reg = c.get('loss_film_reg', 0.0)   # Rec 2: FiLM magnitude penalty
         self.pc_bias_weight = c.get('pc_bias_weight', 0.0)   # default soft PC-bias at inference
         self._factor_ignore = {
             'root_pc': PC_UNKNOWN, 'quality_id': QUALITY_UNKNOWN,
@@ -13110,12 +13158,16 @@ class AE_style_harm(AE_style):
 
     def _augment_harm(self, harm: Dict[str, Tensor]) -> Dict[str, Tensor]:
         harm = dict(harm)
-        B = harm['intensity'].shape[0]
-        device = harm['intensity'].device
-        if self.training and self.harmony_drop_prob > 0:
-            keep = (torch.rand(B, 1, device=device) >= self.harmony_drop_prob).float()
-            harm['intensity'] = harm['intensity'].float() * keep
-        if self.training and self.joker_prob > 0:
+        if not harm:
+            return harm
+        _ref: Tensor = next(iter(harm.values()))
+        B: int = _ref.shape[0]
+        device = _ref.device
+        if 'intensity' in harm:
+            if self.training and self.harmony_drop_prob > 0:
+                keep = (torch.rand(B, 1, device=device) >= self.harmony_drop_prob).float()
+                harm['intensity'] = harm['intensity'].float() * keep
+        if self.training and self.joker_prob > 0 and 'harm_movement' in harm:
             mv = harm['harm_movement']
             relabel = (torch.rand(B, 1, device=device) < self.joker_prob) & (mv != MOVE_STABILIZE)
             harm['harm_movement'] = torch.where(relabel, torch.full_like(mv, MOVE_JOKER), mv)
@@ -13179,6 +13231,11 @@ class AE_style_harm(AE_style):
             'loss_aux_chord': (self.w_aux_chord, loss_aux_chord),
             'loss_move_recover': (self.w_move_recover, loss_move_recover),
         }
+        # Rec 2: penalise the bounded FiLM modulation magnitude (from the decoder's
+        # most recent forward) so the model keeps harmony modulation small instead
+        # of growing it until it destabilises the residual stream.
+        if self.w_film_reg > 0:
+            terms['loss_film_reg'] = (self.w_film_reg, self.decoder.harm_film.last_penalty)
         self._last_harm_terms = terms
         return logits, terms
 
@@ -13213,6 +13270,8 @@ class AE_style_harm(AE_style):
         temperature: float = 1.0,
         cache: Optional[LayerIntermediates] = None,
         pc_bias_weight: Optional[float] = None,
+        film_gain: float = 1.0,
+        film_debug: bool = False,
     ) -> Tuple[int, LayerIntermediates]:
         """Generate the next pitch with optional classifier-free guidance and a
         soft pitch-class logit bias.
@@ -13243,7 +13302,8 @@ class AE_style_harm(AE_style):
             logits, inter = self.decoder(
                 decoder_context, style_context=style_context,
                 style_context_mask=style_context_mask, harm_fields=h,
-                return_intermediates=True, cache=c, seq_start_pos=None)
+                return_intermediates=True, cache=c, seq_start_pos=None,
+                film_gain=film_gain, film_debug=film_debug)
             return logits[:, -1], inter
 
         if harm is not None and cfg_weight != 1.0:

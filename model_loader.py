@@ -434,6 +434,8 @@ def load_model(model_name='default',
                 heads = cfg['heads'],
                 harm_cond_dim = cfg.get('harm_cond_dim', 256),
                 harm_film_start_frac = cfg.get('harm_film_start_frac', 0.5),
+                harm_film_scale_limit = cfg.get('harm_film_scale_limit', 1.0),
+                harm_film_shift_limit = cfg.get('harm_film_shift_limit', 1.0),
                 rotary_pos_emb = True,
                 attn_flash = True
             ),

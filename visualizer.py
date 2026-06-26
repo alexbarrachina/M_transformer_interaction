@@ -47,6 +47,8 @@ class Visualizer:
         self.notes: List[Dict[str, Any]] = []
         self.buttons: List[Dict[str, Any]] = []
         self.jokers: List[Dict[str, Any]] = []
+        self.chord_pcs: List[int] = []        # pitch classes of the current predicted chord (white overlay)
+        self.chord_active: bool = False       # draw the chord overlay only while a movement is active
         self.primer_pitches: List[int] = []
         self.primer_dtimes: List[int] = []
         self.primer_durs: Optional[List[int]] = None
@@ -239,6 +241,16 @@ class Visualizer:
                     j['active'] = False
                     break
 
+    def set_chord_chroma(self, chroma: Optional[List[float]], active: bool = True) -> None:
+        """Set the predicted-chord chroma to overlay as white rows on the pitch
+        roll, so one can see whether the generated pitches land on chord tones.
+        Pass active=False (or an empty/None chroma) to hide the overlay."""
+        if chroma is None:
+            self.chord_pcs = []
+        else:
+            self.chord_pcs = [pc for pc in range(12) if pc < len(chroma) and chroma[pc] > 0.0]
+        self.chord_active = bool(active) and len(self.chord_pcs) > 0
+
     def update(self) -> None:
         now = time.time()
         dt = now - self.last_draw_time
@@ -291,6 +303,9 @@ class Visualizer:
         all_pitches = [n['pitch'] for n in self.notes] if self.notes else [60]
         min_pitch = min(all_pitches)
         max_pitch = max(all_pitches)
+        # Predicted-chord rows (white) drawn under the notes so generated pitches
+        # landing on chord tones are visible on top of the white bands.
+        self._draw_chord_overlay(pitch_y, self.pitch_height, min_pitch, max_pitch)
         # Pitch roll: variable height per pitch, double height
         self._draw_roll(self.notes, pitch_y, self.pitch_height, min_pitch, max_pitch, is_button=False)
         # Joker strip: bright magenta bars when joker is active
@@ -366,6 +381,24 @@ class Visualizer:
             y = int(y_offset + height - (slot + 1) * y_scale)
             rect = pygame.Rect(x, y, max(length, 2), int(max(y_scale, 2)))
             pygame.draw.rect(self.screen, color, rect)
+
+    def _draw_chord_overlay(self, y_offset: int, height: int, min_pitch: int, max_pitch: int) -> None:
+        """Paint translucent white bands at every MIDI pitch whose pitch-class is a
+        tone of the current predicted chord, across the live pitch-roll range, so
+        generated note bars can be compared against the chord (p % 12)."""
+        if not self.chord_active or not self.chord_pcs:
+            return
+        if max_pitch == min_pitch:  # match _draw_roll's degenerate-range handling
+            min_pitch -= 1
+            max_pitch += 1
+        y_scale = height / float(max_pitch - min_pitch + 1)
+        band_h = int(max(y_scale, 2))
+        band = pygame.Surface((self.width, band_h), pygame.SRCALPHA)
+        band.fill((255, 255, 255, 80))  # translucent white
+        for pitch in range(min_pitch, max_pitch + 1):
+            if (pitch % 12) in self.chord_pcs:
+                y = int(y_offset + height - (pitch - min_pitch + 1) * y_scale)
+                self.screen.blit(band, (0, y))
 
     def _draw_joker_panel(self, y_offset: int, height: int) -> None:
         for item in self.jokers:
