@@ -65,14 +65,14 @@ HARM_CFG_WEIGHT = 1.0# 2.0          # classifier-free guidance strength on harmo
 HARM_PC_BIAS = 0.0 #3.0             # soft pitch-class logit bias toward chord tones (0.0 = off)
 HARM_MOVE_WEIGHT = 4.0         # movement-compatibility weight in constrained chord planning. Reduces/increases the number of possible chords.
 HARM_PLAN_HIST = 32            # pitch-history length fed to the chord planner
-HARM_DECAY_STEP = 1.0 / 30.0   # transition_phase decay per generated note (harmony release span ~30 notes); intensity stays binary 1.0 while active
+HARM_DECAY_STEP = 1.0 / 15.0   # transition_phase decay per generated note (harmony release span ~30 notes); intensity stays binary 1.0 while active
 HARM_REPLAN_EVERY = 0          # while a movement is active, re-plan the chord every N generated notes so the FiLM chord tracks the evolving melody (0 = freeze for the whole span)
 # First test (intensity spatial-pattern diagnosis): force FiLM ON at EVERY position
 # of the harm_window (context included), so the decoder sees the same constant
 # intensity=1.0 regime it saw in training (where intensity was 1.0 over the whole
 # sequence, never a partly-conditioned window). True = override the per-note
 # intensity buffer with all-ones when building the window.
-FORCE_FULL_INTENSITY = True
+FORCE_FULL_INTENSITY = False
 # Test 1 (FiLM gain sweep): scale the harmony AdaLN-Zero modulation. 1.0 = original
 # strength; sweep {0.1, 0.25, 0.5, 1.0} to check whether weaker modulation stays
 # coherent (=> magnitude blow-up). Applied as x*(1 + g*I*scale) + g*I*shift.
@@ -103,7 +103,7 @@ else:
 
 ''' MODEL '''
 
-model_name = 'AE_style_harm_v1'
+model_name = 'AE_style_harm_tester_v1'
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)

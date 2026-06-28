@@ -28,6 +28,9 @@
 
 import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+# Reduce CUDA allocator fragmentation / peak VRAM (must be set before torch
+# initialises the CUDA context, i.e. before importing torch below).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
@@ -49,7 +52,7 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
-NSTEPS_INIT = 12
+NSTEPS_INIT = 56
 RESUME = True
 
 #==========================================================================
@@ -506,10 +509,15 @@ def main():
 
     ''' DATA '''
 
+    # Load as a compact dtype and free the raw Python list immediately: token
+    # values are small ints (0..128) so int16 halves the float32 host footprint
+    # and drops the duplicate list. The dataset's .view(...).long() still works.
     train_data = Any_Pickle_File_Reader(cfg['dataset_train_path'])
-    data_train = torch.Tensor(train_data)
+    data_train = torch.tensor(train_data, dtype=torch.int16)
+    del train_data
     eval_data = Any_Pickle_File_Reader(cfg['dataset_val_path'])
-    data_eval = torch.Tensor(eval_data)
+    data_eval = torch.tensor(eval_data, dtype=torch.int16)
+    del eval_data
 
     style_seq_len = cfg.get('style_seq_len', 256)
 
@@ -557,7 +565,6 @@ def main():
         #checkpoint_path, start_epoch, start_steps = find_latest_checkpoint()
         checkpoint_path, start_epoch, start_steps = find_latest_checkpoint(model_name=model_name)
     
-    
         if checkpoint_path:
             start_epoch, start_steps = load_checkpoint(model, optim, checkpoint_path, device)
             print(f"Resuming training from epoch {start_epoch}, step {start_steps}")
@@ -566,6 +573,19 @@ def main():
             start_epoch = 0
             start_steps = 0
             print("Starting training from scratch (no checkpoint found)")
+
+    else:
+        # Optional warm-start from a base AE_style_v2 checkpoint (strict=False): the
+        # zero-initialised harmony FiLM / planner / aux heads start as identity, so the
+        # warm-started model reproduces the base style+button model exactly.
+        init_ckpt = cfg.get('init_from_ckpt', '')
+        if init_ckpt:
+            sd = torch.load(init_ckpt, map_location=device)
+            missing, unexpected = model.load_state_dict(sd, strict=False)
+            print(f"Warm-started from {init_ckpt}: "
+                f"{len(missing)} new params (harmony/planner/aux), "
+                f"{len(unexpected)} unexpected keys")
+            
 
 
     ''' TRAINING '''

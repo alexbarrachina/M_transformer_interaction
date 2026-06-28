@@ -2106,7 +2106,7 @@ MODELS_PARAMETERS = {
     'model_type': 'AE_style_harm',
     'description': 'Style + button + harmony movement (AdaLN-Zero FiLM, hidden chord planner). Resumable from AE_style_v2.',
     'train_log': '',
-    'ckpt_file_name': './save_models/AE_style_harm_tester_v1_15_eps_272_steps_1.4352_loss_0.8621_acc.pth',
+    'ckpt_file_name': './save_models/AE_style_harm_tester_v1_15_eps_184_steps_1.9172_loss_1.7539_val_loss_0.8352_acc.pth',
     # Optional warm-start: path to an AE_style_v2 checkpoint. Loaded strict=False
     # so the zero-initialised harmony/planner/aux params start as identity and the
     # model reproduces the base style model until harmony training kicks in.

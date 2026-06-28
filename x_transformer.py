@@ -4332,6 +4332,85 @@ class AutoregressiveAutoencoder_anticipation(AutoregressiveAutoencoder_no_dtime)
 
         return gap_pitches_tensor, gap_buttons
 
+    @torch.inference_mode()
+    def gen_anticipation_bridge_step(
+        self,
+        context_pitch: Tensor,      # [1, L]  = [history(N), g_1..g_{k-1}]
+        context_button: Tensor,     # [1, L]  discrete buttons for those positions
+        injected_pitch: int,        # anticipation target (first injected note); < 0 → plain AR
+        antic_pos: int,             # index carrying the anticipation signal (= N-1)
+        cond_button: int,           # conditioning button for THIS bridge position
+        temperature: float = 1.0,
+    ) -> int:
+        """
+        Generate ONE bridge pitch for *incremental* gap filling (single
+        forward pass), so the per-keypress latency during a button →
+        injection transition stays at one inference instead of the
+        `delta + 1` passes spent by the batched `gen_anticipation_gap`.
+
+        This reproduces a single iteration of `gen_anticipation_gap`'s
+        Phase-1 loop:
+          • the anticipation of `injected_pitch` is broadcast at `antic_pos`
+            (the last original-context position), exactly as in the batched
+            version (causal attention exposes it to every later bridge);
+          • `cond_button` replaces the held last-user button so the gap can
+            follow the melodic-shape tendency from the last generated note
+            toward the first injected note instead of a flat held button.
+
+        The caller maintains the growing context (`[history, g_1..g_{k-1}]`)
+        and the interpolated button trajectory, appending the returned pitch
+        after each call.  Once `delta` bridges have been produced the caller
+        lays out `[history, g_1..g_delta, X_1..X_m]` and recomputes coherent
+        buttons with the encoder (see `gen_buttons`).
+
+        Parameters
+        ----------
+        context_pitch  : LongTensor [1, L]  history + bridges generated so far
+        context_button : LongTensor [1, L]  discrete buttons for `context_pitch`
+        injected_pitch : int                anticipation target (< 0 disables it)
+        antic_pos      : int                position of the anticipation signal
+        cond_button    : int                discrete button for the new bridge
+        temperature    : float              sampling temperature
+
+        Returns
+        -------
+        next_pitch : int   the generated bridge pitch (unplayed)
+        """
+        device: torch.device = context_pitch.device
+
+        # Extend by one placeholder position + its conditioning button.
+        cur_pitch: Tensor = torch.cat(
+            [context_pitch, torch.zeros(1, 1, dtype=torch.long, device=device)], dim=1
+        )
+        cur_button: Tensor = torch.cat(
+            [
+                context_button,
+                torch.full((1, 1), cond_button, dtype=torch.long, device=device),
+            ],
+            dim=1,
+        )
+
+        L: int = cur_pitch.shape[1]
+
+        # Build anticipation tensors (same length as cur_pitch).
+        antic_pitch_t: Tensor = torch.zeros(1, L, dtype=torch.long, device=device)
+        antic_mask_t: Tensor = torch.zeros(1, L, device=device)
+        if injected_pitch >= 0:
+            antic_pitch_t[0, antic_pos] = injected_pitch
+            antic_mask_t[0, antic_pos] = 1.0
+        mode_t: Tensor = torch.ones(1, dtype=torch.long, device=device)
+
+        gen_tokens: Dict[str, Tensor] = {
+            'pitch':       cur_pitch,
+            'button':      cur_button,
+            'antic_pitch': antic_pitch_t,
+            'antic_mask':  antic_mask_t,
+            'mode':        mode_t,
+        }
+
+        next_p: int = self.gen_pitch_token(gen_tokens, temperature=temperature)
+        return next_p
+
 
 class Decoder_only_no_dtime(Module):
     def __init__(

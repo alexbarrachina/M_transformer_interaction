@@ -354,9 +354,17 @@ with torch.inference_mode():
 
 ''' INJECTION MODE STATE '''
 injection_mode: bool = False   # True while SPACE is held
-need_gap: bool = False         # True after SPACE press, before first injection
+need_gap: bool = False         # True during the incremental gap-fill phase, before commit
 n_injected: int = 0            # total injected notes in current span
 i_before_injection: int = 0   # value of i when SPACE was pressed
+# Incremental gap-fill buffers (pipelined: 1 inference per injected note)
+gap_pitches_buf: List[int] = []   # bridge pitches generated so far (unplayed)
+gap_buttons_cond: List[int] = []  # interpolated conditioning button per bridge
+inj_pitches_buf: List[int] = []   # injected pitches played during the gap phase
+inj_dtimes_buf: List[int] = []    # their dtimes
+antic_target_pitch: int = -1      # first injected note = anticipation target
+gap_start_button: int = 0         # last generated button before injection (interp start)
+gap_target_button: int = 0        # first injected note's estimated button (interp end)
 
 # Full CTX_LEN in the primer strip and in the model; audible tail runs after MIDI opens (main loop).
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
@@ -374,6 +382,7 @@ def manageNote(note, velocity):
   global kv_cache
   global last_gen_time
   global injection_mode, need_gap, n_injected
+  global antic_target_pitch, gap_start_button, gap_target_button
   
   if TRACES:
     print("key", note)
@@ -395,43 +404,60 @@ def manageNote(note, velocity):
     timeLast = timeNew
 
     if injection_mode:
+      # Audio is always immediate (raw injected pitch); model work is pipelined.
+      playNote(note, velocity)
+      visualizer.get_note(note, velocity)
+      visualizer.get_button(0, velocity)
+      noteOn_dict[note] = (note, timeNew, 0)
+
       if need_gap:
-        # First injection: gen_anticipation_gap fills delta bridge pitches (Phase 1) and
-        # computes coherent buttons for gap + injected note (Phase 2).
-        # History length = CTX_LEN; internally grows to CTX_LEN+delta+1 (caveat 2 overrun accepted).
-        pitch_hist: torch.Tensor = torch.tensor(
-            dict_output_tokens['pitch'][i:i+CTX_LEN], dtype=torch.long
+        # GAP PHASE: spread bridge generation over the first `delta` injected
+        # notes — exactly one inference per keypress. The token block is only
+        # finalized once `delta` bridges exist (or on SPACE release).
+        if len(inj_pitches_buf) == 0:
+            # First injected note fixes the anticipation target and the button
+            # interpolation endpoints (last generated button → injected button).
+            antic_target_pitch = note
+            gap_start_button = b[i + CTX_LEN - 1]
+            try:
+                gap_target_button = key_to_button(note)
+            except:
+                gap_target_button = gap_start_button
+        inj_pitches_buf.append(note)
+        inj_dtimes_buf.append(dtime)
+
+        # Generate ONE bridge pitch (anticipating the first injected note).
+        g_idx: int = len(gap_pitches_buf)
+        ctx_pitch: torch.Tensor = torch.tensor(
+            dict_output_tokens['pitch'][i:i+CTX_LEN] + gap_pitches_buf,
+            dtype=torch.long
         ).unsqueeze(0).to(device)
-        btn_hist: torch.Tensor = torch.tensor(
-            b[i:i+CTX_LEN], dtype=torch.long
+        ctx_button: torch.Tensor = torch.tensor(
+            b[i:i+CTX_LEN] + gap_buttons_cond,
+            dtype=torch.long
         ).unsqueeze(0).to(device)
-        gap_pitches, gap_buttons = model.gen_anticipation_gap(
-            pitch_hist, btn_hist, note, temperature=TEMPERATURE
-        )
-        # Write delta gap notes (dtime=0, not played)
-        for g_idx in range(delta):
-            dict_output_tokens['dtime'][i + CTX_LEN + g_idx] = 0
-            dict_output_tokens['pitch'][i + CTX_LEN + g_idx] = gap_pitches[g_idx].item()
-            b[i + CTX_LEN + g_idx] = gap_buttons[g_idx].item()
-        # Write injected note
-        dict_output_tokens['dtime'][i + CTX_LEN + delta] = dtime
-        dict_output_tokens['pitch'][i + CTX_LEN + delta] = note
-        b[i + CTX_LEN + delta] = gap_buttons[delta].item()
-        i += delta + 1
-        need_gap = False
-        n_injected = 1
+        frac: float = float(g_idx + 1) / float(delta)
+        cond_btn: int = int(round(gap_start_button + frac * (gap_target_button - gap_start_button)))
+        cond_btn = max(0, min(cfg['num_buttons'] - 1, cond_btn))
+        with torch.inference_mode():
+            g_pitch: int = model.gen_anticipation_bridge_step(
+                ctx_pitch, ctx_button, antic_target_pitch, CTX_LEN - 1,
+                cond_btn, temperature=TEMPERATURE
+            )
+        gap_pitches_buf.append(g_pitch)
+        gap_buttons_cond.append(cond_btn)
+
+        # Once `delta` bridges exist, commit [history, gap, injected] + buttons.
+        if len(gap_pitches_buf) >= delta:
+            _commit_gap()
       else:
-        # Subsequent injection: write pitch + placeholder button.
-        # Full button recompute deferred to SPACE release (caveat 1).
+        # Steady-state injection (note beyond the gap): write pitch +
+        # placeholder button. Full button recompute deferred to SPACE release.
         dict_output_tokens['dtime'][i + CTX_LEN] = dtime
         dict_output_tokens['pitch'][i + CTX_LEN] = note
         b[i + CTX_LEN] = b[i + CTX_LEN - 1]  # placeholder: copy previous button
         i += 1
         n_injected += 1
-      playNote(note, velocity)
-      visualizer.get_note(note, velocity)
-      visualizer.get_button(0, velocity)
-      noteOn_dict[note] = (note, timeNew, 0)
 
     else:
       # Button mode: key → button → gen_pitch_token
@@ -511,6 +537,59 @@ def _recompute_buttons_for_injection() -> None:
     if TRACES:
         print(f"recomputed {delta + n_injected} buttons for injection span of {n_injected} notes")
 
+def _commit_gap() -> None:
+    """Commit the accumulated gap: write the `delta` bridge notes (dtime=0,
+    unplayed) followed by the injected notes, advance `i`, then recompute
+    coherent buttons over the whole block. Caller must hold buffer_lock."""
+    global i, n_injected, need_gap
+    n_bridges: int = len(gap_pitches_buf)
+    m: int = len(inj_pitches_buf)
+    # Bridges first (unplayed, dtime=0)
+    for g in range(n_bridges):
+        dict_output_tokens['dtime'][i + CTX_LEN + g] = 0
+        dict_output_tokens['pitch'][i + CTX_LEN + g] = gap_pitches_buf[g]
+        b[i + CTX_LEN + g] = gap_buttons_cond[g]
+    # Injected notes after the bridges (placeholder buttons, recomputed below)
+    for j in range(m):
+        pos: int = i + CTX_LEN + n_bridges + j
+        dict_output_tokens['dtime'][pos] = inj_dtimes_buf[j]
+        dict_output_tokens['pitch'][pos] = inj_pitches_buf[j]
+        b[pos] = b[pos - 1]
+    i += n_bridges + m
+    n_injected = m
+    need_gap = False
+    _recompute_buttons_for_injection()
+
+def _finish_gap_fallback() -> None:
+    """SPACE released before `delta` bridges were built: synchronously generate
+    the remaining bridges (one-time cost, short spans only) then commit.
+    Caller must hold buffer_lock."""
+    global need_gap
+    if len(inj_pitches_buf) == 0:
+        need_gap = False          # SPACE tapped with no injected note
+        return
+    while len(gap_pitches_buf) < delta:
+        g_idx: int = len(gap_pitches_buf)
+        ctx_pitch: torch.Tensor = torch.tensor(
+            dict_output_tokens['pitch'][i:i+CTX_LEN] + gap_pitches_buf,
+            dtype=torch.long
+        ).unsqueeze(0).to(device)
+        ctx_button: torch.Tensor = torch.tensor(
+            b[i:i+CTX_LEN] + gap_buttons_cond,
+            dtype=torch.long
+        ).unsqueeze(0).to(device)
+        frac: float = float(g_idx + 1) / float(delta)
+        cond_btn: int = int(round(gap_start_button + frac * (gap_target_button - gap_start_button)))
+        cond_btn = max(0, min(cfg['num_buttons'] - 1, cond_btn))
+        with torch.inference_mode():
+            g_pitch: int = model.gen_anticipation_bridge_step(
+                ctx_pitch, ctx_button, antic_target_pitch, CTX_LEN - 1,
+                cond_btn, temperature=TEMPERATURE
+            )
+        gap_pitches_buf.append(g_pitch)
+        gap_buttons_cond.append(cond_btn)
+    _commit_gap()
+
 def _on_key_press(key: pkeyboard.Key) -> None:
     global injection_mode, need_gap, n_injected, i_before_injection
     if key == pkeyboard.Key.space:
@@ -520,6 +599,10 @@ def _on_key_press(key: pkeyboard.Key) -> None:
                 need_gap = True
                 n_injected = 0
                 i_before_injection = i
+                gap_pitches_buf.clear()
+                gap_buttons_cond.clear()
+                inj_pitches_buf.clear()
+                inj_dtimes_buf.clear()
         return
     try:
         c = key.char  # type: ignore[union-attr]
@@ -537,7 +620,10 @@ def _on_key_release(key: pkeyboard.Key) -> None:
     if key == pkeyboard.Key.space:
         with buffer_lock:
             injection_mode = False
-            _recompute_buttons_for_injection()
+            if need_gap:
+                _finish_gap_fallback()  # complete + commit a short/aborted gap
+            else:
+                _recompute_buttons_for_injection()
 
 _key_listener = pkeyboard.Listener(on_press=_on_key_press, on_release=_on_key_release)
 _key_listener.start()
