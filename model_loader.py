@@ -127,8 +127,8 @@ def load_model(model_name='default',
            attn_flash = True
         )
         )
-    elif cfg['model_type'] == 'autoencoder_anticipation':
-        mpt_model = AutoregressiveAutoencoder_anticipation(
+    elif cfg['model_type'] == 'AE_antic':
+        mpt_model = AE_antic(
            cfg = cfg,
            decoder = Decoder_no_dtime_anticipation(
               max_seq_len = cfg['seq_len'],
@@ -456,10 +456,111 @@ def load_model(model_name='default',
                 attn_flash = True
             ),
         )
+    elif cfg['model_type'] == 'AE_style_tensions':
+        # Style + button + CONTINUOUS tonal-tension conditioning via AdaLN-Zero
+        # FiLM (TIV/TIS tension features from tension_extractor.py). Resumable
+        # from AE_style_v2 (zero-init FiLM / aux head => identity at start).
+        mpt_model = AE_style_tensions(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style_tensions(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                harm_cond_dim = cfg.get('harm_cond_dim', 256),
+                harm_film_start_frac = cfg.get('harm_film_start_frac', 0.5),
+                harm_film_scale_limit = cfg.get('harm_film_scale_limit', 1.0),
+                harm_film_shift_limit = cfg.get('harm_film_shift_limit', 1.0),
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
+    elif cfg['model_type'] == 'AE_style_move':
+        # Style + button + BINARY move-flag conditioning via AdaLN-Zero FiLM
+        # ("move now, model decides which" — boundary positions only, no chord
+        # factors / planner). Resumable from AE_style_v2 (zero-init FiLM =>
+        # identity at start).
+        mpt_model = AE_style_move(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style_move(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                harm_cond_dim = cfg.get('harm_cond_dim', 256),
+                harm_film_start_frac = cfg.get('harm_film_start_frac', 0.5),
+                harm_film_scale_limit = cfg.get('harm_film_scale_limit', 1.0),
+                harm_film_shift_limit = cfg.get('harm_film_shift_limit', 1.0),
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
     elif cfg['model_type'] == 'AE_antic_style':
         # Style-conditioned autoencoder + anticipation: buttons + cross-attention to
         # style reference + anticipated-pitch signal for user-injected notes
         mpt_model = AE_antic_style(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_antic_style(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
+    elif cfg['model_type'] == 'AE_antic_style_joker':
+        # Style-conditioned autoencoder + anticipation: buttons + cross-attention to
+        # style reference + anticipated-pitch signal for user-injected notes
+        mpt_model = AE_antic_style_joker(
             cfg = cfg,
             decoder = Decoder_no_dtime_antic_style(
                 max_seq_len = cfg['seq_len'],

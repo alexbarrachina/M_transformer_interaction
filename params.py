@@ -258,6 +258,24 @@ FUNCTION_NAME_MAP = {
     'DD': FUNC_DOUBLE_DOMINANT,
 }
 
+# ---------------------------------------------------------------------------
+#  TONAL TENSION conditioning (AE_style_tensions)
+# ---------------------------------------------------------------------------
+# The AE_style_tensions model conditions FiLM on a CONTINUOUS tonal-tension
+# feature vector (TIV/TIS-based) computed on the fly by tension_extractor.py,
+# instead of the discrete chord factors / movements used by AE_style_harm.
+# TENSION_FEATURE_DIM must match tension_extractor.TENSION_FEATURE_DIM.
+TENSION_FEATURE_DIM = 48   # [tiv12, key_post24, conf, entropy, harm_change,
+                           #  dist_key, dist_tonic, dist_subdom, dist_dom,
+                           #  dissonance, mod_pressure, tension, slope, resolution]
+
+# High-level performer commands mapped to a target tension trajectory at
+# inference (see tension_extractor.command_to_target).
+TENSION_CMD_MAINTAIN = 'maintain'
+TENSION_CMD_ADD_TENSION = 'add_tension'
+TENSION_CMD_RESOLVE = 'resolve'
+TENSION_CMD_CHANGE_TONAL_CENTER = 'change_tonal_center'
+
 # Note-name (English spelling, e.g. "C#", "Gb") -> pitch class 0..11.
 _NOTE_BASE_PC = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
 

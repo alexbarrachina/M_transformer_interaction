@@ -3755,7 +3755,7 @@ class Decoder_no_dtime_anticipation(Decoder_no_dtime):
         return logits
 
 
-class AutoregressiveAutoencoder_anticipation(AutoregressiveAutoencoder_no_dtime):
+class AE_antic(AutoregressiveAutoencoder_no_dtime):
     """
     Piano-Genie autoencoder with Anticipatory-Music-Transformer-style
     anticipation for user-injected MIDI notes.
@@ -4341,6 +4341,7 @@ class AutoregressiveAutoencoder_anticipation(AutoregressiveAutoencoder_no_dtime)
         antic_pos: int,             # index carrying the anticipation signal (= N-1)
         cond_button: int,           # conditioning button for THIS bridge position
         temperature: float = 1.0,
+        antic_strength: float = 2.0,
     ) -> int:
         """
         Generate ONE bridge pitch for *incremental* gap filling (single
@@ -4371,6 +4372,7 @@ class AutoregressiveAutoencoder_anticipation(AutoregressiveAutoencoder_no_dtime)
         antic_pos      : int                position of the anticipation signal
         cond_button    : int                discrete button for the new bridge
         temperature    : float              sampling temperature
+        antic_strength : float              side-channel scale for injected pitch (>1.0 boosts)
 
         Returns
         -------
@@ -4397,7 +4399,7 @@ class AutoregressiveAutoencoder_anticipation(AutoregressiveAutoencoder_no_dtime)
         antic_mask_t: Tensor = torch.zeros(1, L, device=device)
         if injected_pitch >= 0:
             antic_pitch_t[0, antic_pos] = injected_pitch
-            antic_mask_t[0, antic_pos] = 1.0
+            antic_mask_t[0, antic_pos] = antic_strength
         mode_t: Tensor = torch.ones(1, dtype=torch.long, device=device)
 
         gen_tokens: Dict[str, Tensor] = {
@@ -11813,6 +11815,7 @@ class AE_style(Module):
         style_context_mask: Optional[Tensor] = None,
         temperature: float = 1.0,
         cache: Optional[LayerIntermediates] = None,
+        logit_bias: Optional[Tensor] = None,
     ) -> Tuple[int, LayerIntermediates]:
         """
         Generate next pitch token during inference with KV cache support.
@@ -11823,6 +11826,9 @@ class AE_style(Module):
             style_context_mask: [B=1, S]
             temperature: sampling temperature
             cache: KV cache from the previous step (None on first call)
+            logit_bias: optional [V] or [B, V] additive bias on the next-pitch
+                logits (soft nudge, entries may be negative). Used by the
+                zero-training Tonnetz-step baseline; None = unchanged behavior.
         Returns:
             (next_token, updated_cache) — pass cache back on the next call
         """
@@ -11851,6 +11857,8 @@ class AE_style(Module):
         )
 
         logits = logits[:, -1]
+        if logit_bias is not None:
+            logits = logits + logit_bias.float().to(logits.device)
         probs: Tensor = F.softmax(logits / temperature, dim=-1)
         next_token: Tensor = torch.multinomial(probs, 1)
         return next_token.item(), intermediates
@@ -11877,18 +11885,18 @@ class AE_style(Module):
 
 class AE_antic_style(AE_style):
     """
-    Merge of AutoregressiveAutoencoder_anticipation and AE_style.
+    Merge of AE_antic and AE_style.
 
     Combines style cross-attention conditioning (bidirectional StyleEncoder,
     from AE_style) with Anticipatory-Music-Transformer-style anticipation for
-    user-injected MIDI notes (from AutoregressiveAutoencoder_anticipation).
+    user-injected MIDI notes (from AE_antic).
 
     The decoder cross-attends to a style reference AND receives an
     anticipated-pitch signal `delta` positions before each designated control,
     so the model learns to steer toward upcoming injected notes while matching
     the style reference.
 
-    See AutoregressiveAutoencoder_anticipation for the anticipation-augmentation
+    See AE_antic for the anticipation-augmentation
     strategy details and AE_style for the style-conditioning details.
     """
 
@@ -11917,7 +11925,7 @@ class AE_antic_style(AE_style):
 
     # ------------------------------------------------------------------ #
     #  Training augmentation (identical to                                 #
-    #  AutoregressiveAutoencoder_anticipation._build_anticipation)         #
+    #  AE_antic._build_anticipation)         #
     # ------------------------------------------------------------------ #
 
     def _build_anticipation(
@@ -12277,6 +12285,662 @@ class AE_antic_style(AE_style):
         next_token: Tensor = torch.multinomial(probs, 1)
         return next_token.item()
 
+    @torch.inference_mode()
+    def gen_anticipation_bridge_step(
+        self,
+        context_pitch: Tensor,      # [1, L]  = [history(N), g_1..g_{k-1}]
+        context_button: Tensor,     # [1, L]  discrete buttons for those positions
+        injected_pitch: int,        # anticipation target (first injected note); < 0 → plain AR
+        antic_pos: int,             # index carrying the anticipation signal (= N-1)
+        cond_button: int,           # conditioning button for THIS bridge position
+        style_context: Tensor,
+        style_context_mask: Optional[Tensor] = None,
+        temperature: float = 1.0,
+        antic_strength: float = 2.0, # to increase the strength of the injected pitch notes over future generated notes
+    ) -> int:
+        """
+        Generate ONE bridge pitch for *incremental* gap filling (single
+        forward pass), so the per-keypress latency during a button →
+        injection transition stays at one inference instead of the
+        `delta + 1` passes spent by the batched `gen_anticipation_gap`.
+
+        This reproduces a single iteration of `gen_anticipation_gap`'s
+        Phase-1 loop:
+          • the anticipation of `injected_pitch` is broadcast at `antic_pos`
+            (the last original-context position), exactly as in the batched
+            version (causal attention exposes it to every later bridge);
+          • `cond_button` replaces the held last-user button so the gap can
+            follow the melodic-shape tendency from the last generated note
+            toward the first injected note instead of a flat held button.
+
+        The caller maintains the growing context (`[history, g_1..g_{k-1}]`)
+        and the interpolated button trajectory, appending the returned pitch
+        after each call.  Once `delta` bridges have been produced the caller
+        lays out `[history, g_1..g_delta, X_1..X_m]` and recomputes coherent
+        buttons with the encoder (see `gen_buttons`).
+
+        Parameters
+        ----------
+        context_pitch  : LongTensor [1, L]  history + bridges generated so far
+        context_button : LongTensor [1, L]  discrete buttons for `context_pitch`
+        injected_pitch : int                anticipation target (< 0 disables it)
+        antic_pos      : int                position of the anticipation signal
+        cond_button    : int                discrete button for the new bridge
+        style_context  : Tensor             pre-computed via encode_style()
+        style_context_mask : optional mask for style_context
+        temperature    : float              sampling temperature
+        antic_strength : float              side-channel scale for injected pitch (>1.0 boosts)
+
+        Returns
+        -------
+        next_pitch : int   the generated bridge pitch (unplayed)
+        """
+        device: torch.device = context_pitch.device
+
+        # Extend by one placeholder position + its conditioning button.
+        cur_pitch: Tensor = torch.cat(
+            [context_pitch, torch.zeros(1, 1, dtype=torch.long, device=device)], dim=1
+        )
+        cur_button: Tensor = torch.cat(
+            [
+                context_button,
+                torch.full((1, 1), cond_button, dtype=torch.long, device=device),
+            ],
+            dim=1,
+        )
+
+        L: int = cur_pitch.shape[1]
+
+        # Build anticipation tensors (same length as cur_pitch).
+        antic_pitch_t: Tensor = torch.zeros(1, L, dtype=torch.long, device=device)
+        antic_mask_t: Tensor = torch.zeros(1, L, device=device)
+        if injected_pitch >= 0:
+            antic_pitch_t[0, antic_pos] = injected_pitch
+            antic_mask_t[0, antic_pos] = antic_strength
+        mode_t: Tensor = torch.ones(1, dtype=torch.long, device=device)
+
+        gen_tokens: Dict[str, Tensor] = {
+            'pitch':       cur_pitch,
+            'button':      cur_button,
+            'antic_pitch': antic_pitch_t,
+            'antic_mask':  antic_mask_t,
+            'mode':        mode_t,
+        }
+
+        next_p: int = self.gen_pitch_token(
+            gen_tokens,
+            style_context=style_context,
+            style_context_mask=style_context_mask,
+            temperature=temperature,
+        )
+        return next_p
+
+class AE_antic_style_joker(AE_style):
+    """
+    Merge of AE_antic and AE_style.
+
+    Combines style cross-attention conditioning (bidirectional StyleEncoder,
+    from AE_style) with Anticipatory-Music-Transformer-style anticipation for
+    user-injected MIDI notes (from AE_antic).
+
+    The decoder cross-attends to a style reference AND receives an
+    anticipated-pitch signal `delta` positions before each designated control,
+    so the model learns to steer toward upcoming injected notes while matching
+    the style reference.
+
+    See AE_antic for the anticipation-augmentation
+    strategy details and AE_style for the style-conditioning details.
+    
+    with a joker button that teaches the decoder to predict without guidance.
+    """
+
+    JOKER_REAL_VALUE: float = 2.0  # Outside the normal [-1, 1] button range
+    MIN_DELTA: int = 4
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        decoder: nn.Module,   # Decoder_no_dtime_antic_style
+        style_encoder: nn.Module,
+        cfg: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(encoder, decoder, style_encoder, cfg)
+        self.delta: int = int(self.cfg.get('anticipation_delta', 4))
+        assert self.delta >= self.MIN_DELTA, (
+            f"anticipation_delta must be >= {self.MIN_DELTA}, got {self.delta}"
+        )
+        self.control_rate: float = float(self.cfg.get('anticipation_rate', 0.15))
+        # Per-strategy probabilities (must sum to 1.0)
+        self.ar_prob: float = float(self.cfg.get('ar_prob', 0.5))
+        self.random_prob: float = float(self.cfg.get('random_prob', 0.25))
+        # span_prob is implicit: 1.0 - ar_prob - random_prob
+        # Span anticipation parameters
+        self.min_span: int = int(self.cfg.get('anticipation_min_span', 5))
+        self.max_span: int = int(self.cfg.get('anticipation_max_span', 20))
+
+        self.joker_ratio: float = float(self.cfg.get('joker_ratio', 0.15))
+        self.joker_button_idx: int = int(self.cfg['num_buttons'])
+
+    # ------------------------------------------------------------------ #
+    #  Training augmentation (identical to                                 #
+    #  AE_antic._build_anticipation)         #
+    # ------------------------------------------------------------------ #
+
+    def _make_joker_mask(
+        self,
+        B: int,
+        T: int,
+        device: torch.device,
+        melody_eligible: Optional[Tensor] = None,
+    ) -> Tensor:
+        """Create a boolean mask with consecutive blocks of joker positions
+        covering approximately self.joker_ratio of the sequence length
+        (among eligible timesteps, if `melody_eligible` is given).
+        Uses smoothed random noise + quantile thresholding to produce
+        natural contiguous blocks (fully tensorized, no loops)."""
+        noise = torch.rand(B, T, device=device)
+        kernel_size: int = max(3, T // 20)
+        kernel = torch.ones(1, 1, kernel_size, device=device) / kernel_size
+        pad_left: int = kernel_size // 2
+        pad_right: int = kernel_size - 1 - pad_left
+        noise_padded = F.pad(noise.unsqueeze(1), (pad_left, pad_right), mode='reflect')
+        smoothed = F.conv1d(noise_padded, kernel).squeeze(1).float()  # (B, T)
+        if melody_eligible is not None:
+            # Bias the quantile so ~joker_ratio of *melody* steps can become joker
+            # (ineligible timesteps are forced low before thresholding)
+            ineligible: Tensor = ~melody_eligible
+            neg_fill: float = -1.0e9
+            smoothed_for_q: Tensor = torch.where(
+                ineligible, torch.full_like(smoothed, neg_fill, dtype=smoothed.dtype, device=smoothed.device), smoothed
+            )
+            threshold = torch.quantile(
+                smoothed_for_q, 1.0 - self.joker_ratio, dim=1, keepdim=True
+            )
+            mask = (smoothed >= threshold) & melody_eligible
+        else:
+            threshold = torch.quantile(smoothed, 1.0 - self.joker_ratio, dim=1, keepdim=True)
+            mask = smoothed >= threshold
+        return mask
+
+    def _buttons_discrete_to_real(self, button_discrete: Tensor) -> Tensor:
+        """Convert discrete button indices to real values, mapping joker
+        button (index = num_buttons) to JOKER_REAL_VALUE."""
+        joker_mask = (button_discrete == self.joker_button_idx)
+        safe_buttons = torch.where(joker_mask, torch.zeros_like(button_discrete), button_discrete)
+        b = self.quantizer.discrete_to_real(safe_buttons)
+        b = torch.where(joker_mask, torch.full_like(b, self.JOKER_REAL_VALUE), b)
+        return b
+
+    def _build_anticipation(
+        self,
+        target: Tensor,     # [B, T]  target pitches
+        B: int,
+        T: int,
+        device: torch.device,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """
+        Build anticipation tensors for one training batch (pure tensor ops).
+
+        Three augmentation strategies are selected per batch element:
+          0 – No anticipation  (pure AR, probability = ar_prob)
+          1 – Random controls  (each position independently, probability = random_prob)
+          2 – Span controls    (contiguous phrase, probability = 1 − ar_prob − random_prob)
+
+        For each control at target index j (j >= delta) the anticipated
+        pitch is placed at decoder index j − delta so the model sees it
+        delta steps before the control position.
+
+        Returns
+        -------
+        antic_pitch      : LongTensor  [B, T]  anticipated pitch values (0 where inactive)
+        antic_mask_tensor: FloatTensor  [B, T]  1.0 at positions carrying an anticipation signal
+        mode             : LongTensor  [B]      0 = autoregressive, 1 = anticipation
+        """
+        roll: Tensor = torch.rand(B, device=device)
+        # strategy: 0 = AR, 1 = random, 2 = span
+        strategy: Tensor = torch.where(
+            roll < self.ar_prob,
+            torch.zeros(B, dtype=torch.long, device=device),
+            torch.where(
+                roll < self.ar_prob + self.random_prob,
+                torch.ones(B, dtype=torch.long, device=device),
+                2 * torch.ones(B, dtype=torch.long, device=device),
+            )
+        )                                                                      # [B]
+        mode: Tensor = (strategy > 0).long()                                   # [B]
+
+        control_mask: Tensor = torch.zeros(B, T, dtype=torch.bool, device=device)
+
+        # ── Strategy 1: random controls ──
+        random_ctrl: Tensor = (torch.rand(B, T, device=device) < self.control_rate)
+        is_random: Tensor = (strategy == 1).unsqueeze(1)                       # [B, 1]
+        control_mask = control_mask | (random_ctrl & is_random)
+
+        # ── Strategy 2: span controls (one contiguous span per element) ──
+        safe_hi: int = max(T - self.min_span, self.delta + 1)
+        span_start: Tensor = torch.randint(
+            self.delta, safe_hi, (B,), device=device
+        )                                                                      # [B]
+        span_len: Tensor = torch.randint(
+            self.min_span, self.max_span + 1, (B,), device=device
+        )                                                                      # [B]
+        positions: Tensor = torch.arange(T, device=device).unsqueeze(0)        # [1, T]
+        span_ctrl: Tensor = (
+            (positions >= span_start.unsqueeze(1)) &
+            (positions < (span_start + span_len).unsqueeze(1))
+        )                                                                      # [B, T]
+        is_span: Tensor = (strategy == 2).unsqueeze(1)                         # [B, 1]
+        control_mask = control_mask | (span_ctrl & is_span)
+
+        # ── Common: positions < delta can't be anticipated ──
+        control_mask[:, :self.delta] = False
+
+        # ── Build antic_pitch / antic_mask from control_mask ──
+        antic_pitch: Tensor = torch.zeros(B, T, dtype=torch.long, device=device)
+        antic_mask_tensor: Tensor = torch.zeros(B, T, device=device)
+
+        if self.delta < T:
+            antic_len: int = T - self.delta
+            # Controls at target positions [delta, T) → antic at positions [0, T−delta)
+            ctrl_slice: Tensor = control_mask[:, self.delta:]      # [B, antic_len]
+            pitch_slice: Tensor = target[:, self.delta:]           # [B, antic_len]
+
+            antic_pitch[:, :antic_len] = torch.where(
+                ctrl_slice, pitch_slice, torch.zeros_like(pitch_slice)
+            )
+            antic_mask_tensor[:, :antic_len] = ctrl_slice.float()
+
+        return antic_pitch, antic_mask_tensor, mode
+
+    # ------------------------------------------------------------------ #
+    #  Training forward (AE_style.forward + anticipation channels)        #
+    # ------------------------------------------------------------------ #
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        """
+        Training forward pass.
+
+        note_tokens must contain:
+            - 'pitch': LongTensor[B, T+1]
+            - 'style_pitch': LongTensor[B, S]
+            - 'style_mask': BoolTensor[B, S]
+        """
+        B: int = note_tokens['pitch'].shape[0]
+        T: int = note_tokens['pitch'].shape[1] - 1
+        device: torch.device = note_tokens['pitch'].device
+
+        # --- Style encoder (run once, bidirectional) ---
+        style_context = self.style_encoder(
+            note_tokens['style_pitch'],
+            mask=note_tokens.get('style_mask', None),
+        )  # [B, S, dim]
+        style_context_mask = note_tokens.get('style_mask', None)
+
+        # --- Button encoder ---
+        encoder_context = {
+            'pitch': note_tokens['pitch'][:, 1:],
+        }
+        e = self.encoder(encoder_context)
+        b = self.quantizer(e)
+
+        # During training, replace ~joker_ratio of buttons with joker value
+        # in consecutive blocks to teach the decoder to predict without guidance.
+        # When `channel` is in note_tokens, only steps aligned with
+        # MELODY_CHANNEL (same indexing as `pitch[:, 1:]` for encoder) get joker.
+        if self.training:
+            melody_eligible: Optional[Tensor] = None
+            ch: Optional[Tensor] = note_tokens.get('channel')
+            if ch is not None:
+                # Same length as b: one label per "current" note in encoder view (aligned with `pitch[:, 1:]`)
+                melody_eligible = (ch[:, 1:] == MELODY_CHANNEL)
+                T_b: int = b.shape[1]
+                if melody_eligible.shape[1] < T_b:
+                    pad_w: int = T_b - int(melody_eligible.shape[1])
+                    melody_eligible = F.pad(melody_eligible, (0, pad_w), value=False)
+                elif melody_eligible.shape[1] > T_b:
+                    melody_eligible = melody_eligible[:, :T_b]
+                melody_eligible = melody_eligible.to(device=b.device, dtype=torch.bool)
+            joker_mask = self._make_joker_mask(
+                b.shape[0], b.shape[1], b.device, melody_eligible
+            )
+            b = torch.where(joker_mask, torch.full_like(b, self.JOKER_REAL_VALUE), b)
+
+        # --- Anticipation augmentation ---
+        target = note_tokens['pitch'][:, 1:]  # [B, T]
+        antic_pitch, antic_mask_tensor, mode = self._build_anticipation(
+            target, B, T, device
+        )
+
+        # --- Decoder with style cross-attention + anticipation ---
+        decoder_context = {
+            'pitch': note_tokens['pitch'][:, :-1],
+            'button': b[:, :],
+            'antic_pitch': antic_pitch,
+            'antic_mask': antic_mask_tensor,
+            'mode': mode,
+        }
+
+        logits = self.decoder(
+            decoder_context,
+            style_context=style_context,
+            style_context_mask=style_context_mask,
+        )
+
+        # --- Losses (same as AE_style) ---
+        loss_recons = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index=self.ignore_index
+        )
+
+        loss_contour_perc = 0
+        if self.cfg.get('loss_contour_perc', 0) > 0:
+            loss_contour_perc = simple_contour_loss(
+                note_tokens['pitch'], e
+            ).mean()
+
+        loss_margin = 0
+        if self.cfg.get('loss_margin', 0) > 0:
+            loss_margin = margin_loss(e)
+
+        loss_multi_step_perc = 0
+        if self.cfg.get('loss_multi_step_perc', 0) > 0:
+            loss_multi_step_perc = multi_step_contour_loss(
+                note_tokens['pitch'][:, 1:], e, max_steps=5
+            ).mean()
+
+        loss_interval_perc = 0
+        if self.cfg.get('loss_interval_perc', 0) > 0:
+            loss_interval_perc = interval_preservation_loss(
+                note_tokens['pitch'][:, 1:], e, max_steps=5
+            ).mean()
+
+        loss_shape_perc = 0
+        if self.cfg.get('loss_shape_perc', 0) > 0:
+            loss_shape_perc = melodic_shape_loss(
+                note_tokens['pitch'][:, 1:], e, window_size=5
+            ).mean()
+
+        loss_deviate = 0
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_deviate = deviate_loss(note_tokens['pitch'], e)
+
+        loss_button_held = 0
+        if self.cfg.get('loss_button_held', 0) > 0:
+            loss_button_held = button_held_loss(
+                note_tokens['pitch'][:, 1:], e,
+                self.cfg.get('num_buttons', 12)
+            )
+
+        loss_norm_pos = 0
+        if self.cfg.get('loss_norm_pos', 0) > 0:
+            loss_norm_pos = normalized_position_loss(
+                note_tokens['pitch'][:, 1:], e,
+                num_buttons=self.cfg.get('num_buttons', 12),
+                window_size=5,
+            )
+
+        loss_pitch_button = 0
+        if self.cfg.get('loss_pitch_button', 0) > 0:
+            loss_pitch_button = pitch_button_correlation_loss(
+                note_tokens['pitch'][:, 1:], e, window_size=5
+            )
+
+        loss_button_concentration = 0
+        if self.cfg.get('loss_button_concentration', 0) > 0:
+            loss_button_concentration = button_concentration_loss(
+                e, note_tokens, self.cfg.get('num_buttons', 12)
+            )
+
+        loss_window_corr = 0
+        if self.cfg.get('loss_window_corr', 0) > 0:
+            loss_window_corr = windowed_correlation_loss(
+                note_tokens['pitch'][:, 1:], e
+            )
+
+        loss_saturated_contour = 0
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_saturated_contour = saturated_contour_loss(
+                note_tokens['pitch'], e, self.cfg.get('num_buttons', 12)
+            )
+
+        loss_pitch_extreme_anchoring = 0
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_pitch_extreme_anchoring = pitch_extreme_anchoring_loss(
+                note_tokens['pitch'], e
+            )
+
+        loss_nonlinear_compression = 0
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_nonlinear_compression = companded_warp_loss(
+                note_tokens['pitch'], e
+            )
+
+        loss_latent_velocity = 0
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_latent_velocity = latent_velocity_loss(
+                note_tokens['pitch'], e
+            )
+
+        loss_drift = 0
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_drift = drift_regularization_loss(
+                note_tokens['pitch'], e
+            )
+
+        # --- Combine losses ---
+        loss_total = torch.zeros_like(loss_recons)
+        loss_total += loss_recons * self.cfg.get('loss_recons', 1.0)
+
+        loss_contour = 0
+        if self.cfg.get('loss_contour', 0) > 0:
+            loss_contour = self.cfg['loss_contour'] * (
+                self.cfg.get('loss_contour_perc', 0) * loss_contour_perc +
+                self.cfg.get('loss_multi_step_perc', 0) * loss_multi_step_perc +
+                self.cfg.get('loss_interval_perc', 0) * loss_interval_perc +
+                self.cfg.get('loss_shape_perc', 0) * loss_shape_perc
+            )
+            loss_total += loss_contour
+
+        if self.cfg.get('loss_margin', 0) > 0:
+            loss_total += self.cfg['loss_margin'] * loss_margin
+        if self.cfg.get('loss_deviate', 0) > 0:
+            loss_total += self.cfg['loss_deviate'] * loss_deviate
+        if self.cfg.get('loss_button_held', 0) > 0:
+            loss_total += self.cfg['loss_button_held'] * loss_button_held
+        if self.cfg.get('loss_norm_pos', 0) > 0:
+            loss_total += self.cfg['loss_norm_pos'] * loss_norm_pos
+        if self.cfg.get('loss_pitch_button', 0) > 0:
+            loss_total += self.cfg['loss_pitch_button'] * loss_pitch_button
+        if self.cfg.get('loss_button_concentration', 0) > 0:
+            loss_total += self.cfg['loss_button_concentration'] * loss_button_concentration
+        if self.cfg.get('loss_window_corr', 0) > 0:
+            loss_total += self.cfg['loss_window_corr'] * loss_window_corr
+        if self.cfg.get('loss_saturated_contour', 0) > 0:
+            loss_total += self.cfg['loss_saturated_contour'] * loss_saturated_contour
+        if self.cfg.get('loss_pitch_extreme_anchoring', 0) > 0:
+            loss_total += self.cfg['loss_pitch_extreme_anchoring'] * loss_pitch_extreme_anchoring
+        if self.cfg.get('loss_nonlinear_compression', 0) > 0:
+            loss_total += self.cfg['loss_nonlinear_compression'] * loss_nonlinear_compression
+        if self.cfg.get('loss_latent_velocity', 0) > 0:
+            loss_total += self.cfg['loss_latent_velocity'] * loss_latent_velocity
+        if self.cfg.get('loss_drift', 0) > 0:
+            loss_total += self.cfg['loss_drift'] * loss_drift
+
+        acc = self.compute_accuracy(logits, target)
+
+        loss = {
+            'loss_total': loss_total,
+            'loss_recons': loss_recons,
+            'loss_margin': loss_margin,
+            'loss_deviate': loss_deviate,
+            'loss_button_held': loss_button_held,
+            'loss_norm_pos': loss_norm_pos,
+            'loss_pitch_button': loss_pitch_button,
+            'loss_button_concentration': loss_button_concentration,
+            'loss_window_corr': loss_window_corr,
+            'loss_saturated_contour': loss_saturated_contour,
+            'loss_pitch_extreme_anchoring': loss_pitch_extreme_anchoring,
+            'loss_nonlinear_compression': loss_nonlinear_compression,
+            'loss_latent_velocity': loss_latent_velocity,
+            'loss_drift': loss_drift,
+            'loss_contour': loss_contour,
+            'loss_contour_perc': loss_contour_perc,
+            'loss_multi_step_perc': loss_multi_step_perc,
+            'loss_interval_perc': loss_interval_perc,
+            'loss_shape_perc': loss_shape_perc,
+        }
+        return loss, acc
+
+    # ------------------------------------------------------------------ #
+    #  Inference                                                           #
+    # ------------------------------------------------------------------ #
+
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self,
+        note_tokens: Dict[str, Tensor],
+        style_context: Tensor,
+        style_context_mask: Optional[Tensor] = None,
+        temperature: float = 1.0,
+    ) -> int:
+        """
+        Generate next pitch token during inference, conditioned on a style
+        reference and (optionally) anticipated user-injected notes.
+
+        note_tokens must contain 'pitch' and 'button' (discrete). It may also
+        contain 'antic_pitch' [B, N], 'antic_mask' [B, N] and 'mode' [B]; if
+        absent, pure autoregressive (no-anticipation) mode is used.
+        style_context is pre-computed once via encode_style().
+        """
+        device: torch.device = note_tokens['pitch'].device
+        B: int = note_tokens['pitch'].shape[0]
+        b: Tensor = self._buttons_discrete_to_real(note_tokens['button'])
+
+        # Anticipation tensors (default to no-anticipation when absent)
+        T_dec: int = note_tokens['pitch'].shape[1] - 1
+        if 'antic_pitch' in note_tokens:
+            antic_pitch: Tensor = note_tokens['antic_pitch'][:, :-1]
+            antic_mask: Tensor  = note_tokens['antic_mask'][:, :-1]
+            mode: Tensor        = note_tokens['mode']
+        else:
+            antic_pitch = torch.zeros(B, T_dec, dtype=torch.long, device=device)
+            antic_mask  = torch.zeros(B, T_dec, device=device)
+            mode        = torch.zeros(B, dtype=torch.long, device=device)
+
+        decoder_context: Dict[str, Tensor] = {
+            'pitch':       note_tokens['pitch'][:, :-1],
+            'button':      b[:, 1:],
+            'antic_pitch': antic_pitch,
+            'antic_mask':  antic_mask,
+            'mode':        mode,
+        }
+
+        logits, _ = self.decoder(
+            decoder_context,
+            style_context=style_context,
+            style_context_mask=style_context_mask,
+            return_intermediates=True,
+            cache=None,
+            seq_start_pos=None,
+        )
+
+        logits = logits[:, -1]  # [B, vocab_size]
+        probs: Tensor = F.softmax(logits / temperature, dim=-1)
+        next_token: Tensor = torch.multinomial(probs, 1)
+        return next_token.item()
+
+    @torch.inference_mode()
+    def gen_anticipation_bridge_step(
+        self,
+        context_pitch: Tensor,      # [1, L]  = [history(N), g_1..g_{k-1}]
+        context_button: Tensor,     # [1, L]  discrete buttons for those positions
+        injected_pitch: int,        # anticipation target (first injected note); < 0 → plain AR
+        antic_pos: int,             # index carrying the anticipation signal (= N-1)
+        cond_button: int,           # conditioning button for THIS bridge position
+        style_context: Tensor,
+        style_context_mask: Optional[Tensor] = None,
+        temperature: float = 1.0,
+        antic_strength: float = 2.0,
+    ) -> int:
+        """
+        Generate ONE bridge pitch for *incremental* gap filling (single
+        forward pass), so the per-keypress latency during a button →
+        injection transition stays at one inference instead of the
+        `delta + 1` passes spent by the batched `gen_anticipation_gap`.
+
+        This reproduces a single iteration of `gen_anticipation_gap`'s
+        Phase-1 loop:
+          • the anticipation of `injected_pitch` is broadcast at `antic_pos`
+            (the last original-context position), exactly as in the batched
+            version (causal attention exposes it to every later bridge);
+          • `cond_button` replaces the held last-user button so the gap can
+            follow the melodic-shape tendency from the last generated note
+            toward the first injected note instead of a flat held button.
+
+        The caller maintains the growing context (`[history, g_1..g_{k-1}]`)
+        and the interpolated button trajectory, appending the returned pitch
+        after each call.  Once `delta` bridges have been produced the caller
+        lays out `[history, g_1..g_delta, X_1..X_m]` and recomputes coherent
+        buttons with the encoder (see `gen_buttons`).
+
+        Parameters
+        ----------
+        context_pitch  : LongTensor [1, L]  history + bridges generated so far
+        context_button : LongTensor [1, L]  discrete buttons for `context_pitch`
+        injected_pitch : int                anticipation target (< 0 disables it)
+        antic_pos      : int                position of the anticipation signal
+        cond_button    : int                discrete button for the new bridge
+        style_context  : Tensor             pre-computed via encode_style()
+        style_context_mask : optional mask for style_context
+        temperature    : float              sampling temperature
+        antic_strength : float              side-channel scale for injected pitch (>1.0 boosts)
+
+        Returns
+        -------
+        next_pitch : int   the generated bridge pitch (unplayed)
+        """
+        device: torch.device = context_pitch.device
+
+        # Extend by one placeholder position + its conditioning button.
+        cur_pitch: Tensor = torch.cat(
+            [context_pitch, torch.zeros(1, 1, dtype=torch.long, device=device)], dim=1
+        )
+        cur_button: Tensor = torch.cat(
+            [
+                context_button,
+                torch.full((1, 1), cond_button, dtype=torch.long, device=device),
+            ],
+            dim=1,
+        )
+
+        L: int = cur_pitch.shape[1]
+
+        # Build anticipation tensors (same length as cur_pitch).
+        antic_pitch_t: Tensor = torch.zeros(1, L, dtype=torch.long, device=device)
+        antic_mask_t: Tensor = torch.zeros(1, L, device=device)
+        if injected_pitch >= 0:
+            antic_pitch_t[0, antic_pos] = injected_pitch
+            antic_mask_t[0, antic_pos] = antic_strength
+        mode_t: Tensor = torch.ones(1, dtype=torch.long, device=device)
+
+        gen_tokens: Dict[str, Tensor] = {
+            'pitch':       cur_pitch,
+            'button':      cur_button,
+            'antic_pitch': antic_pitch_t,
+            'antic_mask':  antic_mask_t,
+            'mode':        mode_t,
+        }
+
+        next_p: int = self.gen_pitch_token(
+            gen_tokens,
+            style_context=style_context,
+            style_context_mask=style_context_mask,
+            temperature=temperature,
+        )
+        return next_p
+
+
 
 class AE_style_joker(Module):
     """
@@ -12613,7 +13277,7 @@ class AE_style_joker(Module):
         Returns:
             (next_token, updated_cache) — pass cache back on the next call
         """
-        b = self.quantizer.discrete_to_real(note_tokens['button'])
+        b = self._buttons_discrete_to_real(note_tokens['button'])
 
         if cache is not None:
             # Cached: only embed + attend the new position
@@ -12992,7 +13656,8 @@ class HarmonyFiLM(nn.Module):
         # Rec 2: magnitude penalty from the most recent forward (training term).
         self.last_penalty: Tensor = torch.zeros(())
 
-    def forward(self, c: Tensor) -> Dict[int, Tuple[Tensor, Tensor]]:
+    def forward(self, c: Tensor,
+                intensity: Optional[Tensor] = None) -> Dict[int, Tuple[Tensor, Tensor]]:
         table: Dict[int, Tuple[Tensor, Tensor]] = {}
         if self.n == 0:
             return table
@@ -13004,8 +13669,19 @@ class HarmonyFiLM(nn.Module):
         # Rec 2: store mean squared modulation magnitude for the training penalty.
         # Only in training to avoid an attribute side-effect on the compiled
         # inference path (the penalty is unused at inference).
+        # When a per-position `intensity` [B,T,1] is given (sparse conditioning
+        # patterns), the penalty is the intensity-weighted mean, i.e. the mean
+        # squared modulation over the positions where FiLM is actually applied
+        # — otherwise most of the penalty mass would regularise positions whose
+        # modulation is gated off and never used.
         if self.training:
-            self.last_penalty = scale.pow(2).mean() + shift.pow(2).mean()
+            if intensity is not None:
+                w = intensity.float().view(B, T, 1, 1)
+                denom = w.mean().clamp_min(1e-6)
+                self.last_penalty = ((scale.pow(2) * w).mean()
+                                     + (shift.pow(2) * w).mean()) / denom
+            else:
+                self.last_penalty = scale.pow(2).mean() + shift.pow(2).mean()
         for j, ind in enumerate(self.mod_inds):
             table[ind] = (scale[:, :, j, :], shift[:, :, j, :])
         return table
@@ -13479,3 +14155,567 @@ class AE_style_harm(AE_style):
             'root_pc': chosen_root, 'quality_id': chosen_qual,
             'function_id': func, 'key_pc': key, 'mode': mode,
         }
+
+
+# =====================================================================================
+#  AE_style_tensions — style + button + CONTINUOUS tonal-tension FiLM conditioning
+# =====================================================================================
+# Same base as AE_style_harm (style cross-attention + button quantizer + AdaLN-Zero
+# FiLM on the upper decoder blocks), but the harmony channel is driven by a
+# CONTINUOUS TIV/TIS tonal-tension feature vector (tension_extractor.py) instead of
+# the discrete chord factors / movements. This follows
+# docs/Tonal_tension_FiLM_architecture_plan.md (Modules 4-10): no chord labels, no
+# bars/beats, no ChordPlanner/MovementClassifier — the conditioning is a single
+# per-note real vector and is trained self-supervised (the feature is computed from
+# the actual notes; the FiLM learns to realise it).
+
+
+class TensionConditioner(nn.Module):
+    """Embed the per-note continuous tonal-tension feature vector (+ intensity)
+    into a single per-timestep conditioning vector consumed by HarmonyFiLM.
+
+    This is the tension analogue of HarmonyConditioner: it does not predict
+    anything, it only encodes whatever tension trajectory is given (the realised
+    feature at training, the command-derived target at inference)."""
+    def __init__(self, d_cond: int, dim: int):
+        super().__init__()
+        self.feat_proj = nn.Linear(TENSION_FEATURE_DIM, d_cond)
+        self.scalar_proj = nn.Linear(1, d_cond)                   # intensity
+        self.out = nn.Sequential(nn.SiLU(), nn.Linear(d_cond, d_cond))
+        # Normalise the conditioning vector so the FiLM projection input scale
+        # stays stable across very different tension magnitudes.
+        self.norm = nn.LayerNorm(d_cond)
+
+    def forward(self, h: Dict[str, Tensor]) -> Tensor:
+        c = self.feat_proj(h['tension_feat'].float())
+        c = c + self.scalar_proj(h['intensity'].float().unsqueeze(-1))
+        return self.norm(self.out(c))
+
+
+class Decoder_no_dtime_style_tensions(Decoder_no_dtime_style):
+    """Decoder_no_dtime_style + tonal-tension AdaLN-Zero FiLM.
+
+    Structurally identical to Decoder_no_dtime_style_harm (upper self-attn 'a' and
+    feed-forward 'f' sub-layers are FiLM-modulated), but conditioned on the
+    continuous tension feature vector via TensionConditioner. Identity at init
+    (zero-init FiLM) and at intensity=0, so it is resumable from AE_style_v2 and
+    CFG/null-safe.
+    """
+    def __init__(self, *, harm_cond_dim: int = 256, harm_film_start_frac: float = 0.5,
+                 harm_film_scale_limit: float = 1.0, harm_film_shift_limit: float = 1.0,
+                 **kwargs):
+        super().__init__(**kwargs)
+        dim = self.emb_dim
+        self.tension_conditioner = TensionConditioner(harm_cond_dim, dim)
+        layer_types = self.attn_layers.layer_types
+        num_blocks = sum(1 for t in layer_types if t == 'a')
+        start_block = int(num_blocks * harm_film_start_frac)
+        mod_inds: List[int] = []
+        block_idx = -1
+        for ind, t in enumerate(layer_types):
+            if t == 'a':
+                block_idx += 1
+            if t in ('a', 'f') and block_idx >= start_block:
+                mod_inds.append(ind)
+        self.harm_film = HarmonyFiLM(harm_cond_dim, dim, mod_inds,
+                                     scale_limit=harm_film_scale_limit,
+                                     shift_limit=harm_film_shift_limit)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],
+        style_context: Optional[Tensor] = None,
+        style_context_mask: Optional[Tensor] = None,
+        harm_fields: Optional[Dict[str, Tensor]] = None,
+        return_intermediates: bool = False,
+        return_hidden: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[List[Tensor]] = None,
+        seq_start_pos: Optional[Tensor] = None,
+        cache: Optional[LayerIntermediates] = None,
+        film_gain: float = 1.0,
+        film_debug: bool = False,
+        **kwargs
+    ):
+        pitch = self.pitch_emb(past_tokens['pitch'])
+        button = past_tokens['button'].float().unsqueeze(-1)
+        x = self.input_proj(torch.cat([pitch, button], dim=-1))
+        x = self.emb_dropout(x)
+
+        film_table = None
+        film_intensity = None
+        if harm_fields is not None:
+            c = self.tension_conditioner(harm_fields)                    # [B,T,d_cond]
+            film_intensity = harm_fields['intensity'].float().unsqueeze(-1)  # [B,T,1]
+            film_table = self.harm_film(c, film_intensity)               # {ind:(scale,shift)}
+            if film_debug:
+                print(f"[film] ||c||={c[:, -1].norm().item():.3f} "
+                      f"intensity_last={float(film_intensity[:, -1].mean().item()):.3f}")
+
+        x, intermediates = self.attn_layers(
+            x, context=style_context, context_mask=style_context_mask,
+            mask=mask, mems=mems, cache=cache, return_hiddens=True,
+            seq_start_pos=seq_start_pos,
+            film_table=film_table, film_intensity=film_intensity,
+            film_gain=film_gain, film_debug=film_debug, **kwargs
+        )
+
+        logits = self.to_logits(x)
+        if return_hidden:
+            return logits, x
+        if return_intermediates:
+            return logits, intermediates
+        return logits
+
+
+class AE_style_tensions(AE_style):
+    """AE_style + continuous tonal-tension conditioning.
+
+    Inherits the style cross-attention + button encoder unchanged. Adds:
+      - per-note tonal-tension AdaLN-Zero FiLM in the decoder (teacher-forced on
+        the tension feature vector computed from the notes during training);
+      - tension dropout (intensity -> 0) to train the unconditional branch for
+        classifier-free guidance / tension-release;
+      - an auxiliary tension-regression head off the decoder hidden states, so the
+        decoder representation actually encodes the tension it is conditioned on.
+
+    Unlike AE_style_harm there is no ChordPlanner / MovementClassifier: the tonal
+    tension is a continuous self-supervised signal (plan Module 11), so control at
+    inference comes from the command_to_target mapper (tension_extractor.py), not a
+    discrete chord planner.
+    """
+    HARM_FIELDS = ('tension_feat', 'chroma', 'intensity')
+
+    def __init__(self, encoder: nn.Module, decoder: nn.Module,
+                 style_encoder: nn.Module, cfg: Optional[Dict[str, Any]] = None):
+        super().__init__(encoder, decoder, style_encoder, cfg)
+        c = self.cfg
+        dim = decoder.emb_dim
+        # Auxiliary tension-regression head (zero-init => neutral at start, does
+        # not perturb a warm-started AE_style_v2 model).
+        self.aux_tension = nn.Linear(dim, TENSION_FEATURE_DIM)
+        nn.init.zeros_(self.aux_tension.weight)
+        nn.init.zeros_(self.aux_tension.bias)
+
+        self.tension_drop_prob = c.get('tension_drop_prob', 0.3)
+        self.w_aux_tension = c.get('loss_aux_tension', 0.5)
+        self.w_film_reg = c.get('loss_film_reg', 0.0)
+        self.pc_bias_weight = c.get('pc_bias_weight', 0.0)
+        self.tension_cond_horizon = int(c.get('tension_cond_horizon', 12))
+        # Per-dim weights for the aux tension MSE: the near-constant key
+        # posterior (24 dims) and the TIV (12 dims) otherwise take ~half the
+        # MSE budget away from the command-relevant scalar dims (36:48).
+        # Non-persistent: derived constant, keeps old checkpoints loadable.
+        aux_w = torch.ones(TENSION_FEATURE_DIM)
+        aux_w[0:36] = 0.5                       # TIV + key-posterior blocks
+        self.register_buffer('aux_dim_w', aux_w, persistent=False)
+        self._last_harm_terms: Dict[str, Tuple[float, Tensor]] = {}
+
+    # ------------------------------------------------------------------ #
+    def _slice_harm(self, note_tokens: Dict[str, Tensor], sl) -> Dict[str, Tensor]:
+        return {k: note_tokens[k][:, sl] for k in self.HARM_FIELDS if k in note_tokens}
+
+    def _augment_harm(self, harm: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        harm = dict(harm)
+        if not harm or 'intensity' not in harm:
+            return harm
+        if self.training and self.tension_drop_prob > 0:
+            _ref: Tensor = harm['intensity']
+            B: int = _ref.shape[0]
+            keep = (torch.rand(B, 1, device=_ref.device) >= self.tension_drop_prob).float()
+            harm['intensity'] = harm['intensity'].float() * keep
+        return harm
+
+    # ------------------------------------------------------------------ #
+    def _decode_with_conditioning(self, decoder_context, style_context,
+                                  style_context_mask, note_tokens):
+        """Tension-conditioned decode: FiLM (teacher-forced on the tension feature
+        computed from the notes), plus an auxiliary tension-regression term.
+        Returns logits and the extra weighted loss terms folded in by forward()."""
+        harm = self._augment_harm(self._slice_harm(note_tokens, slice(1, None)))
+        logits, hidden = self.decoder(
+            decoder_context, style_context=style_context,
+            style_context_mask=style_context_mask, harm_fields=harm, return_hidden=True)
+
+        # Auxiliary regression: predict the future-aggregate tension trajectory
+        # from the decoder hidden states (a planning auxiliary — on conditioned
+        # positions it doubles as "encode what you're conditioned on").
+        # Masked over the final tension_cond_horizon positions, where the
+        # future window is truncated and the target degenerates toward the
+        # leaky per-note feature; block-weighted so the near-constant
+        # posterior/TIV dims don't dominate the command-relevant scalars.
+        gt_feat = note_tokens['tension_feat'][:, 1:].float()             # [B,T,F]
+        aux_pred = self.aux_tension(hidden)                              # [B,T,F]
+        Tlen = gt_feat.shape[1]
+        n_valid = max(1, Tlen - self.tension_cond_horizon)
+        se = (aux_pred[:, :n_valid] - gt_feat[:, :n_valid]).pow(2)       # [B,Tv,F]
+        w = self.aux_dim_w.to(se)
+        loss_aux_tension = (se * w).sum(dim=-1).mean() / w.sum()
+
+        terms: Dict[str, Tuple[float, Tensor]] = {
+            'loss_aux_tension': (self.w_aux_tension, loss_aux_tension),
+        }
+        if self.w_film_reg > 0:
+            terms['loss_film_reg'] = (self.w_film_reg, self.decoder.harm_film.last_penalty)
+        self._last_harm_terms = terms
+        return logits, terms
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        loss, acc = super().forward(note_tokens)
+        for name, (w, val) in self._last_harm_terms.items():
+            loss['loss_total'] = loss['loss_total'] + w * val
+            loss[name] = val
+        return loss, acc
+
+    # ------------------------------------------------------------------ #
+    #  Inference                                                           #
+    # ------------------------------------------------------------------ #
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self,
+        note_tokens: Dict[str, Tensor],
+        style_context: Tensor,
+        style_context_mask: Optional[Tensor] = None,
+        harm_fields: Optional[Dict[str, Tensor]] = None,
+        cfg_weight: float = 1.0,
+        temperature: float = 1.0,
+        cache: Optional[LayerIntermediates] = None,
+        pc_bias_weight: Optional[float] = None,
+        film_gain: float = 1.0,
+        film_debug: bool = False,
+        rerank_fn=None,
+        rerank_topk: int = 8,
+        rerank_weight: float = 0.0,
+    ) -> Tuple[int, LayerIntermediates]:
+        """Generate the next pitch with optional classifier-free guidance, a
+        soft pitch-class logit bias toward the target chord/key tones, and an
+        optional top-K candidate rerank.
+
+        cfg_weight > 1 amplifies tension adherence via
+        logits = logits_uncond + w * (logits_cond - logits_uncond).
+        CFG runs two decoder passes; use it with the KV cache disabled
+        (cache=None) so the unconditional pass does not corrupt the cache.
+
+        rerank_fn(candidates: List[int]) -> Tensor[K] scores the top-K pitch
+        candidates (higher = moves the realized tension closer to the target,
+        e.g. via RealtimeTensionExtractor.peek_features). The scores are
+        z-normalized and added to the candidates' log-probs with weight
+        `rerank_weight` before sampling among the K. This is a greedy one-step
+        version of the reference paper's tension beam search that costs ZERO
+        extra decoder passes (the critic runs on the tension extractor only),
+        so it is KV-cache-friendly — unlike CFG.
+        """
+        b = self.quantizer.discrete_to_real(note_tokens['button'])
+        if cache is not None:
+            decoder_context = {'pitch': note_tokens['pitch'][:, -2:-1], 'button': b[:, -1:]}
+            hsl = slice(-1, None)
+        else:
+            decoder_context = {'pitch': note_tokens['pitch'][:, :-1], 'button': b[:, 1:]}
+            hsl = slice(1, None)
+
+        harm = None
+        if harm_fields is not None:
+            harm = {k: harm_fields[k][:, hsl] for k in self.HARM_FIELDS if k in harm_fields}
+
+        def run(h, c):
+            logits, inter = self.decoder(
+                decoder_context, style_context=style_context,
+                style_context_mask=style_context_mask, harm_fields=h,
+                return_intermediates=True, cache=c, seq_start_pos=None,
+                film_gain=film_gain, film_debug=film_debug)
+            return logits[:, -1], inter
+
+        if harm is not None and cfg_weight != 1.0:
+            logits_c, inter = run(harm, cache)
+            h0 = dict(harm); h0['intensity'] = torch.zeros_like(harm['intensity'].float())
+            logits_u, _ = run(h0, cache)
+            logits = logits_u + cfg_weight * (logits_c - logits_u)
+        else:
+            logits, inter = run(harm, cache)
+
+        # --- Soft pitch-class logit bias toward the target chord/key tones ---
+        w_pc = self.pc_bias_weight if pc_bias_weight is None else pc_bias_weight
+        if harm is not None and w_pc != 0.0 and 'chroma' in harm:
+            chroma = harm['chroma'][:, -1].float()                       # [B,12]
+            inten = harm['intensity'][:, -1].float().unsqueeze(-1)        # [B,1]
+            pc_idx = torch.arange(logits.shape[-1], device=logits.device) % 12  # [V]
+            bias = chroma[:, pc_idx]                                      # [B,V]
+            logits = logits + w_pc * inten * bias
+
+        # --- Optional tension-critic rerank over the top-K candidates ---
+        if rerank_fn is not None and rerank_weight != 0.0:
+            k = min(int(rerank_topk), logits.shape[-1])
+            logp = F.log_softmax(logits / temperature, dim=-1)
+            top_logp, top_idx = logp.topk(k, dim=-1)                 # [B,K]
+            cands = [int(p) for p in top_idx[0].tolist()]
+            scores = rerank_fn(cands).to(top_logp)                   # [K]
+            scores = (scores - scores.mean()) / scores.std().clamp_min(1e-6)
+            combined = top_logp[0] + float(rerank_weight) * scores
+            choice = torch.multinomial(F.softmax(combined, dim=-1), 1)
+            return int(top_idx[0, choice].item()), inter
+
+        probs = F.softmax(logits / temperature, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+        return next_token.item(), inter
+
+
+# =====================================================================================
+#  AE_style_move — style + button + BINARY "move now" harmonic-step FiLM conditioning
+# =====================================================================================
+# Minimal harmony steering. Same base as AE_style_harm / AE_style_tensions (style
+# cross-attention + button quantizer + AdaLN-Zero FiLM on the upper decoder blocks),
+# but the conditioning collapses to a single binary channel:
+#
+#     move_flag = 1  ->  "a harmonic transition is happening right now"
+#     move_flag = 0  ->  "inside a stable harmonic span"
+#
+# plus the transition_phase ramp (1.0 at boundary -> 0 over the first K notes) and
+# the usual intensity gate (0 = unconditional branch, for CFG / release).
+#
+# Rationale (why this instead of AE_style_harm / AE_style_tensions):
+#   - In the analyzer-labelled data the POSITIONS of chord boundaries are far more
+#     reliable than the movement classes or the chord factors (root/quality/
+#     function/key), whose errors compound. The move flag uses only the positions.
+#   - The decoder is never asked to realise a specific (possibly wrong) chord or an
+#     off-distribution tension trajectory: at move_flag=1 it just has to do what
+#     the corpus does at chord boundaries, which keeps it in-distribution.
+#   This is AE_style_harm's JOKER augmentation ("move now, model decides which")
+#   promoted to the entire conditioning signal; ChordPlanner, MovementClassifier
+#   and the aux chord-factor heads are deleted.
+
+
+class MoveConditioner(nn.Module):
+    """Embed the binary move flag (+ transition phase + intensity) into a single
+    per-timestep conditioning vector consumed by HarmonyFiLM.
+
+    The move-flag analogue of HarmonyConditioner / TensionConditioner: it does not
+    predict anything, it only encodes the given command trajectory (the realised
+    boundary flags at training, the performer/stuck-detector pulses at inference)."""
+    def __init__(self, d_cond: int, dim: int):
+        super().__init__()
+        self.flag_emb = nn.Embedding(2, d_cond)           # 0 = stable span, 1 = move now
+        self.scalar_proj = nn.Linear(2, d_cond)           # transition_phase, intensity
+        self.out = nn.Sequential(nn.SiLU(), nn.Linear(d_cond, d_cond))
+        # Keep the FiLM projection input scale stable across flag states.
+        self.norm = nn.LayerNorm(d_cond)
+
+    def forward(self, h: Dict[str, Tensor]) -> Tensor:
+        c = self.flag_emb(h['move_flag'].long())
+        scal = torch.stack([h['transition_phase'].float(), h['intensity'].float()], dim=-1)
+        c = c + self.scalar_proj(scal)
+        return self.norm(self.out(c))
+
+
+class Decoder_no_dtime_style_move(Decoder_no_dtime_style):
+    """Decoder_no_dtime_style + binary move-flag AdaLN-Zero FiLM.
+
+    Structurally identical to Decoder_no_dtime_style_harm / _tensions (upper
+    self-attn 'a' and feed-forward 'f' sub-layers are FiLM-modulated), but
+    conditioned on the binary move flag via MoveConditioner. Identity at init
+    (zero-init FiLM) and at intensity=0, so it is resumable from AE_style_v2 and
+    CFG/null-safe.
+    """
+    def __init__(self, *, harm_cond_dim: int = 256, harm_film_start_frac: float = 0.5,
+                 harm_film_scale_limit: float = 1.0, harm_film_shift_limit: float = 1.0,
+                 **kwargs):
+        super().__init__(**kwargs)
+        dim = self.emb_dim
+        self.move_conditioner = MoveConditioner(harm_cond_dim, dim)
+        layer_types = self.attn_layers.layer_types
+        num_blocks = sum(1 for t in layer_types if t == 'a')
+        start_block = int(num_blocks * harm_film_start_frac)
+        mod_inds: List[int] = []
+        block_idx = -1
+        for ind, t in enumerate(layer_types):
+            if t == 'a':
+                block_idx += 1
+            if t in ('a', 'f') and block_idx >= start_block:
+                mod_inds.append(ind)
+        self.harm_film = HarmonyFiLM(harm_cond_dim, dim, mod_inds,
+                                     scale_limit=harm_film_scale_limit,
+                                     shift_limit=harm_film_shift_limit)
+
+    def forward(
+        self,
+        past_tokens: Dict[str, Tensor],
+        style_context: Optional[Tensor] = None,
+        style_context_mask: Optional[Tensor] = None,
+        harm_fields: Optional[Dict[str, Tensor]] = None,
+        return_intermediates: bool = False,
+        return_hidden: bool = False,
+        mask: Optional[Tensor] = None,
+        mems: Optional[List[Tensor]] = None,
+        seq_start_pos: Optional[Tensor] = None,
+        cache: Optional[LayerIntermediates] = None,
+        film_gain: float = 1.0,
+        film_debug: bool = False,
+        **kwargs
+    ):
+        pitch = self.pitch_emb(past_tokens['pitch'])
+        button = past_tokens['button'].float().unsqueeze(-1)
+        x = self.input_proj(torch.cat([pitch, button], dim=-1))
+        x = self.emb_dropout(x)
+
+        film_table = None
+        film_intensity = None
+        if harm_fields is not None:
+            c = self.move_conditioner(harm_fields)                       # [B,T,d_cond]
+            film_intensity = harm_fields['intensity'].float().unsqueeze(-1)  # [B,T,1]
+            film_table = self.harm_film(c, film_intensity)               # {ind:(scale,shift)}
+            if film_debug:
+                print(f"[film] ||c||={c[:, -1].norm().item():.3f} "
+                      f"flag_last={int(harm_fields['move_flag'][:, -1].max().item())} "
+                      f"intensity_last={float(film_intensity[:, -1].mean().item()):.3f}")
+
+        x, intermediates = self.attn_layers(
+            x, context=style_context, context_mask=style_context_mask,
+            mask=mask, mems=mems, cache=cache, return_hiddens=True,
+            seq_start_pos=seq_start_pos,
+            film_table=film_table, film_intensity=film_intensity,
+            film_gain=film_gain, film_debug=film_debug, **kwargs
+        )
+
+        logits = self.to_logits(x)
+        if return_hidden:
+            return logits, x
+        if return_intermediates:
+            return logits, intermediates
+        return logits
+
+
+class AE_style_move(AE_style):
+    """AE_style + binary "move now" harmonic-step conditioning.
+
+    Inherits the style cross-attention + button encoder unchanged. Adds ONLY:
+      - per-note binary move-flag AdaLN-Zero FiLM in the decoder (teacher-forced
+        on chord-boundary positions during training);
+      - intensity dropout (intensity -> 0) to train the unconditional branch for
+        classifier-free guidance / release.
+
+    No ChordPlanner, no MovementClassifier, no aux factor heads: the model itself
+    decides WHERE the harmony goes; the flag only says WHEN to go. Losses are the
+    base AE_style losses + the optional FiLM magnitude penalty.
+    """
+    HARM_FIELDS = ('move_flag', 'transition_phase', 'intensity')
+
+    def __init__(self, encoder: nn.Module, decoder: nn.Module,
+                 style_encoder: nn.Module, cfg: Optional[Dict[str, Any]] = None):
+        super().__init__(encoder, decoder, style_encoder, cfg)
+        c = self.cfg
+        self.harmony_drop_prob = c.get('harmony_drop_prob', 0.3)
+        self.w_film_reg = c.get('loss_film_reg', 0.0)
+        self.pc_bias_weight = c.get('pc_bias_weight', 0.0)
+        self._last_harm_terms: Dict[str, Tuple[float, Tensor]] = {}
+
+    # ------------------------------------------------------------------ #
+    def _slice_harm(self, note_tokens: Dict[str, Tensor], sl) -> Dict[str, Tensor]:
+        return {k: note_tokens[k][:, sl] for k in self.HARM_FIELDS if k in note_tokens}
+
+    def _augment_harm(self, harm: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        harm = dict(harm)
+        if not harm or 'intensity' not in harm:
+            return harm
+        if self.training and self.harmony_drop_prob > 0:
+            _ref: Tensor = harm['intensity']
+            B: int = _ref.shape[0]
+            keep = (torch.rand(B, 1, device=_ref.device) >= self.harmony_drop_prob).float()
+            harm['intensity'] = harm['intensity'].float() * keep
+        return harm
+
+    # ------------------------------------------------------------------ #
+    def _decode_with_conditioning(self, decoder_context, style_context,
+                                  style_context_mask, note_tokens):
+        """Move-flag-conditioned decode: FiLM teacher-forced on the binarized
+        chord-boundary flag. The only extra loss term is the optional FiLM
+        magnitude penalty."""
+        harm = self._augment_harm(self._slice_harm(note_tokens, slice(1, None)))
+        logits = self.decoder(
+            decoder_context, style_context=style_context,
+            style_context_mask=style_context_mask, harm_fields=harm)
+
+        terms: Dict[str, Tuple[float, Tensor]] = {}
+        if self.w_film_reg > 0:
+            terms['loss_film_reg'] = (self.w_film_reg, self.decoder.harm_film.last_penalty)
+        self._last_harm_terms = terms
+        return logits, terms
+
+    def forward(self, note_tokens: Dict[str, Tensor]):
+        loss, acc = super().forward(note_tokens)
+        for name, (w, val) in self._last_harm_terms.items():
+            loss['loss_total'] = loss['loss_total'] + w * val
+            loss[name] = val
+        return loss, acc
+
+    # ------------------------------------------------------------------ #
+    #  Inference                                                           #
+    # ------------------------------------------------------------------ #
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self,
+        note_tokens: Dict[str, Tensor],
+        style_context: Tensor,
+        style_context_mask: Optional[Tensor] = None,
+        harm_fields: Optional[Dict[str, Tensor]] = None,
+        cfg_weight: float = 1.0,
+        temperature: float = 1.0,
+        cache: Optional[LayerIntermediates] = None,
+        pc_bias_chroma: Optional[Tensor] = None,
+        pc_bias_weight: Optional[float] = None,
+        film_gain: float = 1.0,
+        film_debug: bool = False,
+    ) -> Tuple[int, LayerIntermediates]:
+        """Generate the next pitch with optional classifier-free guidance and an
+        optional soft pitch-class logit bias.
+
+        cfg_weight > 1 amplifies move-flag adherence via
+        logits = logits_uncond + w * (logits_cond - logits_uncond)  — the knob
+        that maps onto press depth / insistence in the reins metaphor.
+        NOTE: CFG runs two decoder passes; use it with the KV cache disabled
+        (cache=None) so the unconditional pass does not corrupt the cache.
+
+        pc_bias_chroma [B,12] (or [12]) adds w_pc * chroma[pc(pitch)] to the
+        logits. Entries may be negative (push AWAY from the stuck chord's own
+        tones), so the Tonnetz-step baseline can be layered on top of the flag.
+        Unlike AE_style_harm the bias is NOT scaled by intensity (the move model
+        trains with intensity=1 everywhere, so intensity is not a per-note gate).
+        """
+        b = self.quantizer.discrete_to_real(note_tokens['button'])
+        if cache is not None:
+            decoder_context = {'pitch': note_tokens['pitch'][:, -2:-1], 'button': b[:, -1:]}
+            hsl = slice(-1, None)
+        else:
+            decoder_context = {'pitch': note_tokens['pitch'][:, :-1], 'button': b[:, 1:]}
+            hsl = slice(1, None)
+
+        harm = None
+        if harm_fields is not None:
+            harm = {k: harm_fields[k][:, hsl] for k in self.HARM_FIELDS if k in harm_fields}
+
+        def run(h, c):
+            logits, inter = self.decoder(
+                decoder_context, style_context=style_context,
+                style_context_mask=style_context_mask, harm_fields=h,
+                return_intermediates=True, cache=c, seq_start_pos=None,
+                film_gain=film_gain, film_debug=film_debug)
+            return logits[:, -1], inter
+
+        if harm is not None and cfg_weight != 1.0:
+            logits_c, inter = run(harm, cache)
+            h0 = dict(harm); h0['intensity'] = torch.zeros_like(harm['intensity'].float())
+            logits_u, _ = run(h0, cache)
+            logits = logits_u + cfg_weight * (logits_c - logits_u)
+        else:
+            logits, inter = run(harm, cache)
+
+        # --- Optional soft pitch-class logit bias (Tonnetz-step layering) ---
+        w_pc = self.pc_bias_weight if pc_bias_weight is None else pc_bias_weight
+        if pc_bias_chroma is not None and w_pc != 0.0:
+            chroma = pc_bias_chroma.float().to(logits.device)
+            if chroma.dim() == 1:
+                chroma = chroma.unsqueeze(0)                              # [1,12]
+            pc_idx = torch.arange(logits.shape[-1], device=logits.device) % 12  # [V]
+            logits = logits + w_pc * chroma[:, pc_idx]
+
+        probs = F.softmax(logits / temperature, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+        return next_token.item(), inter

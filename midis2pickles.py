@@ -42,7 +42,17 @@ from params import *
 #   Multiple simultaneous chord notes form one chord group (consecutive chan=4 events).
 #   When all chord notes expire (abs_time >= onset + max_dur), a chord-off marker
 #   [0, 0, 0, 0, 4] (vel=0) is inserted so the dataset knows the chord is no longer active.
-
+#
+# CHORD LABEL EVENTS (channel 120, stored as channel 119 in pickle):
+# [0, root_pc, quality_id, function_id, 120]
+# root_pc is the root pitch class of a chord: which note name class (C, C#, D, …) the chord is built on, encoded as an integer 0–11 in 12-TET (C=0, C#/Db=1, …, B=11). When unknown, it uses PC_UNKNOWN = 12
+# quality_id is the quality of the chord: 0=major, 1=minor, 2=diminished, 3=augmented, 4=sus2, 5=sus4, 6=7, 7=9, 8=11, 9=13
+# key_pc is the key of the piece: which note name class (C, C#, D, …) the chord is built on, encoded as an integer 0–11 in 12-TET (C=0, C#/Db=1, …, B=11). When unknown, it uses PC_UNKNOWN = 12
+# mode is the mode of the piece: 0=major, 1=minor
+# function_id is the harmonic function of the chord: Dominant, Subdominant, Tonic, etc. (T/S/D,..)
+# movement_type: HARMONY MOVEMENT EVENTS in channel 4
+# chord_reference is the chord reference: 0=no chord reference, 1=chord reference
+# chord_reference_type is the type of chord reference: 0=no chord reference, 1=chord reference
 
 melody_only = False # if True, only process melody notes (channel 0)
 sorted_or_random_file_loading_order = False # Sorted order is NOT usually recommended

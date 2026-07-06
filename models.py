@@ -24,7 +24,7 @@
 #===================================================================================================
 
 MODELS_PARAMETERS = {
-    'tester': {
+'tester': {
         'model_type': 'autoencoder_w_encoder_antic',
         'description': 'tester. light model not trained',
         'ckpt_file_name': './save_models/tester.pth',
@@ -810,7 +810,6 @@ MODELS_PARAMETERS = {
     "dataset_val_path": "./Training-Data/giantmidi_full_melody_test",
     "save_every": 15,
     },
-
 'melody_arrow_v11': {
     'model_type': 'AE_melody_w_coarse_arrows',
     'description': 'Options A+B+D: semantic init, direction loss, coarse direction aux loss',
@@ -1749,7 +1748,7 @@ MODELS_PARAMETERS = {
         "num_workers": 8,
         },
     'anticipation_5buttons': {
-        'model_type': 'autoencoder_anticipation',
+        'model_type': 'AE_antic',
         'description': 'Piano Genie with anticipation for user-injected MIDI notes. Same arch as good_ref_5buttons but decoder has antic_pitch_emb + mode_emb.',
         'train_log': '',
         'ckpt_file_name': '',
@@ -1781,7 +1780,7 @@ MODELS_PARAMETERS = {
         "num_workers": 8,
         },
     'anticipation_tester_v1': {
-        'model_type': 'autoencoder_anticipation',
+        'model_type': 'AE_antic',
         'description': 'Light tester for anticipation model.',
         'train_log': '',
         'ckpt_file_name': './save_models/anticipation_tester_v1_145_eps_2592_steps_0.8195_loss_0.8071_acc.pth',
@@ -1813,10 +1812,10 @@ MODELS_PARAMETERS = {
         "num_workers": 8,
         },
     'anticipation_tester_v2': {
-        'model_type': 'autoencoder_anticipation',
+        'model_type': 'AE_antic',
         'description': 'Only span anticipation. delta=12, reinforce contour and deviate loss',
         'train_log': '',
-        'ckpt_file_name': './save_models/anticipation_tester_v2_60_eps_2928_steps_1.9705_loss_0.8677_acc.pth',
+        'ckpt_file_name': './save_models/anticipation_tester_v2_5_eps_1792_steps_2.6901_loss_0.8691_acc.pth',
         'seq_len': 256,
         'pad_idx': 128,
         'emb_dim': 512,
@@ -1845,7 +1844,7 @@ MODELS_PARAMETERS = {
         "num_workers": 8,
         },
     'anticipation_v1': {
-        'model_type': 'autoencoder_anticipation',
+        'model_type': 'AE_antic',
         'description': 'Light tester for anticipation model.',
         'train_log': '',
         'ckpt_file_name': './save_models/anticipation_v1_14_eps_496_steps_0.7573_loss_0.8945_acc.pth',
@@ -2106,7 +2105,7 @@ MODELS_PARAMETERS = {
     'model_type': 'AE_style_harm',
     'description': 'Style + button + harmony movement (AdaLN-Zero FiLM, hidden chord planner). Resumable from AE_style_v2.',
     'train_log': '',
-    'ckpt_file_name': './save_models/AE_style_harm_tester_v1_15_eps_184_steps_1.9172_loss_1.7539_val_loss_0.8352_acc.pth',
+    'ckpt_file_name': './save_models/AE_style_harm_tester_v1_17_eps_144_steps_2.0324_loss_1.7237_val_loss_0.7767_acc.pth',
     # Optional warm-start: path to an AE_style_v2 checkpoint. Loaded strict=False
     # so the zero-initialised harmony/planner/aux params start as identity and the
     # model reproduces the base style model until harmony training kicks in.
@@ -2149,6 +2148,178 @@ MODELS_PARAMETERS = {
     "batch_size": 16,
     "num_workers": 0,
     },
+'AE_style_tensions_v1': {
+    'model_type': 'AE_style_tensions',
+    'description': 'Style + button + continuous tonal-tension (TIV/TIS) AdaLN-Zero FiLM. Self-supervised tension from pitch; resumable from AE_style_v1.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_tensions_v1_0_eps_0_steps_0.0_loss_0.0_acc.pth',
+    # Optional warm-start from a base AE_style checkpoint (strict=False): the
+    # zero-initialised tension FiLM / aux head start as identity, so the
+    # warm-started model reproduces the base style+button model exactly.
+    'init_from_ckpt': './save_models/AE_style_v1_0_eps_1092_steps_0.773_loss_0.7658_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Tension conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,   # modulate the upper half of decoder blocks
+    'harm_film_scale_limit': 0.5,  # bound |scale| (tanh*limit) per element
+    'harm_film_shift_limit': 0.5,  # bound |shift| (tanh*limit) per element
+    'loss_film_reg': 0.01,         # penalty on mean squared FiLM modulation
+    'tension_drop_prob': 0.0,      # OFF: the dataset now samples per-position intensity
+    'tension_cond_horizon': 12,    # future-aggregate conditioning window (notes, leak-free)
+    'loss_aux_tension': 0.2,       # future-tension planning auxiliary (masked tail, block-weighted)
+    'pc_bias_weight': 0.0,         # inference soft pitch-class logit bias (0 = off)
+    # Tonal-tension feature extraction (tension_extractor.py)
+    'tension_short_window': 8,     # local-sonority TIV window (notes)
+    'tension_key_alpha': 2.0,      # gain of the per-note key-correlation likelihood
+    'tension_trans_alpha': 100.0,  # circle-of-fifths ring transition ratio (HMM, per-note)
+    'tension_key_theta': 3.0,      # hysteretic key-decision margin (inference display)
+    'tension_tau_low': 8.0,        # leaky-integrator decay [s] at the bass end
+    'tension_tau_high': 3.0,       # leaky-integrator decay [s] at the treble end
+    'tension_profiles': 'genie',   # tuned Temperley/Sapp variant (see tension_extractor)
+    'tension_bass_weight': 2.0,    # bass-register weight in the key evidence
+    'tension_cadence_gap': 1.0,    # inter-onset gap [s] marking a phrase-final note
+    'tension_cadence_boost': 2.0,  # evidence boost for phrase-final (cadence) notes
+    # Loss weights (style/button, inherited from AE_style)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (plain pitch pickles; tension is derived self-supervised)
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 4,
+    "num_workers": 0,
+    },
+'AE_style_tensions_tester_v1': {
+    'model_type': 'AE_style_tensions',
+    'description': 'Small tester for the tonal-tension FiLM model. Resumable from AE_style_tester_v2.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_tensions_tester_v1_32_eps_231_steps_0.2656_loss_0.7377_val_loss_0.9564_acc.pth',
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 2,
+    'heads': 32,
+    'num_buttons': 19,
+    # Tension conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,
+    'harm_film_scale_limit': 0.5,
+    'harm_film_shift_limit': 0.5,
+    'loss_film_reg': 0.01,
+    'tension_drop_prob': 0.0,      # OFF: dataset samples per-position intensity
+    'tension_cond_horizon': 12,    # future-aggregate conditioning window (notes)
+    'loss_aux_tension': 0.2,       # future-tension planning auxiliary (masked tail, block-weighted)
+    'pc_bias_weight': 0.0,
+    # Tonal-tension feature extraction (tension_extractor.py)
+    'tension_short_window': 8,     # local-sonority TIV window (notes)
+    'tension_key_alpha': 2.0,      # gain of the per-note key-correlation likelihood
+    'tension_trans_alpha': 100.0,  # circle-of-fifths ring transition ratio (HMM, per-note)
+    'tension_key_theta': 3.0,      # hysteretic key-decision margin (inference display)
+    'tension_tau_low': 8.0,        # leaky-integrator decay [s] at the bass end
+    'tension_tau_high': 3.0,       # leaky-integrator decay [s] at the treble end
+    'tension_profiles': 'genie',   # tuned Temperley/Sapp variant (see tension_extractor)
+    'tension_bass_weight': 2.0,    # bass-register weight in the key evidence
+    'tension_cadence_gap': 1.0,    # inter-onset gap [s] marking a phrase-final note
+    'tension_cadence_boost': 2.0,  # evidence boost for phrase-final (cadence) notes
+    # Loss weights (style/button)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 16,
+    "num_workers": 0,
+    },
+'AE_style_move_v1': {
+    'model_type': 'AE_style_move',
+    'description': 'Style + button + BINARY move-flag AdaLN-Zero FiLM ("move now, model decides which"). Boundary positions only — no chord factors, no planner. Resumable from AE_style_v2.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_move_v1_0_eps_0_steps_0.0_loss_0.0_acc.pth',
+    # Warm-start from the base AE_style_v2 checkpoint (strict=False): the
+    # zero-initialised move FiLM starts as identity, so the warm-started model
+    # reproduces the base style+button model exactly.
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 256,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Move-flag conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,   # modulate the upper half of decoder blocks
+    'harm_film_scale_limit': 0.5,  # bound |scale| (tanh*limit) per element
+    'harm_film_shift_limit': 0.5,  # bound |shift| (tanh*limit) per element
+    'loss_film_reg': 0.01,         # penalty on mean squared FiLM modulation
+    'harmony_drop_prob': 0.3,      # train the unconditional branch (CFG / release)
+    'move_binary': True,           # dataset: binarize ch-3 boundaries into move_flag
+    'move_flag_span': 8,           # notes of "transition happening" after a boundary
+    'pc_bias_weight': 0.0,         # inference soft pitch-class logit bias (0 = off)
+    # Loss weights (style/button, inherited from AE_style)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (harmony-labelled pickles: only the ch-3 boundary POSITIONS are used)
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_labels_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_labels_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 8,
+    "num_workers": 0,
+    },
+'AE_style_move_tester_v1': {
+    'model_type': 'AE_style_move',
+    'description': 'Small tester for the binary move-flag FiLM model. Resumable from AE_style_tester_v2.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_move_tester_v1_1_eps_16_steps_0.7978_loss_0.6807_val_loss_0.765_acc.pth',
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 2,
+    'heads': 32,
+    'num_buttons': 19,
+    # Move-flag conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,
+    'harm_film_scale_limit': 0.5,
+    'harm_film_shift_limit': 0.5,
+    'loss_film_reg': 0.01,
+    'harmony_drop_prob': 0.3,
+    'move_binary': True,
+    'move_flag_span': 8,
+    'pc_bias_weight': 0.0,
+    # Loss weights (style/button)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (harmony-labelled pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_labels_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_labels_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 16,
+    "num_workers": 0,
+    },
 'AE_antic_style_v1': {
     'model_type': 'AE_antic_style',
     'description': 'Style cross-attention + anticipation for user-injected notes (AE_style_v2 base).',
@@ -2178,6 +2349,139 @@ MODELS_PARAMETERS = {
     "dataset_val_path": "./Training-Data/giantmidi_full_test",
     # Training settings
     "save_every": 1,
+    "batch_size": 8,
+    "num_workers": 0,
+    },
+'AE_antic_style_tester_v1': {
+    'model_type': 'AE_antic_style',
+    'description': 'Style cross-attention + anticipation for user-injected notes (AE_style_v2 base).',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_antic_style_tester_v1_35_eps_252_steps_1.6014_loss_1.1014_val_loss_0.8672_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Anticipation parameters
+    'anticipation_delta': 8,
+    'anticipation_rate': 0.15, # per-position control probability for random mode 
+    'ar_prob': 0.5,
+    'random_prob': 0., # probability of random-control strategy  (default 0.25) 
+    # span_prob = 0.5 = 1 - ar_prob - random_prob
+    'anticipation_min_span': 8,
+    'anticipation_max_span': 50,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.15,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 16,
+    "num_workers": 10,
+    },
+'AE_antic_style_joker_tester_v1': {
+    'model_type': 'AE_antic_style_joker',
+    'description': 'Style cross-attention + anticipation for user-injected notes (AE_style_v2 base).',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_antic_style_joker_tester_v1_76_eps_658_steps_0.8148_loss_0.7022_val_loss_0.8047_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Anticipation parameters
+    'anticipation_delta': 8,
+    'anticipation_rate': 0.15, # per-position control probability for random mode 
+    'ar_prob': 0.5,
+    'random_prob': 0., # probability of random-control strategy  (default 0.25) 
+    # span_prob = 0.5 = 1 - ar_prob - random_prob
+    'anticipation_min_span': 8,
+    'anticipation_max_span': 50,
+    'joker_prob': 0.15,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.15,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 2,
+    "batch_size": 16,
+    "num_workers": 0,
+    },
+'AE_antic_style_joker_v1': {
+    'model_type': 'AE_antic_style_joker',
+    'description': 'Style cross-attention + anticipation + joker button full model.',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Anticipation parameters
+    'anticipation_delta': 8,
+    'anticipation_rate': 0.15, # per-position control probability for random mode 
+    'ar_prob': 0.5,
+    'random_prob': 0., # probability of random-control strategy  (default 0.25) 
+    # span_prob = 0.5 = 1 - ar_prob - random_prob
+    'anticipation_min_span': 8,
+    'anticipation_max_span': 50,
+    'joker_prob': 0.15,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.15,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 8,
+    "num_workers": 0,
+    },
+'AE_antic_style_v2': {
+    'model_type': 'AE_antic_style',
+    'description': 'Style cross-attention + anticipation for user-injected notes (AE_style_v2 base).',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Anticipation parameters
+    'anticipation_delta': 4,
+    'anticipation_rate': 0.15,
+    'ar_prob': 0.5,
+    'random_prob': 0.25,
+    'anticipation_min_span': 5,
+    'anticipation_max_span': 20,
+    # Loss weights
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.2,
+    # Dataset paths
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    # Training settings
+    "save_every": 5,
     "batch_size": 8,
     "num_workers": 0,
     },

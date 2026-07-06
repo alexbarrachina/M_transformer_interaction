@@ -25,6 +25,20 @@
 # limitations under the License.'''
 #===================================================================================================
 
+# transition_phase: a per-note float conditioning signal 
+# that tells the model how far along a harmonic transition it is 
+# — not which chord or movement, but when in the transition window.
+# Each harmony event on HARMONY_CHANNEL increments move_group.
+# Every playable note snapshots the current move_group.
+# Notes with the same move_group > 0 form one movement span.
+# Within that span, phase is a linear ramp:
+
+# movement_type: from pickle channel 4
+# transition_phase, move_flag calculated from movement boundaries in pickle file
+# chord_label: root_pc, quality_id, function_id in [0, root, qual, func, 120] from pickle channel 120
+# key_pc, mode: from pickle channel 121 [0, key, mode, 0, 121]
+
+# TODO no information of function_id, mode and key_pc data in pickle file
 
 import os
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
@@ -52,8 +66,8 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 
-NSTEPS_INIT = 56
-RESUME = True
+NSTEPS_INIT = 0
+RESUME = False
 
 #==========================================================================
 
@@ -176,6 +190,14 @@ class StyleMusicSamplerDataset(Dataset):
         self.cfg = cfg if cfg is not None else {}
         self.is_eval = is_eval
 
+        # AE_style_move binarization: ignore the (noisy) movement classes and
+        # keep only the boundary POSITIONS — emit a binary 'move_flag' that is 1
+        # for the first move_flag_span notes after each chord boundary, with the
+        # transition_phase ramp clipped to the same window (1.0 -> 0 over K notes
+        # instead of ramping across the whole inter-boundary span).
+        self.move_binary = bool(self.cfg.get('move_binary', False))
+        self.move_flag_span = max(1, int(self.cfg.get('move_flag_span', 8)))
+
         # Pre-compute piece boundaries from [126,126,0,0,0] events
         self.piece_ranges = self._find_piece_boundaries()
 
@@ -291,6 +313,8 @@ class StyleMusicSamplerDataset(Dataset):
           'pitch'            [T+1] long
           'harm_movement'    [T+1] long  (0..8; 8 = joker; forward-filled from ch3)
           'transition_phase' [T+1] float (1.0 at movement onset -> ~0 before next; 0 = unguided)
+          'move_flag'        [T+1] long  (move_binary only: 1 within the first
+                                          move_flag_span notes after a boundary)
           'chroma'           [T+1, 12] float (active chord pitch classes)
           'bass_pc'          [T+1] long  (0..11, 12 = none)
           'root_pc'          [T+1] long  (0..11, 12 = unknown)
@@ -352,8 +376,12 @@ class StyleMusicSamplerDataset(Dataset):
             return self._create_dummy_target()
 
         # transition_phase: linear decay over each movement span (group 0 = unguided = 0.0)
+        # move_binary: the ramp is clipped to the first move_flag_span notes of the
+        # span (the local "transition happening now" window) and move_flag marks
+        # exactly those notes; the rest of the span is flag 0 = stable.
         n = len(p_group)
         p_phase = [0.0] * n
+        p_flag = [0] * n
         i = 0
         while i < n:
             j = i
@@ -361,13 +389,20 @@ class StyleMusicSamplerDataset(Dataset):
                 j += 1
             if p_group[i] > 0:
                 span = j - i
-                for k in range(span):
-                    p_phase[i + k] = 1.0 - k / span
+                if self.move_binary:
+                    k_span = min(span, self.move_flag_span)
+                    for k in range(k_span):
+                        p_phase[i + k] = 1.0 - k / k_span
+                        p_flag[i + k] = 1
+                else:
+                    for k in range(span):
+                        p_phase[i + k] = 1.0 - k / span
             i = j
 
         pitch = torch.tensor(p_pitch, dtype=torch.long)
         move = torch.tensor(p_move, dtype=torch.long)
         phase = torch.tensor(p_phase, dtype=torch.float)
+        flag = torch.tensor(p_flag, dtype=torch.long)
         root = torch.tensor(p_root, dtype=torch.long)
         qual = torch.tensor(p_qual, dtype=torch.long)
         func = torch.tensor(p_func, dtype=torch.long)
@@ -382,7 +417,7 @@ class StyleMusicSamplerDataset(Dataset):
                 x = x.repeat(reps) if x.dim() == 1 else x.repeat(reps, 1)
             return x[:target_len]
 
-        pitch = fit(pitch); move = fit(move); phase = fit(phase)
+        pitch = fit(pitch); move = fit(move); phase = fit(phase); flag = fit(flag)
         root = fit(root); qual = fit(qual); func = fit(func)
         key = fit(key); mode = fit(mode); bass = fit(bass); chroma = fit(chroma)
 
@@ -394,7 +429,7 @@ class StyleMusicSamplerDataset(Dataset):
         root = torch.where(root != PC_UNKNOWN, (root + t) % 12, root)
         key = torch.where(key != PC_UNKNOWN, (key + t) % 12, key)
 
-        return {
+        out = {
             'pitch': pitch,
             'harm_movement': move,
             'transition_phase': phase,
@@ -407,6 +442,9 @@ class StyleMusicSamplerDataset(Dataset):
             'mode': mode,
             'intensity': torch.ones(target_len, dtype=torch.float),
         }
+        if self.move_binary:
+            out['move_flag'] = flag
+        return out
 
     # ------------------------------------------------------------------ #
     #  Style window: pitch-only (for StyleEncoder)                         #
@@ -457,7 +495,7 @@ class StyleMusicSamplerDataset(Dataset):
     def _create_dummy_target(self):
         target_len = self.seq_len + 1
         print("********** Creating dummy target sample **********")
-        return {
+        out = {
             'pitch': torch.full((target_len,), 60, dtype=torch.long),
             'harm_movement': torch.zeros(target_len, dtype=torch.long),
             'transition_phase': torch.zeros(target_len, dtype=torch.float),
@@ -470,6 +508,9 @@ class StyleMusicSamplerDataset(Dataset):
             'mode': torch.full((target_len,), MODE_UNKNOWN, dtype=torch.long),
             'intensity': torch.zeros(target_len, dtype=torch.float),
         }
+        if self.move_binary:
+            out['move_flag'] = torch.zeros(target_len, dtype=torch.long)
+        return out
 
 
 #==========================================================================
@@ -492,7 +533,10 @@ def main():
 
     ''' MODEL & HYPERPARAMETERS '''
     project_name = 'monsterGenie_style_harm'
-    model_name = 'AE_style_harm_tester_v1'
+    # Binary move-flag model: set model_name to 'AE_style_move_v1' (or
+    # 'AE_style_move_tester_v1'); its cfg['move_binary']=True switches the
+    # dataset to emit 'move_flag' + the clipped transition_phase automatically.
+    model_name = 'AE_style_move_tester_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)
     model.to(device)
@@ -561,10 +605,23 @@ def main():
     nsteps = 0
     val_loss_temp = 0.0
 
+    def warm_start_from_base():
+        # Optional warm-start from a base AE_style checkpoint (strict=False): the
+        # zero-initialised harmony/move FiLM (+ planner / aux heads where present)
+        # start as identity, so the warm-started model reproduces the base
+        # style+button model exactly.
+        init_ckpt = cfg.get('init_from_ckpt', '')
+        if init_ckpt:
+            sd = torch.load(init_ckpt, map_location=device)
+            missing, unexpected = model.load_state_dict(sd, strict=False)
+            print(f"Warm-started from {init_ckpt}: "
+                f"{len(missing)} new params (harmony/planner/aux), "
+                f"{len(unexpected)} unexpected keys")
+
     if RESUME:
         #checkpoint_path, start_epoch, start_steps = find_latest_checkpoint()
         checkpoint_path, start_epoch, start_steps = find_latest_checkpoint(model_name=model_name)
-    
+
         if checkpoint_path:
             start_epoch, start_steps = load_checkpoint(model, optim, checkpoint_path, device)
             print(f"Resuming training from epoch {start_epoch}, step {start_steps}")
@@ -573,18 +630,12 @@ def main():
             start_epoch = 0
             start_steps = 0
             print("Starting training from scratch (no checkpoint found)")
+            # First run of a new FiLM model under RESUME=True: fall back to the
+            # config's warm start instead of silently training from random init.
+            warm_start_from_base()
 
     else:
-        # Optional warm-start from a base AE_style_v2 checkpoint (strict=False): the
-        # zero-initialised harmony FiLM / planner / aux heads start as identity, so the
-        # warm-started model reproduces the base style+button model exactly.
-        init_ckpt = cfg.get('init_from_ckpt', '')
-        if init_ckpt:
-            sd = torch.load(init_ckpt, map_location=device)
-            missing, unexpected = model.load_state_dict(sd, strict=False)
-            print(f"Warm-started from {init_ckpt}: "
-                f"{len(missing)} new params (harmony/planner/aux), "
-                f"{len(unexpected)} unexpected keys")
+        warm_start_from_base()
             
 
 

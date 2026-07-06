@@ -1,8 +1,16 @@
 #===================================================================================================
-# Monster Genie interaction_dtime_only.py Python module
+# Monster Genie interaction_buttons_style_tonnetz.py Python module
 # Interaction, generating buttons from MIDI keyboard,
 # starting with a context extracted from a MIDI file
-# 
+#
+# ZERO-TRAINING TONNETZ-STEP BASELINE (harmonic_step.py) on top of plain AE_style:
+# a HarmonicStepTracker watches the triad implied by the generated stream; when it
+# is stuck on the same chord (or on the '.' key), the sampler is softly nudged one
+# neo-Riemannian step (L/P/R neighbor, 2 of 3 common tones) via an additive
+# pitch-class logit bias in gen_pitch_token — no FiLM, no retraining.
+#   '.' = take one harmonic step now      'a' = toggle auto stuck-detection
+# Baseline to A/B against the trained AE_style_move flag model.
+#
 # Copyright 2025 Alex Barrachina
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,8 +49,9 @@ from model_loader import load_model
 from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
+from harmonic_step import HarmonicStepTracker, choose_step, step_bias, triad_name
 
-TRACES = False
+TRACES = True
 USE_CACHE = False
 CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 XINXE_INTERFACE = False
@@ -51,9 +60,18 @@ XINXE_INTERFACE = False
 JOKER_WINDOW_SIZE = 4       # minimum note-on events to detect the pattern
 JOKER_MAX_INTERVAL_MS = 200.0  # max ms between consecutive notes to count as "fast"
 
-JOKER_FORCED_KEYS = {36, 37}  # these MIDI keys are always joker buttons, regardless of alternation
-
 TEMPERATURE = 1#0.0001
+
+# --- Tonnetz-step baseline (zero-training harmonic nudge) ---
+STEP_AUTO_DEFAULT = True     # auto-nudge when stuck; 'a' toggles at runtime
+STEP_STUCK_AFTER = 12        # consecutive same-triad notes that count as "stuck"
+STEP_BIAS_WEIGHT = 4.0       # logit-bias scale (soft nudge, not a mask)
+STEP_PUSH_DOWN = 0.5         # relative down-weight of the old chord's leaving tone
+STEP_MAX_NOTES = 8           # notes the nudge stays active before giving up
+STEP_COOLDOWN_NOTES = 8      # notes after a step release before auto re-arms
+STEP_SEED_NOTES = 32         # primer tail notes used to seed the triad tracker
+STEP_KEY = '.'               # manual "take one harmonic step now"
+STEP_TOGGLE_KEY = 'a'        # toggle auto stuck-detection
 
 ''' DEVICE SPECIFIC PARAMETERS '''
 if torch.backends.mps.is_available():
@@ -77,8 +95,7 @@ else:
 
 ''' MODEL '''
 
-#model_name = 'AE_style_tester_v2' AE_style_v1
-model_name = 'AE_style_v1'
+model_name = 'AE_style_move_tester_v1' 
 cfg = get_model_hparams(model_name)
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
@@ -92,8 +109,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 
-sample_midi_path_init = sample_midi_path2
-STYLE_IDX_INIT = 2
+sample_midi_path_init = sample_midi_path1
+STYLE_IDX_INIT = 1
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [
@@ -292,6 +309,8 @@ def reset_context():
     global dict_output_tokens, dict_input_tokens
     global kv_cache
     global b
+    global step_target, step_kind, step_from, last_step_from
+    global step_notes_left, step_cooldown, manual_step_requested
 
     with buffer_lock:
         i = 0
@@ -314,6 +333,14 @@ def reset_context():
         #visualizer.play_primer(playNote, last_n=PRIMER_PLAYBACK_LAST_N,
         #                       playback_speed=PRIMER_PLAYBACK_SPEED)
 
+        # Tonnetz-step: forget the step state and re-seed from the primer tail
+        step_tracker.reset()
+        step_tracker.seed([int(p) for p in dict_input_tokens['pitch'][:CTX_LEN][-STEP_SEED_NOTES:]])
+        step_target = None; step_from = None; step_kind = ''
+        last_step_from = None
+        step_notes_left = 0; step_cooldown = 0
+        manual_step_requested = False
+
 ''' VARIABLES '''
 context = None
 timeLast = 0
@@ -323,6 +350,68 @@ first_note = True
 kv_cache = None
 last_gen_time: float = 0.0
 joker_detector = JokerDetector()
+
+# --- Tonnetz-step state (zero-training harmonic nudge) ---
+step_tracker = HarmonicStepTracker(stuck_after=STEP_STUCK_AFTER)
+auto_step_enabled = STEP_AUTO_DEFAULT
+manual_step_requested = False
+step_target = None          # (root_pc, is_minor) while a nudge is active
+step_kind = ''              # 'L'/'P'/'R' of the active nudge
+step_from = None            # triad we are stepping away from
+last_step_from = None       # previous origin: avoid A->B->A ping-pong
+step_notes_left = 0
+step_cooldown = 0
+
+
+def _trigger_step(reason: str) -> None:
+    """Choose one L/P/R neighbor of the current triad and arm the logit nudge."""
+    global step_target, step_kind, step_from, step_notes_left
+    cur = step_tracker.current
+    if cur is None:
+        print("[step] no confident triad estimate yet — keep playing")
+        return
+    target, kind = choose_step(cur, step_tracker.long_hist(), avoid=last_step_from)
+    step_target = target
+    step_kind = kind
+    step_from = cur
+    step_notes_left = STEP_MAX_NOTES
+    print(f"[step] {reason}: {triad_name(cur)} (score {step_tracker.score:.2f}) "
+          f"-> nudging one Tonnetz step to {triad_name(target)} ({kind})")
+
+
+def _step_bias_tensor():
+    """Additive logit bias for the active step (None when no step is armed)."""
+    if step_target is None:
+        return None
+    bias = step_bias(step_target, step_from, VOCAB_SIZE_PITCH,
+                     up=1.0, down=STEP_PUSH_DOWN)
+    return STEP_BIAS_WEIGHT * torch.tensor(bias, dtype=torch.float, device=device)
+
+
+def _step_after_note(new_pitch: int) -> None:
+    """Feed the generated pitch to the tracker; release the nudge when the
+    harmony moved (success) or the note budget ran out (give up)."""
+    global step_target, step_kind, step_from, last_step_from
+    global step_notes_left, step_cooldown
+    step_tracker.add_note(new_pitch)
+    if step_target is None:
+        if step_cooldown > 0:
+            step_cooldown -= 1
+        return
+    step_notes_left -= 1
+    cur = step_tracker.current
+    if cur is not None and cur != step_from:
+        where = 'target' if cur == step_target else 'elsewhere'
+        print(f"[step] moved: {triad_name(step_from)} -> {triad_name(cur)} ({where})")
+        last_step_from = step_from
+        step_target = None; step_from = None; step_kind = ''
+        step_notes_left = 0
+        step_cooldown = STEP_COOLDOWN_NOTES
+    elif step_notes_left <= 0:
+        print(f"[step] gave up after {STEP_MAX_NOTES} notes (still {triad_name(step_from)})")
+        last_step_from = None
+        step_target = None; step_from = None; step_kind = ''
+        step_cooldown = STEP_COOLDOWN_NOTES
 
 ''' BUILD CTX '''
 # Load seed MIDI
@@ -424,7 +513,15 @@ with torch.inference_mode():
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
 
-def manageNote(note, velocity): 
+# Tonnetz-step: seed the triad tracker with the primer tail so the very first
+# generated notes already have a triad estimate to compare against.
+step_tracker.seed([int(p) for p in dict_input_tokens['pitch'][:CTX_LEN][-STEP_SEED_NOTES:]])
+print(f"[step] tracker seeded: current triad = "
+      f"{triad_name(step_tracker.current) if step_tracker.current else 'none yet'} "
+      f"(score {step_tracker.score:.2f}) | auto={'ON' if auto_step_enabled else 'OFF'}, "
+      f"'{STEP_KEY}' = step now, '{STEP_TOGGLE_KEY}' = toggle auto")
+
+def manageNote(note, velocity):
   global context  # Access the global context
   global timeLast # time of last note, global variable
   global b # button array
@@ -436,7 +533,8 @@ def manageNote(note, velocity):
   global kv_cache
   global last_gen_time
   global active_style_idx
-  
+  global manual_step_requested
+
   if TRACES:
     print("key", note)
 
@@ -455,10 +553,9 @@ def manageNote(note, velocity):
 
     timeLast = timeNew
     dict_output_tokens['dtime'][i+CTX_LEN] = dtime
-    # MIDI note to button — joker detector overrides when fast 2-key alternation;
-    # JOKER_FORCED_KEYS are always joker buttons regardless of alternation
+    # MIDI note to button — joker detector overrides when fast 2-key alternation
     timestamp_ms = time.perf_counter() * 1000
-    is_joker = joker_detector.update(note, timestamp_ms) or note in JOKER_FORCED_KEYS
+    is_joker = joker_detector.update(note, timestamp_ms)
 
     if is_joker:
         but = model.joker_button_idx
@@ -481,22 +578,34 @@ def manageNote(note, velocity):
     context = to_device(context, device)
     if TRACES:
         print("ctx", i+CTX_LEN+1, "of", TOTAL_GEN_LEN+CTX_LEN)
+
+    # --- Tonnetz-step: arm the nudge on manual request or on stuck detection ---
+    if step_target is None:
+        if manual_step_requested:
+            manual_step_requested = False
+            _trigger_step('manual')
+        elif auto_step_enabled and step_cooldown <= 0 and step_tracker.is_stuck():
+            _trigger_step(f'stuck for {step_tracker.held_notes} notes')
+    step_logit_bias = _step_bias_tensor()
+
     with torch.inference_mode():
         if USE_CACHE:
             new_pitch_token, kv_cache = model.gen_pitch_token(
                 context,
                 style_context=style_contexts[active_style_idx],
                 style_context_mask=style_context_masks_list[active_style_idx],
-                cache=kv_cache
+                cache=kv_cache,
+                logit_bias=step_logit_bias
             )
         else:
             new_pitch_token, _ = model.gen_pitch_token(
                 context,
                 style_context=style_contexts[active_style_idx],
                 style_context_mask=style_context_masks_list[active_style_idx]
-            , temperature=TEMPERATURE)
+            , temperature=TEMPERATURE, logit_bias=step_logit_bias)
         last_gen_time = time.perf_counter()
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
+    _step_after_note(new_pitch_token)
 
     playNote(new_pitch_token, velocity) 
     visualizer.get_note(new_pitch_token, velocity)
@@ -520,13 +629,16 @@ def manageNote(note, velocity):
       #visualizer.update(noteOn_time)
 
 
-"""# KEYBOARD LISTENER — keys 1/2/3/4/5 switch MIDI style, space saves motif, 6 activates motif """
+"""# KEYBOARD LISTENER — keys 1/2/3/4/5 switch MIDI style, space saves motif, 6 activates motif,
+   '.' takes one harmonic step now, 'a' toggles auto stuck-detection """
 def _on_key_press(key: pkeyboard.Key) -> None:
     global active_style_idx
     global kv_cache
     global style_context
     global style_context_mask
     global motif_style_ready
+    global manual_step_requested
+    global auto_step_enabled
     if key == pkeyboard.Key.space:
         capture_highlight_motif()
         return
@@ -553,6 +665,12 @@ def _on_key_press(key: pkeyboard.Key) -> None:
         if c in ('s'):
             save_performance()
             print("saved performance")
+        if c == STEP_KEY:
+            manual_step_requested = True
+            print("[step] manual harmonic step requested (applies on next note)")
+        if c == STEP_TOGGLE_KEY:
+            auto_step_enabled = not auto_step_enabled
+            print(f"[step] auto stuck-detection {'ON' if auto_step_enabled else 'OFF'}")
     except AttributeError:
         pass
 

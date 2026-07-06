@@ -41,8 +41,9 @@ from model_loader import load_model
 from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
+from harmony_extractor import RealtimeHarmonyExtractor, estimate_key_from_pitches, PITCH_NAMES
 
-TRACES = True
+TRACES = False
 USE_CACHE = False
 CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 XINXE_INTERFACE = False
@@ -61,12 +62,17 @@ JOKER_MAX_INTERVAL_MS = 200.0  # max ms between consecutive notes to count as "f
 TEMPERATURE = 1 #0.0001
 
 ''' HARMONY INFERENCE PARAMS '''
-HARM_CFG_WEIGHT = 1.0# 2.0          # classifier-free guidance strength on harmony (1.0 = off)
-HARM_PC_BIAS = 0.0 #3.0             # soft pitch-class logit bias toward chord tones (0.0 = off)
+HARM_CFG_WEIGHT = 2.0# 1.0          # classifier-free guidance strength on harmony (1.0 = off)
+HARM_PC_BIAS = 3.0 #0.0             # soft pitch-class logit bias toward chord tones (0.0 = off)
 HARM_MOVE_WEIGHT = 4.0         # movement-compatibility weight in constrained chord planning. Reduces/increases the number of possible chords.
 HARM_PLAN_HIST = 32            # pitch-history length fed to the chord planner
 HARM_DECAY_STEP = 1.0 / 15.0   # transition_phase decay per generated note (harmony release span ~30 notes); intensity stays binary 1.0 while active
 HARM_REPLAN_EVERY = 0          # while a movement is active, re-plan the chord every N generated notes so the FiLM chord tracks the evolving melody (0 = freeze for the whole span)
+# Keep the runtime conditioner on the checkpoint's trained harmony manifold by
+# default. The current AE_style_harm_tester_v1 training pickle contains no
+# KEY_CHANNEL events and all chord-label events have FUNC_UNKNOWN, so non-neutral
+# function/key/mode embeddings are effectively untrained for this model.
+HARM_USE_PLANNER_ANALYSIS_FACTORS = False
 # First test (intensity spatial-pattern diagnosis): force FiLM ON at EVERY position
 # of the harm_window (context included), so the decoder sees the same constant
 # intensity=1.0 regime it saw in training (where intensity was 1.0 over the whole
@@ -79,7 +85,14 @@ FORCE_FULL_INTENSITY = False
 FILM_GAIN = 1.0
 # Test 2 (instrumentation): print conditioner/FiLM norms at the conditioned (last)
 # position each generated note, so the pre- vs post-keypress jump is visible.
-HARM_FILM_DEBUG = True
+HARM_FILM_DEBUG = False
+
+''' HARMONY VISUALIZER PARAMS '''
+VISUALIZER_WIDTH = 1400
+HARMONY_PANEL_WIDTH = 650
+HARMONY_TENSION_WINDOW_SEC = 1.0
+HARMONY_BUFFER_SEC = 10.0
+HARMONY_CHORD_THRESHOLD = 0.3
 
 ''' DEVICE SPECIFIC PARAMETERS '''
 if torch.backends.mps.is_available():
@@ -117,8 +130,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 
-sample_midi_path_init = sample_midi_path1
-STYLE_IDX_INIT = 1
+sample_midi_path_init = sample_midi_path2
+STYLE_IDX_INIT = 2
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [
@@ -277,7 +290,11 @@ save_lock = Lock()
 reset_requested = Event()
 
 '''VISUALIZER'''
-visualizer = Visualizer(button_slots=cfg['num_buttons'])
+visualizer = Visualizer(
+    width=VISUALIZER_WIDTH,
+    button_slots=cfg['num_buttons'],
+    harmony_panel_width=HARMONY_PANEL_WIDTH,
+)
 
 '''MIDI IN CALLBACK'''
 def midiin_callback(event, data=None):
@@ -291,8 +308,8 @@ def midiin_callback(event, data=None):
 
     if message[0] & 0xF0 == NOTE_OFF: 
         status, note, velocity = message
-        #with buffer_lock: # lock to avoid race condition, temporary disabled for debugging
-        manageNote(note, 0)
+        with buffer_lock:
+            manageNote(note, 0)
     
     if message[0] & 0xF0 == 176:  # 176 is the status for control change
 
@@ -387,6 +404,7 @@ def reset_context():
     global current_movement, current_intensity, current_phase, current_factors
     global current_bass_pc, current_chroma, pending_plan
     global harm_gen_hits, harm_gen_total
+    global harmony_tracker
 
     with buffer_lock:
         i = 0
@@ -402,6 +420,15 @@ def reset_context():
         current_chroma = [0.0] * 12
         pending_plan = False
         harm_buffers = _init_harm_buffers(TOTAL_GEN_LEN + CTX_LEN)
+        harmony_tracker = RealtimeHarmonyExtractor(
+            global_key=harmony_global_key,
+            tension_window_sec=HARMONY_TENSION_WINDOW_SEC,
+            buffer_size_sec=HARMONY_BUFFER_SEC,
+            visualize=False,
+            chord_threshold=HARMONY_CHORD_THRESHOLD,
+        )
+        visualizer.clear_harmony_history()
+        visualizer.set_chord_chroma(None, False)
         # Reset and extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
         for key in dict_input_tokens.keys():
             extended_list = dict_input_tokens[key].copy()
@@ -458,6 +485,29 @@ for key in dict_input_tokens.keys():
 
 if TRACES:  
     print("num_notes", num_notes)
+
+# Real-time harmony analysis for the embedded Tonnetz panel. The key is fixed
+# from the seed context, while x/y/tension are recomputed from generated notes.
+harmony_global_key = estimate_key_from_pitches(dict_input_tokens['pitch'][:CTX_LEN])
+harmony_key_root = harmony_global_key % 12
+harmony_key_mode = 'major' if harmony_global_key < 12 else 'minor'
+print(f"Harmony visualizer key: {PITCH_NAMES[harmony_key_root]} {harmony_key_mode}")
+harmony_tracker = RealtimeHarmonyExtractor(
+    global_key=harmony_global_key,
+    tension_window_sec=HARMONY_TENSION_WINDOW_SEC,
+    buffer_size_sec=HARMONY_BUFFER_SEC,
+    visualize=False,
+    chord_threshold=HARMONY_CHORD_THRESHOLD,
+)
+visualizer.set_harmony_state(
+    0.0,
+    0.0,
+    0.0,
+    key_root=harmony_key_root,
+    key_mode=harmony_key_mode,
+    active=False,
+)
+
 # Build context tokens
 context = {
     'dtime': torch.tensor(dict_input_tokens['dtime'], dtype=torch.long).unsqueeze(0),
@@ -590,6 +640,10 @@ def _plan_next_chord(idx: int) -> None:
             pitch_t, mvt, current_factors=cur_f, move_weight=HARM_MOVE_WEIGHT)
         ch = model.chroma_from_factors(planned['root_pc'], planned['quality_id'])
     current_factors = {k: int(planned[k].item()) for k in planned}
+    if not HARM_USE_PLANNER_ANALYSIS_FACTORS:
+        current_factors['function_id'] = FUNC_UNKNOWN
+        current_factors['key_pc'] = PC_UNKNOWN
+        current_factors['mode'] = MODE_UNKNOWN
     current_bass_pc = current_factors['root_pc']
     current_chroma = ch.squeeze(0).cpu().tolist()
     # Always print a readable summary so the performer can verify the planner.
@@ -623,6 +677,30 @@ def _play_predicted_chord() -> None:
     for n in notes:
         playNote(n, 0)
 
+
+def _update_harmony_visualizer() -> None:
+    """Push real-time generated-note harmony analysis into the pygame panel."""
+    now_s = visualizer.current_time()
+    harmony_tracker.update(now_s)
+    cx, cy, mag, key_root, key_mode = harmony_tracker.extract_current_features(now_s)
+    active_pcs = harmony_tracker._extract_active_pitch_classes(now_s)
+    target_chroma = current_chroma if current_intensity > 0.0 else None
+    movement_label = MOVEMENT_NAMES.get(current_movement, str(current_movement))
+    chord_label = _format_chord(current_factors, current_chroma) if target_chroma is not None else ''
+    has_harmony_content = bool(active_pcs) or mag > 0.01 or target_chroma is not None
+    visualizer.set_harmony_state(
+        cx,
+        cy,
+        mag,
+        key_root=key_root,
+        key_mode=key_mode,
+        active_pcs=active_pcs,
+        target_chroma=target_chroma,
+        movement_label=movement_label,
+        chord_label=chord_label,
+        active=has_harmony_content,
+    )
+
 # Full CTX_LEN in the primer strip and in the model; audible tail runs after MIDI opens (main loop).
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
@@ -643,6 +721,7 @@ def manageNote(note, velocity):
   global current_phase
   global pending_plan
   global harm_gen_hits, harm_gen_total
+  global harmony_tracker
 
   if TRACES:
     print("key", note)
@@ -770,12 +849,15 @@ def manageNote(note, velocity):
         current_phase = max(0.0, current_phase - HARM_DECAY_STEP)
         if current_phase <= 0.0:
             current_intensity = 0.0
+    visualizer.set_chord_chroma(current_chroma, current_intensity > 0.0)
     if TRACES:
         print("intensity", current_intensity, "phase", current_phase)
 
     playNote(new_pitch_token, velocity) 
+    harmony_tracker.add_note(new_pitch_token, visualizer.current_time(), velocity)
     visualizer.get_note(new_pitch_token, velocity)
     visualizer.get_button(but, velocity)
+    _update_harmony_visualizer()
 
     # add (pitch, time, button) to dictionary using original MIDI note as key
     noteOn_dict[note] = (new_pitch_token, timeNew, but)
@@ -788,8 +870,10 @@ def manageNote(note, velocity):
       # get pitch, time, and button from dictionary of accumulated notesOns without noteOff
       pitch, noteOn_time, but = noteOn_dict[note]
       playNote(pitch, 0)
+      harmony_tracker.note_off(pitch, visualizer.current_time())
       visualizer.get_note(pitch, 0)
       visualizer.get_button(but, 0)
+      _update_harmony_visualizer()
       # Remove from dictionary to allow the same note to be played again
       del noteOn_dict[note]
       #visualizer.update(noteOn_time)
@@ -880,7 +964,8 @@ try:
           reset_context()
       #visualizer.get_note(60, 100)
       #visualizer.get_button(0, 100)
-      visualizer.draw()
+      with buffer_lock:
+          _update_harmony_visualizer()
+          visualizer.draw()
 except (EOFError, KeyboardInterrupt, SystemExit):
     print("Bye.")
-
