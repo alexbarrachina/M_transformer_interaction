@@ -55,7 +55,7 @@ import re
 
 os.environ['USE_FLASH_ATTENTION'] = '1'
 
-from random import randint, random
+from random import randint, random, uniform
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
@@ -198,6 +198,24 @@ class StyleMusicSamplerDataset(Dataset):
         self.move_binary = bool(self.cfg.get('move_binary', False))
         self.move_flag_span = max(1, int(self.cfg.get('move_flag_span', 8)))
 
+        # AE_style_chords anticipation jitter: shift every chord-span onset EARLIER
+        # so the chord conditioning "arrives" before the notes it labels. At
+        # inference the performer presses just before wanting to hear the chord, so
+        # the labels the model trained on must lead the audible boundary; the random
+        # amount also stops the model overfitting to exact chord boundaries.
+        # Training-only augmentation (re-randomised every draw); disabled at eval so
+        # validation is measured against the true boundaries.
+        #   'ms'       -> shift by a random 100..500 ms
+        #   'fraction' -> shift by a random 10..25 % of the preceding chord span
+        # dtime is stored in units of 10 ms (midis2pickles.time2quant: int(ms/10)).
+        self.chords_jitter = bool(self.cfg.get('chords_jitter', False))
+        self.chords_jitter_mode = str(self.cfg.get('chords_jitter_mode', 'ms'))
+        self.chords_jitter_ms_min = float(self.cfg.get('chords_jitter_ms_min', 100.0))
+        self.chords_jitter_ms_max = float(self.cfg.get('chords_jitter_ms_max', 500.0))
+        self.chords_jitter_frac_min = float(self.cfg.get('chords_jitter_frac_min', 0.10))
+        self.chords_jitter_frac_max = float(self.cfg.get('chords_jitter_frac_max', 0.25))
+        self.dtime_ms = 10.0   # ms per dtime unit (midis2pickles.time2quant)
+
         # Pre-compute piece boundaries from [126,126,0,0,0] events
         self.piece_ranges = self._find_piece_boundaries()
 
@@ -312,6 +330,7 @@ class StyleMusicSamplerDataset(Dataset):
         Returns per-note tensors (length seq_len+1):
           'pitch'            [T+1] long
           'harm_movement'    [T+1] long  (0..8; 8 = joker; forward-filled from ch3)
+          'roman_move'       [T+1] long  (0..5; 5 = NULL; forward-filled from ch122)
           'transition_phase' [T+1] float (1.0 at movement onset -> ~0 before next; 0 = unguided)
           'move_flag'        [T+1] long  (move_binary only: 1 within the first
                                           move_flag_span notes after a boundary)
@@ -335,6 +354,7 @@ class StyleMusicSamplerDataset(Dataset):
 
         # rolling conditioning state
         cur_move = MOVE_STABILIZE
+        cur_roman_move = RMOVE_NULL                   # roman-derived 5-class movement (+ NULL)
         cur_root = PC_UNKNOWN; cur_qual = QUALITY_UNKNOWN; cur_func = FUNC_UNKNOWN
         cur_key = PC_UNKNOWN; cur_mode = MODE_UNKNOWN
         active_pcs = set(); active_bass_pitch = -1   # lowest sounding chord-tone pitch
@@ -342,6 +362,8 @@ class StyleMusicSamplerDataset(Dataset):
 
         p_pitch = []; p_move = []; p_root = []; p_qual = []; p_func = []
         p_key = []; p_mode = []; p_chroma = []; p_bass = []; p_group = []
+        p_dtime = []   # per-note delta-time (10 ms units) for anticipation jitter
+        p_roman_move = []   # roman-derived 5-class harmony movement (+ NULL) per note
 
         for t0, t1, t2, t3, t4 in ev:
             if t4 == HARMONY_CHANNEL:
@@ -352,6 +374,8 @@ class StyleMusicSamplerDataset(Dataset):
                 active_pcs = set(); active_bass_pitch = -1   # a new chord begins
             elif t4 == KEY_CHANNEL:
                 cur_key = t1; cur_mode = t2
+            elif t4 == ROMAN_MOVE_CHANNEL:
+                cur_roman_move = t1                      # 0..5 (RMOVE_* incl NULL)
             elif t4 == CHORDS_CHANNEL:
                 if t2 == 0 and t3 == 0:                      # chord-off marker
                     active_pcs = set(); active_bass_pitch = -1
@@ -363,6 +387,7 @@ class StyleMusicSamplerDataset(Dataset):
                 # playable note: snapshot the current conditioning state
                 p_pitch.append(t2)
                 p_move.append(cur_move)
+                p_roman_move.append(cur_roman_move)
                 p_root.append(cur_root); p_qual.append(cur_qual); p_func.append(cur_func)
                 p_key.append(cur_key); p_mode.append(cur_mode)
                 row = [0.0] * 12
@@ -371,9 +396,16 @@ class StyleMusicSamplerDataset(Dataset):
                 p_chroma.append(row)
                 p_bass.append(active_bass_pitch % 12 if active_bass_pitch >= 0 else PC_UNKNOWN)
                 p_group.append(move_group)
+                p_dtime.append(t0)
 
         if len(p_pitch) == 0:
             return self._create_dummy_target()
+
+        # Anticipation jitter (training-only): pull each chord-span onset earlier so
+        # the chord conditioning leads the audible boundary. Mutates p_chroma/p_bass
+        # in place before they are tensorised/transposed.
+        if self.chords_jitter and not self.is_eval:
+            self._apply_chords_jitter(p_chroma, p_bass, p_dtime)
 
         # transition_phase: linear decay over each movement span (group 0 = unguided = 0.0)
         # move_binary: the ramp is clipped to the first move_flag_span notes of the
@@ -401,6 +433,7 @@ class StyleMusicSamplerDataset(Dataset):
 
         pitch = torch.tensor(p_pitch, dtype=torch.long)
         move = torch.tensor(p_move, dtype=torch.long)
+        roman_move = torch.tensor(p_roman_move, dtype=torch.long)
         phase = torch.tensor(p_phase, dtype=torch.float)
         flag = torch.tensor(p_flag, dtype=torch.long)
         root = torch.tensor(p_root, dtype=torch.long)
@@ -418,6 +451,7 @@ class StyleMusicSamplerDataset(Dataset):
             return x[:target_len]
 
         pitch = fit(pitch); move = fit(move); phase = fit(phase); flag = fit(flag)
+        roman_move = fit(roman_move)
         root = fit(root); qual = fit(qual); func = fit(func)
         key = fit(key); mode = fit(mode); bass = fit(bass); chroma = fit(chroma)
 
@@ -432,6 +466,7 @@ class StyleMusicSamplerDataset(Dataset):
         out = {
             'pitch': pitch,
             'harm_movement': move,
+            'roman_move': roman_move,
             'transition_phase': phase,
             'chroma': chroma,
             'bass_pc': bass,
@@ -445,6 +480,64 @@ class StyleMusicSamplerDataset(Dataset):
         if self.move_binary:
             out['move_flag'] = flag
         return out
+
+    # ------------------------------------------------------------------ #
+    #  Anticipation jitter (AE_style_chords)                               #
+    # ------------------------------------------------------------------ #
+
+    def _apply_chords_jitter(self, p_chroma, p_bass, p_dtime):
+        """Shift every chord-span onset earlier by a random amount, relabelling the
+        preceding notes with the UPCOMING chord's chroma + bass.
+
+        A "labeled span" is a maximal run of notes with a constant sounding chord;
+        a boundary is the first note whose (non-empty) chroma differs from the
+        previous note's. For each boundary we walk backwards accumulating the
+        inter-note delta-times until we have covered the drawn shift, then copy the
+        new chord's chroma/bass over those notes. The walk-back is clamped to the
+        start of the preceding span so a jittered onset can never reach past the
+        chord before it (at most the immediately preceding chord is shortened).
+
+        Shift amount per boundary:
+          'ms'       -> uniform(ms_min, ms_max)      / dtime_ms   dtime units
+          'fraction' -> uniform(frac_min, frac_max)  * preceding-span duration
+        """
+        n = len(p_chroma)
+        if n < 2:
+            return
+
+        # Chord-span boundaries: index where the chord changes to a new non-empty chord.
+        boundaries = [i for i in range(1, n)
+                      if p_chroma[i] != p_chroma[i - 1] and any(p_chroma[i])]
+        if not boundaries:
+            return
+
+        prev_start = 0  # start index of the span that ENDS at the current boundary
+        for b in boundaries:
+            if self.chords_jitter_mode == 'fraction':
+                # duration (10 ms units) of the preceding span [prev_start, b):
+                # sum the deltas leading into each of its notes after the first.
+                prev_span = sum(p_dtime[prev_start + 1:b])
+                frac = uniform(self.chords_jitter_frac_min, self.chords_jitter_frac_max)
+                shift = frac * prev_span
+            else:
+                ms = uniform(self.chords_jitter_ms_min, self.chords_jitter_ms_max)
+                shift = ms / self.dtime_ms
+
+            # Walk back from the boundary, accumulating whole inter-note gaps until
+            # adding the next one would exceed the shift; clamp to prev_start.
+            acc = 0.0
+            k = b
+            while k > prev_start and acc + p_dtime[k] <= shift:
+                acc += p_dtime[k]
+                k -= 1
+
+            new_chroma = p_chroma[b]
+            new_bass = p_bass[b]
+            for j in range(k, b):
+                p_chroma[j] = list(new_chroma)
+                p_bass[j] = new_bass
+
+            prev_start = b
 
     # ------------------------------------------------------------------ #
     #  Style window: pitch-only (for StyleEncoder)                         #
@@ -462,7 +555,8 @@ class StyleMusicSamplerDataset(Dataset):
             (chan != HARMONY_CHANNEL) &
             (chan != CHORDS_CHANNEL) &
             (chan != CHORD_LABEL_CHANNEL) &
-            (chan != KEY_CHANNEL)
+            (chan != KEY_CHANNEL) &
+            (chan != ROMAN_MOVE_CHANNEL)
         )
         note_events = events[is_note]
 
@@ -536,7 +630,11 @@ def main():
     # Binary move-flag model: set model_name to 'AE_style_move_v1' (or
     # 'AE_style_move_tester_v1'); its cfg['move_binary']=True switches the
     # dataset to emit 'move_flag' + the clipped transition_phase automatically.
-    model_name = 'AE_style_move_tester_v1'
+    # Sounding-chord model: set model_name to 'AE_style_chords_v1' (or
+    # 'AE_style_chords_tester_v1'); it conditions FiLM on the channel-4 chroma +
+    # bass only, and its cfg['chords_jitter']=True enables the anticipation-jitter
+    # augmentation in the dataset (both handled automatically by field selection).
+    model_name = 'AE_style_chords_tester_v1'
     cfg = get_model_hparams(model_name)
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)
     model.to(device)

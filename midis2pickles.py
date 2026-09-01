@@ -26,6 +26,7 @@ import os
 from tqdm import tqdm
 
 from midiUtils import midi2ms_score, Any_Pickle_File_Writer, parse_harmony_label, identify_chord
+from roman_movement import roman_from_label, parse_marker, RomanMovementReducer
 from params import *
 
 # NO OFFSETS: Each token type is stored in its raw range (0-127)
@@ -89,13 +90,18 @@ chord_label_events = 0   # one packed (root, quality, function) event per chord
 key_events = 0           # one (key_pc, mode) event per key change
 chords_with_label = 0    # chords whose factors came from a parsed text label
 chords_derived = 0       # chords whose factors were derived from the notes (no label)
+roman_move_events = 0    # one roman-derived 5-class harmony-movement event per chord group
 
 ###########
 
 # dataset_addr = "./Samples"  # when testing
-dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_harmony_labels"
+dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_roman"
 # Output file names
-output_name = 'giantmidi_full_harmony_labels'
+output_name = 'giantmidi_roman_move'
+
+# Reducer: roman-numeral labels -> 5 harmony-movement classes (+ NULL), computed
+# per chord transition (see roman_movement.py / the reduction-map spec).
+roman_reducer = RomanMovementReducer()
 
 # Process MIDIs
 
@@ -138,7 +144,9 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
         score = midi2ms_score(open(f, 'rb').read())
 
         events_matrix = []
-        label_events_ms = []  # (time_ms, parsed_label) from text/marker meta-events
+        label_events_ms = []  # (time_ms, parsed_label, roman_str) from German-label meta-events
+        roman_events_ms = []  # (time_ms, roman_str) from 'all_roman' bare-roman markers
+        key_events_ms = []    # (time_ms, key_pc, mode) from 'key: X minor' markers
 
         itrack = 1
 
@@ -153,9 +161,18 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
                         s = raw.decode('latin-1', 'ignore') if isinstance(raw, (bytes, bytearray)) else str(raw)
                     except Exception:
                         s = ''
+                    # (a) German functional dialect: '<root> <QUAL>:...:<FUNC> (<roman>)'
                     parsed = parse_harmony_label(s)
                     if parsed is not None:
-                        label_events_ms.append((event[1], parsed))
+                        label_events_ms.append((event[1], parsed, roman_from_label(s)))
+                    else:
+                        # (b) 'all_roman' dialect: bare roman markers ('IV65/III',
+                        #     'ii%', 'i') + key markers ('key: A minor').
+                        kind = parse_marker(s)
+                        if kind is not None and kind[0] == 'key':
+                            key_events_ms.append((event[1], kind[1], kind[2]))
+                        elif kind is not None:
+                            roman_events_ms.append((event[1], kind[1]))
             itrack += 1
         
         if len(events_matrix) > 0:
@@ -203,8 +220,32 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           # --- Harmony-label lookups (quantized-time indexed) ---
           # Text labels: quantized onset time -> (root_pc, quality_id, key_pc, mode, function_id)
           label_by_qtime = {}
-          for t_ms, parsed in label_events_ms:
-              label_by_qtime[time2quant(t_ms)] = parsed
+          roman_by_qtime = {}
+          for t_ms, parsed, roman_str in label_events_ms:
+              q = time2quant(t_ms)
+              label_by_qtime[q] = parsed
+              roman_by_qtime[q] = roman_str
+          # Roman-derived 5-class harmony movement, computed per chord TRANSITION
+          # over the ordered chord-label sequence (key context = parsed key_pc/mode),
+          # then keyed by quantized onset for lookup in the emit loop below.
+          movement_by_qtime = {}
+          if label_by_qtime:   # German dialect: key is inside the parsed tuple
+              ordered_q = sorted(label_by_qtime.keys())
+              move_seq = [(roman_by_qtime.get(q), label_by_qtime[q][2], label_by_qtime[q][3])
+                          for q in ordered_q]   # (roman_str, key_pc, mode)
+              for q, mv in zip(ordered_q, roman_reducer.reduce(move_seq)):
+                  movement_by_qtime[q] = mv
+          if roman_events_ms:  # 'all_roman' dialect: romans + separate key markers
+              key_tl = sorted(key_events_ms)
+              move_seq = []; onset_qs = []
+              ki = 0; kpc, kmode = PC_UNKNOWN, MODE_UNKNOWN
+              for t_ms, roman_str in sorted(roman_events_ms):
+                  while ki < len(key_tl) and key_tl[ki][0] <= t_ms:
+                      kpc, kmode = key_tl[ki][1], key_tl[ki][2]; ki += 1
+                  move_seq.append((roman_str, kpc, kmode))
+                  onset_qs.append(time2quant(t_ms))
+              for q, mv in zip(onset_qs, roman_reducer.reduce(move_seq)):
+                  movement_by_qtime[q] = mv
           # Chord-tone pitch classes per onset, for the notes-derived fallback
           chord_group_pcs = {}
           for e in filtered_events_matrix:
@@ -214,7 +255,18 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           current_key = (PC_UNKNOWN, MODE_UNKNOWN)
           last_chord_label_qtime = None
 
+          # Roman-movement pseudo-events are injected in quantized-time order, just
+          # before the first event they precede (the 'all_roman' data has no
+          # channel-4 chord tones to piggyback the movement onto).
+          mv_events = sorted(movement_by_qtime.items())
+          mv_ptr = 0
+
           for e in filtered_events_matrix:
+
+              while mv_ptr < len(mv_events) and mv_events[mv_ptr][0] <= e[1]:
+                  target_data.extend([0, mv_events[mv_ptr][1], 0, 0, ROMAN_MOVE_CHANNEL])
+                  roman_move_events += 1
+                  mv_ptr += 1
 
               if e[3] == HARMONY_CHANNEL:
                   # Harmony movement: [0, 0, movement_type, 0, chan=3], pe NOT updated
@@ -321,6 +373,7 @@ print(f'Channel 5 chord reference events inserted: {channel_5_chords}')
 print(f'Chord-label events inserted: {chord_label_events} '
       f'(from text label: {chords_with_label}, notes-derived: {chords_derived})')
 print(f'Key-change events inserted: {key_events}')
+print(f'Roman harmony-movement events inserted: {roman_move_events}')
 if total_notes > 0:
     print(f'Movement events per note ratio: {channel_4_movements / total_notes:.4f}')
     print(f'Chord events per note ratio: {channel_5_chords / total_notes:.4f}')

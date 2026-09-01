@@ -186,6 +186,26 @@ MOVE_PITCH_BASE = 60  # channel-3 movement notes encode move as pitch (60 + move
 CHORD_LABEL_CHANNEL = 120  # pseudo-event: [0, root_pc, quality_id, function_id, 120]
 KEY_CHANNEL = 121          # pseudo-event: [0, key_pc, mode, 0, 121] (emitted on key change)
 
+# ---------------------------------------------------------------------------
+#  ROMAN-NUMERAL -> 5 HARMONY-MOVEMENT reduction (AE_style_roman)
+# ---------------------------------------------------------------------------
+# The >1000-token roman-numeral vocabulary (docs/roman_numeral/roman_numeral.txt)
+# is reduced DETERMINISTICALLY to 5 user-facing harmony movements + NULL via the
+# transition-based map in docs/roman_numeral/"Functional-Harmony Reduction
+# Map - Roman Numerals.md" (see roman_movement.py). Unlike the noisy 8-class
+# MOVE_* analyzer above, this is a fixed priority rule computed per chord change.
+# The reduced class is stored as a sparse pseudo-event on ROMAN_MOVE_CHANNEL and
+# consumed by RomanConditioner via an Embedding of size NUM_ROMAN_MOVEMENTS.
+RMOVE_STABLE = 0     # prolong / ornament current harmony
+RMOVE_TENSION = 1    # build toward a goal
+RMOVE_RESOLVE = 2    # release / cadence
+RMOVE_MODULATE = 3   # leave the key
+RMOVE_COLOR = 4      # chromatic surprise
+RMOVE_NULL = 5       # default "no constraint" (button released / gap / no label)
+NUM_ROMAN_MOVEMENTS = 6  # embedding size (5 movements + NULL)
+
+ROMAN_MOVE_CHANNEL = 122   # pseudo-event: [0, roman_move_id, 0, 0, 122] (>15, like 120/121)
+
 # "unknown" sentinels (used when the analyzer provides null / no label)
 PC_UNKNOWN = 12            # pitch class 0..11, 12 = unknown
 MODE_MAJOR = 0

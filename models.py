@@ -2320,6 +2320,169 @@ MODELS_PARAMETERS = {
     "batch_size": 16,
     "num_workers": 0,
     },
+'AE_style_chords_v1': {
+    'model_type': 'AE_style_chords',
+    'description': 'Style + button + SOUNDING-CHORD AdaLN-Zero FiLM (channel-4 chroma + bass only). A simpler AE_style_harm: no chord factors, no planner, no aux heads. Anticipation-jitter augmented. Resumable from AE_style_v2.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_chords_v1_0_eps_0_steps_0.0_loss_0.0_acc.pth',
+    # Warm-start from the base AE_style_v2 checkpoint (strict=False): the
+    # zero-initialised chord FiLM starts as identity, so the warm-started model
+    # reproduces the base style+button model exactly.
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 256,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Chord conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,   # modulate the upper half of decoder blocks
+    'harm_film_scale_limit': 0.5,  # bound |scale| (tanh*limit) per element
+    'harm_film_shift_limit': 0.5,  # bound |shift| (tanh*limit) per element
+    'loss_film_reg': 0.01,         # penalty on mean squared FiLM modulation
+    'harmony_drop_prob': 0.3,      # train the unconditional branch (CFG / release)
+    'pc_bias_weight': 0.0,         # inference soft pitch-class logit bias (0 = off)
+    # Anticipation jitter (dataset augmentation): shift each chord-span onset
+    # earlier so the chord "arrives" before the notes it labels (models the user
+    # pressing before wanting to hear the effect; also prevents overfitting to
+    # exact boundaries). Training-only, re-randomised per draw.
+    'chords_jitter': True,
+    'chords_jitter_mode': 'ms',    # 'ms' | 'fraction'
+    'chords_jitter_ms_min': 100.0,
+    'chords_jitter_ms_max': 500.0,
+    'chords_jitter_frac_min': 0.10,
+    'chords_jitter_frac_max': 0.25,
+    # Loss weights (style/button, inherited from AE_style)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (harmony-labelled pickles: only the channel-4 chord tones are used)
+    "dataset_train_path": "./Training-Data/giantmidi_full_harmony_labels_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_harmony_labels_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 8,
+    "num_workers": 0,
+    },
+'AE_style_chords_tester_v1': {
+    'model_type': 'AE_style_chords',
+    'description': 'Small tester for the sounding-chord FiLM model (channel-4 chroma + bass). Resumable from AE_style_tester_v2.',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 2,
+    'heads': 32,
+    'num_buttons': 19,
+    # Chord conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,
+    'harm_film_scale_limit': 0.5,
+    'harm_film_shift_limit': 0.5,
+    'loss_film_reg': 0.01,
+    'harmony_drop_prob': 0.3,
+    'pc_bias_weight': 0.0,
+    # Anticipation jitter (dataset augmentation)
+    'chords_jitter': True,
+    'chords_jitter_mode': 'ms',
+    'chords_jitter_ms_min': 100.0,
+    'chords_jitter_ms_max': 500.0,
+    'chords_jitter_frac_min': 0.10,
+    'chords_jitter_frac_max': 0.25,
+    # Loss weights (style/button)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (harmony-labelled pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_full_roman_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_roman_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 16,
+    "num_workers": 0,
+    },
+'AE_style_roman_v1': {
+    'model_type': 'AE_style_roman',
+    'description': 'Style + button + ROMAN-MOVEMENT AdaLN-Zero FiLM: 5 harmony movements (STABLE/TENSION/RESOLVE/MODULATE/COLOR) + NULL, reduced from roman-numeral labels per chord transition. A variation of AE_style_chords (discrete movement embedding instead of chroma+bass). Minimal cut: no aux heads / NULL-span sampling yet. Resumable from AE_style_v2.',
+    'train_log': '',
+    'ckpt_file_name': './save_models/AE_style_roman_v1_0_eps_0_steps_0.0_loss_0.0_acc.pth',
+    # Warm-start from the base AE_style_v2 checkpoint (strict=False): the
+    # zero-initialised roman-movement FiLM starts as identity, so the warm-started
+    # model reproduces the base style+button model exactly.
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 256,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    # Roman-movement conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,   # modulate the upper half of decoder blocks
+    'harm_film_scale_limit': 0.5,  # bound |scale| (tanh*limit) per element
+    'harm_film_shift_limit': 0.5,  # bound |shift| (tanh*limit) per element
+    'loss_film_reg': 0.01,         # penalty on mean squared FiLM modulation
+    'harmony_drop_prob': 0.3,      # train the unconditional branch (CFG / release)
+    'pc_bias_weight': 0.0,         # inference soft pitch-class logit bias (0 = off)
+    # Anticipation jitter operates on chroma/bass (unused by the movement
+    # conditioner); roman-onset jitter is a follow-on, so keep it off here.
+    'chords_jitter': False,
+    # Loss weights (style/button, inherited from AE_style)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (roman-movement pickles: channel-122 movement + channel-4 tones)
+    "dataset_train_path": "./Training-Data/giantmidi_roman_move_train",
+    "dataset_val_path": "./Training-Data/giantmidi_roman_move_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 8,
+    "num_workers": 0,
+    },
+'AE_style_roman_tester_v1': {
+    'model_type': 'AE_style_roman',
+    'description': 'Small tester for the roman-movement FiLM model (5 movements + NULL). Resumable from AE_style_tester_v2.',
+    'train_log': '',
+    'ckpt_file_name': '',
+    'init_from_ckpt': './save_models/AE_style_tester_v2_5_eps_294_steps_0.6602_loss_0.7962_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 512,
+    'num_layers': 4,
+    'style_encoder_depth': 2,
+    'heads': 32,
+    'num_buttons': 19,
+    # Roman-movement conditioning
+    'harm_cond_dim': 256,
+    'harm_film_start_frac': 0.5,
+    'harm_film_scale_limit': 0.5,
+    'harm_film_shift_limit': 0.5,
+    'loss_film_reg': 0.01,
+    'harmony_drop_prob': 0.3,
+    'pc_bias_weight': 0.0,
+    'chords_jitter': False,
+    # Loss weights (style/button)
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.1,
+    # Dataset paths (roman-movement pickles)
+    "dataset_train_path": "./Training-Data/giantmidi_roman_move_train",
+    "dataset_val_path": "./Training-Data/giantmidi_roman_move_test",
+    # Training settings
+    "save_every": 1,
+    "batch_size": 16,
+    "num_workers": 0,
+    },
 'AE_antic_style_v1': {
     'model_type': 'AE_antic_style',
     'description': 'Style cross-attention + anticipation for user-injected notes (AE_style_v2 base).',

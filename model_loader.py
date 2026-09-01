@@ -527,6 +527,78 @@ def load_model(model_name='default',
                 attn_flash = True
             ),
         )
+    elif cfg['model_type'] == 'AE_style_chords':
+        # Style + button + SOUNDING-CHORD conditioning via AdaLN-Zero FiLM
+        # (channel-4 chroma + bass only — a simpler AE_style_harm with no chord
+        # factors / planner / aux heads). Resumable from AE_style_v2 (zero-init
+        # FiLM => identity at start).
+        mpt_model = AE_style_chords(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style_chords(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                harm_cond_dim = cfg.get('harm_cond_dim', 256),
+                harm_film_start_frac = cfg.get('harm_film_start_frac', 0.5),
+                harm_film_scale_limit = cfg.get('harm_film_scale_limit', 1.0),
+                harm_film_shift_limit = cfg.get('harm_film_shift_limit', 1.0),
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
+    elif cfg['model_type'] == 'AE_style_roman':
+        # Style + button + ROMAN-MOVEMENT conditioning via AdaLN-Zero FiLM: a
+        # variation of AE_style_chords conditioned on the roman-derived 5-class
+        # harmony movement (+ NULL) instead of channel-4 chroma + bass. Resumable
+        # from AE_style_v2 (zero-init FiLM => identity at start).
+        mpt_model = AE_style_roman(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style_roman(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                harm_cond_dim = cfg.get('harm_cond_dim', 256),
+                harm_film_start_frac = cfg.get('harm_film_start_frac', 0.5),
+                harm_film_scale_limit = cfg.get('harm_film_scale_limit', 1.0),
+                harm_film_shift_limit = cfg.get('harm_film_shift_limit', 1.0),
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
     elif cfg['model_type'] == 'AE_antic_style':
         # Style-conditioned autoencoder + anticipation: buttons + cross-attention to
         # style reference + anticipated-pitch signal for user-injected notes
