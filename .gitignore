@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+.runtime_home/
+Training-Data/
+save_models/
+out/
+wandb/
+metrics/
+old/
+tester/
+harm/
+docs/
+samples/
