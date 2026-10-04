@@ -697,6 +697,7 @@ def load_model(model_name='default',
         mpt_model = AE_style_jokerParam(
             cfg = cfg,
             decoder = Decoder_no_dtime_style_jokerParam(
+                timing_enabled = cfg.get('timing_enabled', False),
                 max_seq_len = cfg['seq_len'],
                 dim = cfg['emb_dim'],
                 depth = cfg['num_layers'],
@@ -741,7 +742,10 @@ def load_model(model_name='default',
         else:
             map_location = None
 
-        mpt_model.load_state_dict(torch.load(model_path, map_location=map_location), strict=False) # weights_only=True not compatible cpu
+        state = torch.load(model_path, map_location=map_location)
+        if isinstance(state, dict) and 'model_state_dict' in state:
+            state = state['model_state_dict']
+        mpt_model.load_state_dict(state, strict=cfg.get('timing_enabled', False))
 
         if compile_mode != 'none':
             mpt_model = torch.compile(mpt_model, mode=compile_mode)

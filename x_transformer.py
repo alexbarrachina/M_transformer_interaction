@@ -272,7 +272,11 @@ class Attend(nn.Module):
         # with sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
 
         # PyTorch 2.3-2.4 SDPA backend code...
-        with sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.CUDNN_ATTENTION]):
+        backends = [SDPBackend.MATH] if os.environ.get('SDPA_MATH_ONLY', '0') == '1' else [
+            SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION,
+            SDPBackend.FLASH_ATTENTION, SDPBackend.CUDNN_ATTENTION,
+        ]
+        with sdpa_kernel(backends):
         # with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
 
         # New PyTorch 2.5 SDPA backend code:
@@ -11487,12 +11491,19 @@ class Decoder_no_dtime_style_jokerParam(Decoder_no_dtime_style):
     initialisation and is guaranteed to start at exactly zero.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, timing_enabled: bool = False, **kwargs):
         # Decoder_no_dtime_style.__init__ calls self.init_().  Do not override
         # init_ in this subclass: the joker parameter must be created only after
         # all inherited initialisation has completed.
         super().__init__(**kwargs)
         self.joker_mode = nn.Parameter(torch.zeros(self.emb_dim))
+        self.timing_mlp = None
+        if timing_enabled:
+            self.timing_mlp = nn.Sequential(
+                nn.Linear(4, 32), nn.SiLU(), nn.Linear(32, self.emb_dim)
+            )
+            nn.init.zeros_(self.timing_mlp[-1].weight)
+            nn.init.zeros_(self.timing_mlp[-1].bias)
 
     def forward(
         self,
@@ -11523,6 +11534,24 @@ class Decoder_no_dtime_style_jokerParam(Decoder_no_dtime_style):
 
         concat_inputs = torch.cat([pitch, button], dim=-1)
         x = self.input_proj(concat_inputs)
+        if self.timing_mlp is not None:
+            self.timing_contribution_ratio = x.new_zeros(())
+            features = past_tokens.get('timing_features')
+            if features is not None:
+                valid = past_tokens.get('timing_mask')
+                if (features.shape != (*x.shape[:2], 4) or valid is None
+                        or valid.shape != x.shape[:2]):
+                    raise ValueError('Timing needs features [B,T,4] and mask [B,T] aligned with pitch')
+                valid = valid.to(device=x.device, dtype=torch.bool).unsqueeze(-1)
+                features = features.to(device=x.device, dtype=x.dtype).masked_fill(~valid, 0)
+                contribution = self.timing_mlp(features).masked_fill(~valid, 0)
+                if self.training:
+                    with torch.no_grad():
+                        self.timing_contribution_ratio = (
+                            contribution.float().square().sum()
+                            / x.float().masked_fill(~valid, 0).square().sum().clamp_min(1e-12)
+                        ).sqrt()
+                x = x + contribution
         x = self.emb_dropout(x)
 
         x, intermediates = self.attn_layers(
@@ -11700,7 +11729,11 @@ class AE_style(Module):
         encoder_context = {
             'pitch': note_tokens['pitch'][:, 1:],
         }
-        e = self.encoder(encoder_context)
+        encoder_mask = None
+        if self.cfg.get('timing_enabled', False):
+            encoder_mask = encoder_context['pitch'] != self.ignore_index
+            encoder_context['pitch'] = encoder_context['pitch'].masked_fill(~encoder_mask, 0)
+        e = self.encoder(encoder_context, mask=encoder_mask)
         b = self.quantizer(e)
         b, extra_decoder_context = self._augment_buttons(b, note_tokens)
 
@@ -11710,6 +11743,10 @@ class AE_style(Module):
             'button': b[:, :],
             **extra_decoder_context,
         }
+        if self.cfg.get('timing_enabled', False):
+            decoder_context['pitch'] = decoder_context['pitch'].masked_fill(
+                decoder_context['pitch'] == self.ignore_index, 0
+            )
 
         # Decode (overridable hook): subclasses may inject extra conditioning and
         # return additional weighted loss terms {name: (weight, value)}. Base
@@ -11723,8 +11760,11 @@ class AE_style(Module):
         loss_recons = F.cross_entropy(
             rearrange(logits, 'b n c -> b c n'),
             target,
-            ignore_index=self.ignore_index
+            ignore_index=self.ignore_index,
+            reduction='sum' if self.cfg.get('timing_enabled', False) else 'mean',
         )
+        if self.cfg.get('timing_enabled', False):
+            loss_recons = loss_recons / (target != self.ignore_index).sum().clamp_min(1)
 
         loss_contour_perc = 0
         if self.cfg.get('loss_contour_perc', 0) > 0:
@@ -12073,7 +12113,12 @@ class AE_style_jokerParam(AE_style):
         neutral_buttons = torch.where(
             joker_mask, torch.zeros_like(buttons), buttons
         )
-        return neutral_buttons, {'joker_mask': joker_mask}
+        extra = {'joker_mask': joker_mask}
+        if self.decoder.timing_mlp is not None:
+            for key in ('timing_features', 'timing_mask'):
+                if key in note_tokens:
+                    extra[key] = note_tokens[key][:, 1:]
+        return neutral_buttons, extra
 
     def _additional_reconstruction_metrics(
         self,
@@ -12102,13 +12147,16 @@ class AE_style_jokerParam(AE_style):
 
         correct = (predicted == target).float()
         valid_count = valid.sum().clamp_min(1)
-        return {
+        metrics = {
             'loss_recons_guided': masked_mean(per_token_loss, guided_valid),
             'loss_recons_joker': masked_mean(per_token_loss, joker_valid),
             'acc_guided': masked_mean(correct, guided_valid),
             'acc_joker': masked_mean(correct, joker_valid),
             'joker_fraction': joker_valid.sum().float() / valid_count.float(),
         }
+        if self.decoder.timing_mlp is not None:
+            metrics['timing_contribution_ratio'] = self.decoder.timing_contribution_ratio
+        return metrics
 
     @torch.inference_mode()
     def _buttons_discrete_to_inputs(
@@ -12151,6 +12199,11 @@ class AE_style_jokerParam(AE_style):
                 'button': button_real[:, 1:],
                 'joker_mask': joker_mask[:, 1:],
             }
+
+        if self.decoder.timing_mlp is not None:
+            for key in ('timing_features', 'timing_mask'):
+                if key in note_tokens:
+                    decoder_context[key] = note_tokens[key][:, -1:] if cache is not None else note_tokens[key][:, 1:]
 
         logits, intermediates = self.decoder(
             decoder_context,

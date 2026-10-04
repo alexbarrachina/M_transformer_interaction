@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+from urllib.error import URLError
+from urllib.request import urlopen
+
+
+def analyzer_already_running(port):
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/", timeout=0.5) as response:
+            page = response.read(4096)
+        return b"<title>Checkpoint Lab" in page
+    except (OSError, URLError):
+        return False
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8765,
+                        help="Dashboard port (default: 8765; use another port if occupied)")
     parser.add_argument("--checkpoint", help="Checkpoint path relative to save_models")
     parser.add_argument("--profile", choices=("quick", "full"), default="quick")
     parser.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
@@ -47,8 +59,18 @@ def main():
         return 0 if final.get("status") == "complete" else 1
     from aiohttp import web
     from metrics.analyzer.server import create_app
+    if analyzer_already_running(args.port):
+        print(f"Checkpoint Analyzer is already running at http://127.0.0.1:{args.port}")
+        return 0
     print(f"Checkpoint Analyzer: http://127.0.0.1:{args.port}", flush=True)
-    web.run_app(create_app(store), host="127.0.0.1", port=args.port)
+    try:
+        web.run_app(create_app(store), host="127.0.0.1", port=args.port)
+    except OSError as exc:
+        if exc.errno in (48, 98, 10048):
+            print(f"Port {args.port} is already in use. Open http://127.0.0.1:{args.port} "
+                  "if the analyzer is running, or choose another port with --port.")
+            return 1
+        raise
     return 0
 
 

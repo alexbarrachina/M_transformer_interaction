@@ -41,6 +41,7 @@ from model_loader import load_model
 from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
+from timing import LiveTimingContext, TIME_UNIT
 
 TRACES = False
 USE_CACHE = False
@@ -54,7 +55,7 @@ JOKER_MAX_INTERVAL_MS = 200.0  # max ms between consecutive notes to count as "f
 JOKER_FORCED_KEYS = {36, 37}  # these MIDI keys are always joker buttons, regardless of alternation
 
 TEMPERATURE = 1#0.0001
-SHOW_EVENT_NUMBERS = False
+SHOW_EVENT_NUMBERS = True
 
 ''' DEVICE SPECIFIC PARAMETERS '''
 if torch.backends.mps.is_available():
@@ -78,12 +79,15 @@ else:
 
 ''' MODEL '''
 
-model_name = 'AE_style_v2' #AE_style_v1
-#model_name = 'AE_style_v2'
+#model_name = 'AE_style_jokerParam_v1' #AE_style_v1
+model_name = os.environ.get('MODEL_NAME', 'AE_style_jokerParam_tester_v2')
 cfg = get_model_hparams(model_name)
+if os.environ.get('CHECKPOINT_PATH'):
+    cfg['ckpt_file_name'] = os.environ['CHECKPOINT_PATH']
 model = load_model(model_name=model_name, cfg=cfg )
 model.to(device)
 model.eval()
+live_timing = None
 
 ''' PARAMS '''
 # Get sample seed MIDI path
@@ -93,8 +97,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 
-sample_midi_path_init = sample_midi_path3
-STYLE_IDX_INIT = 3
+sample_midi_path_init = sample_midi_path1
+STYLE_IDX_INIT = 4
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [
@@ -189,10 +193,11 @@ space_joker_held = Event()
 memory_key_held = Event()
 joker_toggle_active = Event()
 toggle_key_held = Event()
+timing_key_held = Event()
 
 def make_controls_legend() -> List[Tuple[str, str]]:
     joker_state = 'ON' if joker_toggle_active.is_set() else 'OFF'
-    return [
+    controls = [
         ('SPACE', 'Hold for Joker'),
         ('T', f'Joker {joker_state}'),
         ('M', 'Capture memory'),
@@ -201,6 +206,10 @@ def make_controls_legend() -> List[Tuple[str, str]]:
         ('1-5', 'Styles'),
         ('6', 'Memory'),
     ]
+    if cfg.get('timing_enabled', False):
+        enabled = live_timing is None or live_timing.enabled
+        controls.append(('D', f"Timing {'ON' if enabled else 'OFF'}"))
+    return controls
 
 '''VISUALIZER'''
 visualizer = Visualizer(
@@ -221,8 +230,8 @@ def midiin_callback(event, data=None):
 
     if message[0] & 0xF0 == NOTE_OFF: 
         status, note, velocity = message
-        #with buffer_lock: # lock to avoid race condition, temporary disabled for debugging
-        manageNote(note, 0)
+        with buffer_lock:
+            manageNote(note, 0)
     
     if message[0] & 0xF0 == 176:  # 176 is the status for control change
 
@@ -315,6 +324,11 @@ def reset_context():
     global b
 
     with buffer_lock:
+        if live_timing is not None:
+            live_timing.reset()
+            kv_cache = None
+            joker_detector.reset()
+            return
         i = 0
         kv_cache = None
         # Reset and extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
@@ -443,6 +457,10 @@ with torch.inference_mode():
     b = b.clone().detach().tolist()
     b.extend([0] * (TOTAL_GEN_LEN + CTX_LEN - len(b)))
 
+if cfg.get('timing_enabled', False):
+    live_timing = LiveTimingContext(
+        dict_input_tokens['pitch'], b, dict_input_tokens['dtime'], CTX_LEN
+    )
 # Full CTX_LEN in the primer strip and in the model; audible tail runs after MIDI opens (main loop).
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
@@ -463,15 +481,22 @@ def manageNote(note, velocity):
   if TRACES:
     print("key", note)
 
-  timeNew = time.perf_counter()*1000 /32 # in miliseconds /32 as in midi_to_dict()
+  now = time.perf_counter()
+  timeNew = now / TIME_UNIT
 
   if velocity > 0: # noteOn
-    now = time.perf_counter()
     if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
         kv_cache = None
     # Update position token
 
-    dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
+    dtime = max(0, int(timeNew) - int(timeLast))
+    if live_timing is None:
+        dtime = min(127, dtime)
+    else:
+        # The recording can grow across phrase resets and preserves long pauses.
+        for values in (*dict_output_tokens.values(), b):
+            if len(values) <= i + CTX_LEN:
+                values.extend([0] * (i + CTX_LEN + 1 - len(values)))
     if first_note:
         dtime = 0
         first_note = False
@@ -496,12 +521,19 @@ def manageNote(note, velocity):
             print("ERROR key_to_button", note)
 
     b[i+CTX_LEN] = but
-    context = {
-      'dtime': torch.tensor(dict_output_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'dur': torch.tensor(dict_output_tokens['dur'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
-      'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
-    }
+    if live_timing is not None:
+        context, restarted = live_timing.begin_note(now, but)
+        if restarted:
+            kv_cache = None
+            joker_detector.reset()
+            joker_detector.update(note, now * 1000)
+    else:
+        context = {
+          'dtime': torch.tensor(dict_output_tokens['dtime'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
+          'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
+          'dur': torch.tensor(dict_output_tokens['dur'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
+          'button': torch.tensor(b[i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0)
+        }
     context = to_device(context, device)
     if TRACES:
         print("ctx", i+CTX_LEN+1, "of", TOTAL_GEN_LEN+CTX_LEN)
@@ -521,6 +553,8 @@ def manageNote(note, velocity):
             , temperature=TEMPERATURE)
         last_gen_time = time.perf_counter()
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
+    if live_timing is not None:
+        live_timing.finish_note(new_pitch_token)
 
     playNote(new_pitch_token, velocity) 
     visualizer.get_note(new_pitch_token, velocity, is_joker=is_joker)
@@ -564,6 +598,15 @@ def _on_key_press(key: pkeyboard.Key) -> None:
         return
     try:
         c = key.char  # type: ignore[union-attr]
+        if c is not None and c.lower() == 'd' and live_timing is not None:
+            if not timing_key_held.is_set():
+                timing_key_held.set()
+                with buffer_lock:
+                    live_timing.enabled = not live_timing.enabled
+                    kv_cache = None
+                visualizer.controls_legend = make_controls_legend()
+                print(f"Timing {'ON' if live_timing.enabled else 'OFF'}")
+            return
         if c is not None and c.lower() == 'm':
             if not memory_key_held.is_set():
                 memory_key_held.set()
@@ -612,6 +655,8 @@ def _on_key_release(key: pkeyboard.Key) -> None:
             memory_key_held.clear()
         elif char is not None and char.lower() == 't':
             toggle_key_held.clear()
+        elif char is not None and char.lower() == 'd':
+            timing_key_held.clear()
 
 _key_listener = pkeyboard.Listener(on_press=_on_key_press, on_release=_on_key_release)
 _key_listener.start()
@@ -633,8 +678,8 @@ try:
     
     if available_ports:
         print("Available MIDI input ports:")
-        for i, port in enumerate(available_ports):
-            print(f"[{i}] {port}")
+        for port_index, port in enumerate(available_ports):
+            print(f"[{port_index}] {port}")
         # Open first available port
         midiin.open_port(MIDI_PORT) 
       
