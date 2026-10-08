@@ -376,6 +376,8 @@ class StyleMusicSamplerDataset(Dataset):
                 cur_key = t1; cur_mode = t2
             elif t4 == ROMAN_MOVE_CHANNEL:
                 cur_roman_move = t1                      # 0..5 (RMOVE_* incl NULL)
+            elif t4 in (TENSION_CHANNEL, HOME_KEY_CHANNEL):
+                pass                                     # not consumed by this model yet
             elif t4 == CHORDS_CHANNEL:
                 if t2 == 0 and t3 == 0:                      # chord-off marker
                     active_pcs = set(); active_bass_pitch = -1
@@ -556,7 +558,9 @@ class StyleMusicSamplerDataset(Dataset):
             (chan != CHORDS_CHANNEL) &
             (chan != CHORD_LABEL_CHANNEL) &
             (chan != KEY_CHANNEL) &
-            (chan != ROMAN_MOVE_CHANNEL)
+            (chan != ROMAN_MOVE_CHANNEL) &
+            (chan != TENSION_CHANNEL) &
+            (chan != HOME_KEY_CHANNEL)
         )
         note_events = events[is_note]
 

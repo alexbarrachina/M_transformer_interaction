@@ -1,4 +1,4 @@
-"""Correctness checks and a four-update smoke run; no quality evaluation."""
+"""Correctness checks and short training smoke runs; no quality evaluation."""
 
 import ast
 import math
@@ -28,7 +28,7 @@ def small_config():
     cfg = get_model_hparams('AE_style_jokerParam_dtime_tester_v1')
     cfg.update(emb_dim=32, num_layers=4, heads=4, seq_len=8, style_seq_len=8,
                style_encoder_depth=1, batch_size=2, num_workers=0, use_logs=False,
-               timing_warmup_steps=2, timing_total_steps=4, timing_save_every=2,
+               timing_warmup_steps=2,
                print_stats_every=1, epochs=2)
     return cfg
 
@@ -252,16 +252,19 @@ class TimingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             cfg['ckpt_file_name'] = str(Path(folder) / 'latest.pth')
             cfg['init_from_ckpt'] = str(Path(folder) / 'base.pth')
+            log_path = Path(folder) / 'logs' / 'training.log'
             base = load_model(cfg={**cfg, 'timing_enabled': False}, set_only=True)
             torch.save(base.state_dict(), cfg['init_from_ckpt'])
             with patch.object(train_style, 'get_model_hparams', return_value=cfg), \
                  patch.object(train_style, 'Any_Pickle_File_Reader', return_value=piece().flatten().tolist()) as reader, \
                  patch.object(train_style, 'RESUME', True), \
-                 patch.dict('os.environ', {'BATCH_SIZE': '2', 'NUM_WORKERS': '0'}):
+                 patch.object(train_style, 'count', return_value=range(1)), \
+                 patch.dict('os.environ', {'BATCH_SIZE': '2', 'NUM_WORKERS': '0',
+                                          'TRAIN_TRACE': '0', 'TRAIN_LOG_FILE': str(log_path)}):
                 train_style.main()
-                self.assertEqual(reader.call_count, 1)  # no evaluation dataset
+                self.assertEqual(reader.call_count, 2)  # training and validation datasets
                 saved = torch.load(cfg['ckpt_file_name'], map_location='cpu')
-                self.assertEqual(saved['steps'], 4)
+                self.assertEqual(saved['steps'], 5)
                 self.assertEqual(saved['stage'], 'adaptation')
                 self.assertTrue(all(torch.isfinite(t).all() for t in saved['model_state_dict'].values()))
                 self.assertEqual(len(saved['optimizer_state_dict']['state']),
@@ -269,6 +272,153 @@ class TimingTest(unittest.TestCase):
                 restored = load_model(cfg=cfg, compile_mode='none')
                 for name, value in restored.state_dict().items():
                     self.assertTrue(torch.equal(value, saved['model_state_dict'][name]), name)
+                # Local logs must persist metrics and checkpoint saves even
+                # when W&B and detailed diagnostic tracing are both disabled.
+                log = log_path.read_text()
+                for text in ('Training run started', 'Configuration:', 'Training metrics:',
+                             'Validation metrics:',
+                             '"train_acc":', '"timing_stage": "warmup"',
+                             '"timing_stage": "adaptation"', 'Checkpoint saved:',
+                             '"step": 4',
+                             str(cfg['ckpt_file_name'])):
+                    self.assertIn(text, log)
+
+                # Resume appends to the same log and continues from the saved update.
+                train_style.main()
+                resumed_log = log_path.read_text()
+                self.assertTrue(resumed_log.startswith(log))
+                self.assertIn('epoch=0 step=5', resumed_log)
+                self.assertEqual(torch.load(cfg['ckpt_file_name'], map_location='cpu')['steps'], 10)
+
+    def test_training_failure_is_written_to_local_log(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log_path = Path(folder) / 'failure.log'
+            with patch.dict('os.environ', {'TRAIN_LOG_FILE': str(log_path)}), \
+                 patch.object(train_style, '_train', side_effect=RuntimeError('test training failure')):
+                with self.assertRaisesRegex(RuntimeError, 'test training failure'):
+                    train_style.main()
+            log = log_path.read_text()
+            self.assertIn('Training failed', log)
+            self.assertIn('Traceback (most recent call last)', log)
+            self.assertIn('RuntimeError: test training failure', log)
+
+    def test_unlimited_training_resumes_old_limit_and_keeps_periodic_checkpoint(self):
+        cfg = small_config()
+        cfg.update(timing_total_steps=10000, epochs=1)
+        with tempfile.TemporaryDirectory() as folder:
+            cfg['ckpt_file_name'] = str(Path(folder) / 'latest.pth')
+            log_path = Path(folder) / 'unlimited.log'
+            model = load_model(cfg=cfg, set_only=True)
+            model.timing_base_checkpoint = {'path': 'test', 'sha256': 'test'}
+            optimizer = make_timing_optimizer(model)
+            # Prepare a trained timing branch and an old capped checkpoint.
+            for _ in range(cfg['timing_warmup_steps']):
+                optimizer.zero_grad()
+                model(training_batch())[0]['loss_recons'].backward()
+                optimizer.step()
+            save_timing_checkpoint(model, optimizer, 0, 10000)
+            cfg.update(timing_total_steps=None)
+
+            original_step = torch.optim.Adam.step
+            updates = []
+
+            def interrupt_before_seventh_update(optimizer, *args, **kwargs):
+                if len(updates) == 6:
+                    raise KeyboardInterrupt
+                result = original_step(optimizer, *args, **kwargs)
+                updates.append(1)
+                return result
+
+            with patch.object(train_style, 'get_model_hparams', return_value=cfg), \
+                 patch.object(train_style, 'Any_Pickle_File_Reader', return_value=piece().flatten().tolist()), \
+                 patch.object(train_style, 'RESUME', True), \
+                 patch.object(torch.optim.Adam, 'step', new=interrupt_before_seventh_update), \
+                 patch.dict('os.environ', {'BATCH_SIZE': '2', 'NUM_WORKERS': '0',
+                                          'TRAIN_TRACE': '0', 'TRAIN_LOG_FILE': str(log_path)}):
+                with self.assertRaises(KeyboardInterrupt):
+                    train_style.main()
+
+            saved = torch.load(cfg['ckpt_file_name'], map_location='cpu')
+            self.assertEqual(saved['steps'], 10005)
+            self.assertEqual(saved['epoch'], 0)  # last completed save before Ctrl+C
+            self.assertEqual(saved['stage'], 'adaptation')
+            self.assertIsNone(saved['cfg']['timing_total_steps'])
+            self.assertIsNotNone(saved['scaler_state_dict'])
+            self.assertEqual(len(updates), 6)
+            self.assertIn('Checkpoint saved:', log_path.read_text())
+            self.assertIn('step=10005', log_path.read_text())
+            self.assertIn('Epoch started: epoch=1', log_path.read_text())
+
+    def test_timing_training_preserves_legacy_wandb_metrics(self):
+        cfg = small_config()
+        cfg.update(use_logs=True, validate_every=1)
+        train_records = []
+        eval_records = []
+        real_load_model = train_style.load_model
+
+        def capture_output(model, inputs, output):
+            loss, acc = output
+            if model.training:
+                train_records.append({
+                    'loss_margin': loss['loss_margin'].item(),
+                    'loss_recons': loss['loss_recons'].item(),
+                    'encoder_training': model.encoder.training,
+                    'style_training': model.style_encoder.training,
+                })
+            else:
+                eval_records.append({
+                    'val_loss': loss['loss_total'].item(),
+                    'val_acc': acc.item(),
+                    'has_timing': 'timing_features' in inputs[0] and inputs[0]['timing_mask'].any().item(),
+                })
+
+        def instrumented_model(*args, **kwargs):
+            model = real_load_model(*args, **kwargs)
+            model.register_forward_hook(capture_output)
+            return model
+
+        with tempfile.TemporaryDirectory() as folder:
+            cfg['ckpt_file_name'] = str(Path(folder) / 'latest.pth')
+            cfg['init_from_ckpt'] = str(Path(folder) / 'base.pth')
+            base = load_model(cfg={**cfg, 'timing_enabled': False}, set_only=True)
+            torch.save(base.state_dict(), cfg['init_from_ckpt'])
+            wandb_run = SimpleNamespace(log=Mock(), summary={}, finish=Mock())
+            wandb = Mock()
+            wandb.init.return_value = wandb_run
+            with patch.object(train_style, 'get_model_hparams', return_value=cfg), \
+                 patch.object(train_style, 'load_model', side_effect=instrumented_model), \
+                 patch.object(train_style, 'Any_Pickle_File_Reader', return_value=piece().flatten().tolist()), \
+                 patch.object(train_style, 'RESUME', False), \
+                 patch.object(train_style, 'count', return_value=range(1)), \
+                 patch.dict('sys.modules', {'wandb': wandb}), \
+                 patch.dict('os.environ', {'BATCH_SIZE': '2', 'NUM_WORKERS': '0',
+                                          'TRAIN_TRACE': '0', 'TRAIN_LOG_FILE': str(Path(folder) / 'metrics.log')}):
+                train_style.main()
+
+            logged = [call.args[0] for call in wandb.log.call_args_list]
+            keys = {key for row in logged for key in row}
+            expected = {
+                'loss_total', 'loss_recons', 'train_acc', 'loss_margin', 'loss_deviate',
+                'loss_contour_all', 'loss_multi_step', 'val_loss', 'val_acc',
+                'val_joker_loss', 'val_joker_acc', 'val_guided_loss', 'val_guided_acc',
+                'train_encoder_outside_pct', 'val_encoder_outside_pct',
+                'loss_recons_guided', 'loss_recons_joker', 'acc_guided', 'acc_joker',
+                'joker_fraction', 'timing_contribution_ratio', 'train_objective',
+            }
+            self.assertTrue(expected <= keys, expected - keys)
+            self.assertTrue(all(math.isfinite(value) for row in logged for value in row.values()))
+            self.assertTrue(all(not row['encoder_training'] and not row['style_training']
+                                for row in train_records))
+            self.assertTrue(all(row['has_timing'] for row in eval_records))
+            margins = [row['loss_margin'] for row in logged if 'loss_margin' in row]
+            objectives = [row['train_objective'] for row in logged if 'train_objective' in row]
+            for i, record in enumerate(train_records):
+                self.assertAlmostEqual(margins[i], cfg['loss_margin'] * record['loss_margin'])
+                self.assertAlmostEqual(objectives[i], record['loss_recons'])
+            validation_losses = [row['val_loss'] for row in logged if 'val_loss' in row]
+            for value, record in zip(validation_losses, eval_records[::2]):
+                self.assertAlmostEqual(value, record['val_loss'])
+            wandb_run.finish.assert_called_once()
 
 
 class LiveIntegrationTest(unittest.TestCase):

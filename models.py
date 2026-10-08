@@ -2088,7 +2088,7 @@ MODELS_PARAMETERS = {
     'model_type': 'AE_style_jokerParam',
     'description': 'Style-conditioned 19-button model with a learnable zero-init joker parameter; training with longer joker sequences',
     'train_log': '',
-    'ckpt_file_name': './save_models/AE_style_jokerParam_tester_v2_10_eps_3654_steps_0.5107_loss_1.0393_val_loss_0.8913_acc.pth',
+    'ckpt_file_name': './save_models/AE_style_jokerParam_tester_v2_10_eps_4697_steps_1.1264_loss_0.9737_val_loss_0.8672_acc.pth',
     'init_from_ckpt': './save_models/AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth',
     'seq_len': 512,
     'style_seq_len': 512,
@@ -2110,7 +2110,7 @@ MODELS_PARAMETERS = {
     # Same collapsed full-polyphonic stream as AE_style_v2.
     "dataset_train_path": "./Training-Data/giantmidi_full_train",
     "dataset_val_path": "./Training-Data/giantmidi_full_test",
-   "save_every": 5,
+   "save_every": 1,
     "batch_size": 16,
     "num_workers": 8,
     },
@@ -2120,6 +2120,39 @@ MODELS_PARAMETERS = {
     'train_log': '',
     # Epoch-25 .pth is truncated (no ZIP central directory); torch.load fails.
     'ckpt_file_name': './save_models/AE_style_jokerParam_v1_5_eps_351_steps_0.8643_loss_1.1163_val_loss_0.7578_acc.pth',
+    # State-dict-compatible warm start. Rotary positions allow 256 -> 512
+    # without changing any learned tensor shape.
+    'init_from_ckpt': './save_models/AE_style_v2_20_eps_567_steps_0.6873_loss_0.7982_acc.pth',
+    'seq_len': 512,
+    'style_seq_len': 512,
+    'pad_idx': 128,
+    'emb_dim': 2048,
+    'num_layers': 4,
+    'style_encoder_depth': 4,
+    'heads': 32,
+    'num_buttons': 19,
+    'joker_ratio': 0.25,
+    # First adapt only the zero-init joker parameter, then jointly fine-tune.
+    'joker_param_warmup_epochs': 1,
+    'base_lr_multiplier': 0.1,
+    'joker_lr_multiplier': 1.0,
+    # Preserve AE_style_v2 loss balance.
+    'loss_margin': 0.1,
+    'loss_contour': 0.1,
+    'loss_deviate': 0.2,
+    # Same collapsed full-polyphonic stream as AE_style_v2.
+    "dataset_train_path": "./Training-Data/giantmidi_full_train",
+    "dataset_val_path": "./Training-Data/giantmidi_full_test",
+    "save_every": 5,
+    "batch_size": 12,
+    "num_workers": 4,
+    },
+'AE_style_jokerParam_v2': {
+    'model_type': 'AE_style_jokerParam',
+    'description': 'Style-conditioned 19-button model with a learnable zero-init joker parameter; all notes are joker-eligible; longer joker sequences.',
+    'train_log': '',
+    # Epoch-25 .pth is truncated (no ZIP central directory); torch.load fails.
+    'ckpt_file_name': './save_models/',
     # State-dict-compatible warm start. Rotary positions allow 256 -> 512
     # without changing any learned tensor shape.
     'init_from_ckpt': './save_models/AE_style_v2_20_eps_567_steps_0.6873_loss_0.7982_acc.pth',
@@ -2881,17 +2914,15 @@ MODELS_PARAMETERS['AE_style_jokerParam_dtime_tester_v1'] = {
     **MODELS_PARAMETERS['AE_style_jokerParam_tester_v2'],
     'description': 'Style + Joker with causal delta-time input conditioning',
     'init_from_ckpt': MODELS_PARAMETERS['AE_style_jokerParam_tester_v2']['ckpt_file_name'],
-    'ckpt_file_name': './save_models/AE_style_jokerParam_dtime_tester_v1_latest.pth',
+    'ckpt_file_name': './save_models/AE_style_jokerParam_dtime_tester_v1_199_eps_639674_steps_1.381_loss_0.8494_val_loss_0.875_acc.pth',
     'timing_enabled': True,
+    # Step counts refer to optimizer updates: learn the new branch first,
+    # then let the final two decoder blocks adapt at the smaller learning rate.
     'timing_warmup_steps': 1000,
-    'timing_total_steps': 10000,
     'timing_lr': 1e-4,
     'timing_decoder_lr': 1e-5,
-    'timing_save_every': 500,
-    'loss_margin': 0.0,
-    'loss_contour': 0.0,
-    'loss_multi_step_perc': 0.0,
-    'loss_deviate': 0.0,
+    # Inherit the existing loss weights for comparable diagnostic metrics.
+    # train_style.py still optimizes only loss_recons during timing adaptation.
 }
 
 

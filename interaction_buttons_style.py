@@ -80,7 +80,7 @@ else:
 ''' MODEL '''
 
 #model_name = 'AE_style_jokerParam_v1' #AE_style_v1
-model_name = os.environ.get('MODEL_NAME', 'AE_style_jokerParam_tester_v2')
+model_name = os.environ.get('MODEL_NAME', 'AE_style_jokerParam_dtime_tester_v1')
 cfg = get_model_hparams(model_name)
 if os.environ.get('CHECKPOINT_PATH'):
     cfg['ckpt_file_name'] = os.environ['CHECKPOINT_PATH']
@@ -95,10 +95,10 @@ sample_midi_path1 = './samples/Bach_Prelude_and_Fugue_in_C_major.mid'
 sample_midi_path2 = './samples/clairTester_to_end.midi'
 sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
-sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
+sample_midi_path5 = './samples/Satie_Gymnopedie_No1_no_melody.midi'
 
-sample_midi_path_init = sample_midi_path1
-STYLE_IDX_INIT = 4
+sample_midi_path_init = sample_midi_path5
+STYLE_IDX_INIT = 5
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [
@@ -325,6 +325,8 @@ def reset_context():
 
     with buffer_lock:
         if live_timing is not None:
+            # Restart the bounded generation context, while retaining the full
+            # performance and noteOn_dict so held notes can still be released.
             live_timing.reset()
             kv_cache = None
             joker_detector.reset()
@@ -481,6 +483,8 @@ def manageNote(note, velocity):
   if TRACES:
     print("key", note)
 
+  # Use event arrival time rather than inference completion time for spacing.
+  # Keep raw seconds for detecting long phrase gaps.
   now = time.perf_counter()
   timeNew = now / TIME_UNIT
 
@@ -522,8 +526,12 @@ def manageNote(note, velocity):
 
     b[i+CTX_LEN] = but
     if live_timing is not None:
+        # Features are computed once on arrival, aligned with this button and
+        # target pitch. Older notes keep their original timing reference scale.
         context, restarted = live_timing.begin_note(now, but)
         if restarted:
+            # The context now contains the primer and a new unknown interval.
+            # Style, recording, timing toggle and held-note releases stay intact.
             kv_cache = None
             joker_detector.reset()
             joker_detector.update(note, now * 1000)
@@ -554,6 +562,7 @@ def manageNote(note, velocity):
         last_gen_time = time.perf_counter()
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
     if live_timing is not None:
+        # Replace the target placeholder so it becomes the next note's past pitch.
         live_timing.finish_note(new_pitch_token)
 
     playNote(new_pitch_token, velocity) 
@@ -602,6 +611,8 @@ def _on_key_press(key: pkeyboard.Key) -> None:
             if not timing_key_held.is_set():
                 timing_key_held.set()
                 with buffer_lock:
+                    # Keep collecting features in both modes. Cached activations
+                    # encode the old mode, so rebuild from stored context next time.
                     live_timing.enabled = not live_timing.enabled
                     kv_cache = None
                 visualizer.controls_legend = make_controls_legend()

@@ -58,8 +58,8 @@ monster_genie/
 
 ### Optional delta-time conditioning
 
-`AE_style_jokerParam_dtime_tester_v1` extends the existing style/Joker model;
-the default model is unchanged. It conditions pitch predictions on causal timing
+`AE_style_jokerParam_dtime_tester_v1` extends the existing style/Joker model
+and is the default preset in `train_style.py`. It conditions pitch predictions on causal timing
 features without adding sequence positions or predicting timing/duration.
 
 In the `tgenie` environment, from the project root:
@@ -74,15 +74,32 @@ The first run starts from the checkpoint configured for
 `RESUME=0` starts again from the base checkpoint and replaces that timing
 checkpoint when saving. `BATCH_SIZE` and `NUM_WORKERS` remain available.
 
-Training stops after 10,000 optimizer updates: 1,000 updates of the timing MLP
-at `1e-4`, followed by 9,000 also adapting the last two decoder blocks'
+Training continues until you press **Ctrl+C**, without a step or epoch limit.
+The first 1,000 optimizer updates train the timing MLP
+at `1e-4`; subsequent updates also adapt the last two decoder blocks'
 self-attention/feed-forward paths and final norm/pitch head at `1e-5`.
 Encoders, style cross-attention, original input projection/embeddings, and Joker
-parameter stay frozen. Checkpoints save every 500 updates and at completion,
+parameter stay frozen. Checkpoints save every 500 updates,
 including optimizer/scaler state, stage, configuration, base-checkpoint hash,
-and Python/PyTorch random states. Resume restores training progress but does not
+and Python/PyTorch random states. Ctrl+C stops the program normally; restart it
+to resume from the most recent periodic checkpoint. Existing checkpoints saved at the
+former 10,000-update limit can resume with the new unlimited preset.
+Resume restores training progress but does not
 replay the exact shuffled data position or worker-local random states.
-The timing preset runs no validation passes; quality evaluation is deferred.
+Validation runs every `validate_every` batches, with timing features enabled,
+and reports the existing `val_loss`, `val_acc`, guided/Joker and encoder-range
+metrics to W&B. Training also reports the existing weighted `loss_margin`,
+`loss_deviate`, contour and reconstruction metrics using the inherited preset's
+weights. These are diagnostic metrics; timing adaptation still optimizes pitch
+reconstruction only, logged as `train_objective`. Timing metrics are also retained.
+
+`train_style.py` appends a local log to `train_style.log` in the working directory,
+independently of W&B and `TRAIN_TRACE`. It prints the log's absolute path at startup.
+The file records timestamps, configuration, dataset size, resume/warm-start details,
+metrics every `print_stats_every` batches and checkpoint saves.
+Python exceptions during training are recorded with their tracebacks.
+Set `TRAIN_LOG_FILE=/path/to/training.log` to choose another location.
+Each checkpoint entry identifies the completed step count and saved checkpoint.
 
 `timing.py` shares causal feature calculation between training and performance:
 absolute log interval, signed log interval/recent-scale ratio, log recent scale,
@@ -269,4 +286,3 @@ Generated files are saved in the `out/` directory:
                                                                       │
                                                                       ▼
                                                                  MIDI File
-

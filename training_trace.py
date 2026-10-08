@@ -2,15 +2,25 @@
 import faulthandler
 import json
 import os
-import sys
 import time
 from pathlib import Path
+
+_trace_stream = None
+
+
+def trace_stream():
+    global _trace_stream
+    if _trace_stream is None:
+        # Keep this handle alive for faulthandler, including in spawned workers.
+        _trace_stream = open(os.environ.get('TRAIN_TRACE_FILE', 'training-trace.log'),
+                             'a', buffering=1)
+    return _trace_stream
 
 
 def enable_fault_handler():
     # Called before torch is imported, also in spawned data-loader workers.
     if os.environ.get('TRAIN_TRACE', '0') == '1':
-        faulthandler.enable(file=sys.stderr, all_threads=True)
+        faulthandler.enable(file=trace_stream(), all_threads=True)
 
 
 def process_resources(pid):
@@ -30,6 +40,7 @@ class TrainingTrace:
     def __init__(self, torch, device):
         self.torch, self.device = torch, device
         self.enabled = os.environ.get('TRAIN_TRACE', '0') == '1'
+        self.stream = trace_stream() if self.enabled else None
         self.sync = os.environ.get('TRACE_CUDA_SYNC', '0') == '1'
         self.every = max(1, int(os.environ.get('TRACE_EVERY', '100')))
 
@@ -39,7 +50,7 @@ class TrainingTrace:
         entry = dict(time=time.time(), pid=os.getpid(), phase=phase,
                      epoch=epoch, batch=batch)
         # Write before synchronization so an async CUDA failure has a breadcrumb.
-        print('[train-trace] ' + json.dumps(entry), file=sys.stderr, flush=True)
+        print('[train-trace] ' + json.dumps(entry), file=self.stream, flush=True)
         if self.sync and self.device.type == 'cuda':
             self.torch.cuda.synchronize(self.device)
         if resources or (phase == 'batch_end' and batch % self.every == 0):
@@ -55,4 +66,4 @@ class TrainingTrace:
                 stats['cuda_allocated'] = self.torch.cuda.memory_allocated(self.device)
                 stats['cuda_reserved'] = self.torch.cuda.memory_reserved(self.device)
                 stats['cuda_peak_allocated'] = self.torch.cuda.max_memory_allocated(self.device)
-            print('[train-resources] ' + json.dumps(stats), file=sys.stderr, flush=True)
+            print('[train-resources] ' + json.dumps(stats), file=self.stream, flush=True)

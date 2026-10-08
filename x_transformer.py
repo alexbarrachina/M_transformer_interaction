@@ -11497,11 +11497,16 @@ class Decoder_no_dtime_style_jokerParam(Decoder_no_dtime_style):
         # all inherited initialisation has completed.
         super().__init__(**kwargs)
         self.joker_mode = nn.Parameter(torch.zeros(self.emb_dim))
+        # Disabled presets register no timing parameters, keeping their original
+        # checkpoint keys. Enabled presets add features without extra tokens.
         self.timing_mlp = None
         if timing_enabled:
             self.timing_mlp = nn.Sequential(
                 nn.Linear(4, 32), nn.SiLU(), nn.Linear(32, self.emb_dim)
             )
+            # Start with exactly the base decoder's input and logits. Initially
+            # the final projection learns first; upstream gradients follow once
+            # its weights become nonzero.
             nn.init.zeros_(self.timing_mlp[-1].weight)
             nn.init.zeros_(self.timing_mlp[-1].bias)
 
@@ -11543,14 +11548,20 @@ class Decoder_no_dtime_style_jokerParam(Decoder_no_dtime_style):
                         or valid.shape != x.shape[:2]):
                     raise ValueError('Timing needs features [B,T,4] and mask [B,T] aligned with pitch')
                 valid = valid.to(device=x.device, dtype=torch.bool).unsqueeze(-1)
+                # Clear unknown inputs before the MLP (including NaNs), and its
+                # output afterwards because learned biases need not be zero.
                 features = features.to(device=x.device, dtype=x.dtype).masked_fill(~valid, 0)
                 contribution = self.timing_mlp(features).masked_fill(~valid, 0)
                 if self.training:
                     with torch.no_grad():
+                        # RMS contribution relative to the pitch/button input,
+                        # measured only at positions with observed timing.
                         self.timing_contribution_ratio = (
                             contribution.float().square().sum()
                             / x.float().masked_fill(~valid, 0).square().sum().clamp_min(1e-12)
                         ).sqrt()
+                # Attention receives timing in the same position as each note,
+                # after pitch/button projection and before the decoder blocks.
                 x = x + contribution
         x = self.emb_dropout(x)
 
@@ -11731,6 +11742,8 @@ class AE_style(Module):
         }
         encoder_mask = None
         if self.cfg.get('timing_enabled', False):
+            # Padding is a loss sentinel, not a valid embedding index. Feed a
+            # safe pitch value and mask padded positions in the frozen encoder.
             encoder_mask = encoder_context['pitch'] != self.ignore_index
             encoder_context['pitch'] = encoder_context['pitch'].masked_fill(~encoder_mask, 0)
         e = self.encoder(encoder_context, mask=encoder_mask)
@@ -11764,6 +11777,8 @@ class AE_style(Module):
             reduction='sum' if self.cfg.get('timing_enabled', False) else 'mean',
         )
         if self.cfg.get('timing_enabled', False):
+            # Sum then normalize explicitly, including an all-padding excerpt
+            # where a mean reduction would have no valid denominator.
             loss_recons = loss_recons / (target != self.ignore_index).sum().clamp_min(1)
 
         loss_contour_perc = 0
@@ -12115,6 +12130,8 @@ class AE_style_jokerParam(AE_style):
         )
         extra = {'joker_mask': joker_mask}
         if self.decoder.timing_mlp is not None:
+            # Position t predicts pitch[t+1] from pitch[t]. Its current button
+            # and timing therefore come from row t+1, rather than the past pitch.
             for key in ('timing_features', 'timing_mask'):
                 if key in note_tokens:
                     extra[key] = note_tokens[key][:, 1:]
@@ -12201,6 +12218,8 @@ class AE_style_jokerParam(AE_style):
             }
 
         if self.decoder.timing_mlp is not None:
+            # Cached decoding needs only the newest target's timing; rebuilding
+            # the context uses every target row after the initial primer pitch.
             for key in ('timing_features', 'timing_mask'):
                 if key in note_tokens:
                     decoder_context[key] = note_tokens[key][:, -1:] if cache is not None else note_tokens[key][:, 1:]

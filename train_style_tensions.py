@@ -147,7 +147,8 @@ def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
 
 # Channels that are NOT playable notes (harmony pseudo-events); filtered out so
 # the tension extractor only sees the actual pitch stream.
-_NON_NOTE_CHANNELS = (HARMONY_CHANNEL, CHORDS_CHANNEL, CHORD_LABEL_CHANNEL, KEY_CHANNEL)
+_NON_NOTE_CHANNELS = (HARMONY_CHANNEL, CHORDS_CHANNEL, CHORD_LABEL_CHANNEL, KEY_CHANNEL,
+                      ROMAN_MOVE_CHANNEL, TENSION_CHANNEL, HOME_KEY_CHANNEL)
 
 
 class TensionMusicSamplerDataset(Dataset):

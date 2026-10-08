@@ -206,6 +206,19 @@ NUM_ROMAN_MOVEMENTS = 6  # embedding size (5 movements + NULL)
 
 ROMAN_MOVE_CHANNEL = 122   # pseudo-event: [0, roman_move_id, 0, 0, 122] (>15, like 120/121)
 
+# ---------------------------------------------------------------------------
+#  KEY + TENSION markers (giantMIDI/all_key_tension, build_key_tension_dataset.py)
+# ---------------------------------------------------------------------------
+# That dataset carries the java chord tones on MIDI channel 4 (mido 3), which
+# midis2pickles remaps to CHORDS_CHANNEL, and recomputed markers:
+#   'home: C major'  'key: C major'  'change key: C major -> G major'  'tension: 0..4'
+# 'key:' markers become KEY_CHANNEL events [0, key_pc, mode, is_change, 121]
+# (is_change = 1 when a 'change key:' marker shares the time; loaders that only
+# read key_pc/mode are unaffected). A falling tension level marks a resolution.
+TENSION_CHANNEL = 123      # pseudo-event: [0, tension_level, 0, 0, 123] at every chord onset
+HOME_KEY_CHANNEL = 124     # pseudo-event: [0, home_pc, mode, 0, 124] once per piece
+NUM_TENSION_LEVELS = 5     # tension_level 0 (relaxed) .. 4 (tense), corpus quintiles
+
 # "unknown" sentinels (used when the analyzer provides null / no label)
 PC_UNKNOWN = 12            # pitch class 0..11, 12 = unknown
 MODE_MAJOR = 0

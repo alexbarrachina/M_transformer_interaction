@@ -36,9 +36,12 @@ mp.set_start_method('spawn', force=True)
 
 import tqdm
 import glob
+import json
+import logging
 import re
 import hashlib
 import random as python_random
+from itertools import count
 from pathlib import Path
 
 os.environ['USE_FLASH_ATTENTION'] = '1'
@@ -55,7 +58,7 @@ from params import *
 from x_transformer import *
 from timing import TIME_UNIT, HISTORY_SIZE, timing_features, augment_timing
 
-NSTEPS_INIT = 4508
+NSTEPS_INIT = 0
 RESUME = os.environ.get('RESUME', '1') != '0'
 
 JOKER_GUIDED_FRACTION = 0.25
@@ -126,7 +129,9 @@ def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
     # Load the state dict
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if model.cfg.get('timing_enabled', False):
-        for key in ('timing_enabled', 'timing_warmup_steps', 'timing_total_steps',
+        # Keep the warmup and learning rates consistent. The stopping limit may
+        # change so an older capped checkpoint can continue training.
+        for key in ('timing_enabled', 'timing_warmup_steps',
                     'timing_lr', 'timing_decoder_lr'):
             if checkpoint['cfg'].get(key) != model.cfg.get(key):
                 raise ValueError(f'Timing resume configuration differs for {key}')
@@ -160,12 +165,15 @@ def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
         print("Loaded full checkpoint with model and optimizer state")
         if model.cfg.get('timing_enabled', False):
             model.timing_base_checkpoint = checkpoint['base_checkpoint']
+            # Resume the saved random streams used for augmentation and sampling.
             python_random.setstate(checkpoint['python_rng'])
             torch.set_rng_state(checkpoint['torch_rng'].cpu())
             if torch.cuda.is_available() and checkpoint['cuda_rng'] is not None:
                 torch.cuda.set_rng_state_all([state.cpu() for state in checkpoint['cuda_rng']])
             if scaler is not None and checkpoint.get('scaler_state_dict') is not None:
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            # requires_grad flags are not part of state_dict; restore the stage
+            # explicitly so a checkpoint at the boundary resumes in adaptation.
             set_timing_stage(model, optimizer, start_steps)
     
     return start_epoch, start_steps
@@ -176,6 +184,8 @@ def warm_start_timing(model, checkpoint_path):
     state = torch.load(checkpoint_path, map_location='cpu')
     if 'model_state_dict' in state:
         state = state['model_state_dict']
+    # strict=False is needed only for the new branch; verify every omitted key
+    # so an unrelated architecture mismatch cannot pass unnoticed.
     missing, unexpected = model.load_state_dict(state, strict=False)
     expected = {name for name in model.state_dict() if name.startswith('decoder.timing_mlp.')}
     if set(missing) != expected or unexpected:
@@ -183,6 +193,7 @@ def warm_start_timing(model, checkpoint_path):
     projection = model.decoder.timing_mlp[-1]
     if projection.weight.count_nonzero() or projection.bias.count_nonzero():
         raise ValueError('Timing projection must be zero at warm start')
+    # Record the checkpoint contents as well as its path, which may be reused.
     digest = hashlib.sha256()
     with open(checkpoint_path, 'rb') as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b''):
@@ -197,11 +208,15 @@ def make_timing_optimizer(model):
     cfg = model.cfg
     model.requires_grad_(False)
     layers = model.decoder.attn_layers
+    # 'a' starts each decoder block. Select self-attention ('a') and feed-forward
+    # ('f') entries, including their norms; exclude style cross-attention ('c').
     block_starts = [i for i, kind in enumerate(layers.layer_types) if kind == 'a']
     start = block_starts[max(0, len(block_starts) - 2)]
     modules = [layer for kind, layer in zip(layers.layer_types[start:], layers.layers[start:])
                if kind in ('a', 'f')]
     modules.extend([layers.final_norm, model.decoder.to_logits])
+    # Keep both groups in the optimizer from the start. Stage changes only toggle
+    # gradients, preserving parameter-group layout and optimizer state on resume.
     optimizer = torch.optim.Adam([
         {'params': model.decoder.timing_mlp.parameters(), 'lr': cfg['timing_lr']},
         {'params': [p for module in modules for p in module.parameters()],
@@ -214,6 +229,8 @@ def make_timing_optimizer(model):
 def set_timing_stage(model, optimizer, step):
     adapting = step >= model.cfg['timing_warmup_steps']
     if adapting and getattr(model, '_timing_stage', None) == 'warmup':
+        # Check that warm-up moved the projection away from zero before allowing
+        # inherited decoder weights to adapt to timing.
         projection = model.decoder.timing_mlp[-1]
         if not projection.weight.count_nonzero() or not torch.isfinite(projection.weight).all():
             raise RuntimeError('Timing warm-up produced an inactive or nonfinite projection')
@@ -228,10 +245,12 @@ def set_timing_stage(model, optimizer, step):
 
 
 def save_timing_checkpoint(model, optimizer, epoch, step, scaler=None):
-    """Keep one resumable checkpoint; publish it only after the write completes."""
+    """Save resumable training state; publish it only after the write completes."""
     path = Path(model.cfg['ckpt_file_name'])
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
+    # Save the completed-update count and its corresponding next training stage.
+    # The temporary file prevents an interrupted write replacing a good resume.
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -277,8 +296,12 @@ def make_joker_training_mask(batch_size, seq_len, device):
 @torch.no_grad()
 def encoder_outside_percentage(model, pitch):
     """Percentage of non-padding target encoder values outside [-1, 1]."""
-    raw_values = model.encoder({'pitch': pitch[:, 1:]})
-    valid = pitch[:, 1:] != model.ignore_index
+    target_pitch = pitch[:, 1:]
+    valid = target_pitch != model.ignore_index
+    if getattr(model, 'cfg', {}).get('timing_enabled', False):
+        raw_values = model.encoder({'pitch': target_pitch.masked_fill(~valid, 0)}, mask=valid)
+    else:
+        raw_values = model.encoder({'pitch': target_pitch})
     raw_values = raw_values[valid]
     if raw_values.numel() == 0:
         return None
@@ -426,24 +449,30 @@ class StyleMusicSamplerDataset(Dataset):
         end = start + self.target_oversample
         positions = torch.where(piece_events[:end, 4] != HARMONY_CHANNEL)[0]
         offset = int((positions < start).sum())
+        # One extra preceding note supplies the first of the 16 history intervals.
         begin = max(0, offset - HISTORY_SIZE - 1)
         selected = positions[begin:offset + self.seq_len + 1]
         prefix_len = offset - begin
         features = torch.zeros(self.seq_len + 1, 4)
         valid = torch.zeros(self.seq_len + 1, dtype=torch.bool)
         if len(selected):
-            # Sum across harmony markers before selecting note onsets.
+            # Non-note events also advance the clock. Sum all event intervals
+            # before filtering, so their elapsed time stays in the note spacing.
             origin = int(selected[0])
             onsets = piece_events[origin:int(selected[-1]) + 1, 0].double().cumsum(0)
             onsets = onsets[selected - origin] * TIME_UNIT
             intervals = [None] + torch.diff(onsets).tolist()
             if not self.is_eval:
+                # Transform history and target together, then encode causally.
                 intervals = augment_timing(intervals, prefix_len)
             encoded, known = timing_features(intervals)
             count = len(selected) - prefix_len
+            # Return one row per pitch, including the primer position. The model
+            # drops that first row when pairing timing with predicted pitches.
             features[:count] = encoded[prefix_len:]
             valid[:count] = known[prefix_len:]
         if not self.is_eval and random() < 0.25:
+            # Disable timing for a whole excerpt to train the live fallback mode.
             valid.zero_()
         return {'timing_features': features, 'timing_mask': valid}
 
@@ -501,6 +530,8 @@ class StyleMusicSamplerDataset(Dataset):
         note_count = min(len(note_events), target_len)
         if len(note_events) < target_len:
             if self.timing_enabled:
+                # Pad instead of repeating notes: repetition would invent onset
+                # history inconsistent with the timing rows. PAD_IDX masks loss.
                 pad = target_len - len(note_events)
                 note_events = torch.cat([note_events, note_events.new_zeros(pad, 5)])
                 harm_regime_notes = F.pad(harm_regime_notes, (0, pad))
@@ -521,7 +552,8 @@ class StyleMusicSamplerDataset(Dataset):
         harm_regime = harm_regime_notes
         harm_strength = harm_strength_notes
 
-        # Validation has no random augmentation for the joker model.
+        # Validation has no random augmentation for the joker model. The timing
+        # preset instead uses the shared augmentation in _target_timing.
         if not self.deterministic_eval and not self.timing_enabled:
             stretch_factor = random() * self.cfg.get('data_augment_time_stretch_max', 0.05) * 2
             stretch_factor += 1 - self.cfg.get('data_augment_time_stretch_max', 0.05)
@@ -624,6 +656,27 @@ class StyleMusicSamplerDataset(Dataset):
 #==========================================================================
 
 def main():
+    # Only the parent process opens this log; spawned dataset workers import
+    # the module without calling main(). FileHandler flushes after each record.
+    log_path = Path(os.environ.get('TRAIN_LOG_FILE', 'train_style.log')).expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.Logger('train_style', level=logging.INFO)
+    handler = logging.FileHandler(log_path, mode='a', encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s [%(process)d] %(levelname)s %(message)s'))
+    logger.addHandler(handler)
+    print(f'Local training log: {log_path.resolve()}', flush=True)
+    logger.info('Training run started')
+    try:
+        _train(logger)
+    except Exception:
+        logger.exception('Training failed')
+        raise
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+
+def _train(logger):
     # Set up CUDA settings
     torch.set_float32_matmul_precision('high')
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -642,7 +695,7 @@ def main():
         print(f'Trace environment: torch={torch.__version__} CUDA={torch.version.cuda} '
               f'cuDNN={torch.backends.cudnn.version()} '
               f'GPU={torch.cuda.get_device_name() if device_type == "cuda" else "CPU"}',
-              flush=True)
+              file=trace.stream, flush=True)
 
     #==========================================================================
 
@@ -650,11 +703,13 @@ def main():
     project_name = 'monsterGenie_style'
     # Keep this trainer reusable while making the new joker model the default.
     # Override with MODEL_NAME=... when training another style configuration.
-    model_name = os.environ.get('MODEL_NAME', 'AE_style_jokerParam_tester_v2')
+    model_name = os.environ.get('MODEL_NAME', 'AE_style_jokerParam_v2')
     cfg = get_model_hparams(model_name)
     is_timing_model = cfg.get('timing_enabled', False)
     cfg['batch_size'] = int(os.environ.get('BATCH_SIZE', cfg['batch_size']))
     cfg['num_workers'] = int(os.environ.get('NUM_WORKERS', cfg['num_workers']))
+    logger.info('Environment: device=%s torch=%s CUDA=%s', device, torch.__version__, torch.version.cuda)
+    logger.info('Configuration: %s', json.dumps(cfg, sort_keys=True))
     pin_memory = device_type == 'cuda' and os.environ.get('PIN_MEMORY', '1') != '0'
     persistent_workers = cfg['num_workers'] > 0 and os.environ.get('PERSISTENT_WORKERS', '1') != '0'
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)
@@ -663,10 +718,11 @@ def main():
     #==========================================================================
 
     ''' WANDB '''
+    wandb_run = None
     if cfg['use_logs']:
         import wandb
         wandb.login()
-        wandb.init(project=project_name, name=model_name, config=cfg)
+        wandb_run = wandb.init(project=project_name, name=model_name, config=cfg)
 
     #==========================================================================
 
@@ -693,22 +749,25 @@ def main():
         persistent_workers=persistent_workers,
     )
     print(f"Number of batches: {len(train_loader)}")
+    logger.info('Training dataset: samples=%d batches=%d batch_size=%d num_workers=%d',
+                len(train_dataset), len(train_loader), cfg['batch_size'], cfg['num_workers'])
 
-    if not is_timing_model:
-        eval_data = Any_Pickle_File_Reader(cfg['dataset_val_path'])
-        data_eval = torch.Tensor(eval_data)
-        print("Building validation dataset...")
-        val_dataset = StyleMusicSamplerDataset(
-            data_eval, cfg['seq_len'], style_seq_len, is_eval=True, cfg=cfg
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=cfg['batch_size'],
-            num_workers=0,
-            shuffle=False,
-            pin_memory=pin_memory,
-        )
-        val_iter = iter(val_loader)
+    eval_data = Any_Pickle_File_Reader(cfg['dataset_val_path'])
+    data_eval = torch.Tensor(eval_data)
+    print("Building validation dataset...")
+    val_dataset = StyleMusicSamplerDataset(
+        data_eval, cfg['seq_len'], style_seq_len, is_eval=True, cfg=cfg
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg['batch_size'],
+        num_workers=0,
+        shuffle=False,
+        pin_memory=pin_memory,
+    )
+    val_iter = iter(val_loader)
+    logger.info('Validation dataset: samples=%d batches=%d validate_every=%d',
+                len(val_dataset), len(val_loader), cfg['validate_every'])
 
     #==========================================================================
 
@@ -745,7 +804,9 @@ def main():
     else:
         optim = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'])
 
-    scaler = torch.amp.GradScaler(device_type)
+    # BF16 has FP32's exponent range and does not need gradient scaling.
+    # A scale that keeps growing can overflow otherwise finite gradients.
+    scaler = torch.amp.GradScaler(device_type, enabled=(dtype == torch.float16))
 
     ''' LOAD CHECKPOINT '''
     nsteps = 0 
@@ -758,6 +819,7 @@ def main():
         if is_timing_model:
             warm_start_timing(model, init_ckpt)
             print(f'Warm-started timing model from {init_ckpt}')
+            logger.info('Warm-started timing model from %s', init_ckpt)
             return
         state = torch.load(init_ckpt, map_location=device)
         if isinstance(state, dict) and 'model_state_dict' in state:
@@ -775,10 +837,19 @@ def main():
             if model.decoder.joker_mode.detach().count_nonzero().item() != 0:
                 raise RuntimeError("decoder.joker_mode must remain exactly zero after warm start")
         print(f"Warm-started from {init_ckpt}: missing={missing}, unexpected={unexpected}")
+        logger.info('Warm-started from %s: missing=%s unexpected=%s', init_ckpt, missing, unexpected)
 
     if RESUME:
         if is_timing_model:
             checkpoint_path = cfg['ckpt_file_name'] if os.path.isfile(cfg['ckpt_file_name']) else None
+            # A specific named checkpoint can still be selected in the config.
+            # Otherwise prefer saved snapshots over the legacy _latest file.
+            if checkpoint_path is None or checkpoint_path.endswith('_latest.pth'):
+                named_checkpoint, _, _ = find_latest_checkpoint(
+                    checkpoint_dir=str(Path(cfg['ckpt_file_name']).parent), model_name=model_name
+                )
+                if named_checkpoint is not None:
+                    checkpoint_path = named_checkpoint
         else:
             checkpoint_path, start_epoch, start_steps = find_latest_checkpoint(
                 model_name=model_name
@@ -787,6 +858,7 @@ def main():
         if checkpoint_path:
             start_epoch, start_steps = load_checkpoint(model, optim, checkpoint_path, device, scaler)
             print(f"Resuming training from epoch {start_epoch}, step {start_steps}")
+            logger.info('Resuming from %s: epoch=%d step=%d', checkpoint_path, start_epoch, start_steps)
             nsteps = start_steps
             resumed_from_checkpoint = True
         else:
@@ -803,11 +875,19 @@ def main():
     ''' TRAINING '''
 
     val_loss_temp = 0.0
-    if is_timing_model and nsteps >= cfg['timing_total_steps']:
-        print('Timing training already reached its configured step limit')
-        return
-    for ep in range(start_epoch if is_timing_model else 0, cfg['epochs']):
+
+    if is_timing_model:
+        schedule_message = (f"Timing schedule: {nsteps} optimizer updates completed; "
+                            f"warmup={cfg['timing_warmup_steps']} updates. "
+                            'Training continues until Ctrl+C. '
+                            f"Checkpoints save every {cfg['save_every']} epochs. "
+                            f"Validation runs every {cfg['validate_every']} batches.")
+        print(schedule_message, flush=True)
+        logger.info(schedule_message)
+    epochs = count(start_epoch) if is_timing_model else range(cfg['epochs'])
+    for ep in epochs:
         print('Epoch #', ep)
+        logger.info('Epoch started: epoch=%d step=%d', ep, nsteps)
         trace.mark('epoch_start_fetch_next', ep, resources=True)
 
         joker_only_warmup = (
@@ -851,15 +931,26 @@ def main():
                 trace.mark('forward', ep, i)
                 with torch.amp.autocast(device_type=device_type, dtype=dtype):
                     loss, acc = model(x)
+                # Timing learns to predict pitch only; keep the existing guided
+                # and Joker sampling without adding auxiliary training losses.
                 objective = loss['loss_recons'] if is_timing_model else loss['loss_total']
                 trace.mark('backward', ep, i)
                 scaler.scale(objective).backward()
                 trace.mark('logging', ep, i)
 
                 if (i % cfg['print_stats_every'] == 0) or TESTING:
+                    metrics = {name: value.item() for name, value in loss.items()
+                               if torch.is_tensor(value) and value.numel() == 1}
+                    metrics.update(epoch=ep, batch=i, step=nsteps, train_acc=acc.item(),
+                                   grad_scale=scaler.get_scale())
+                    if is_timing_model:
+                        metrics['timing_stage'] = model._timing_stage
+                    logger.info('Training metrics: %s', json.dumps(metrics, sort_keys=True))
                     if cfg['use_logs']:
                         wandb.log({"loss_total": loss['loss_total'].item()}, step=nsteps)
                         wandb.log({"train_acc": acc.item()}, step=nsteps)
+                        if is_timing_model:
+                            wandb.log({'train_objective': objective.item()}, step=nsteps)
                         if cfg.get('loss_recons', 0) > 0 and 'loss_recons' in loss:
                             wandb.log({"loss_recons": cfg['loss_recons'] * loss['loss_recons'].item()}, step=nsteps)
                         if cfg.get('loss_margin', 0) > 0 and 'loss_margin' in loss:
@@ -884,7 +975,7 @@ def main():
                         ):
                             if metric_name in loss:
                                 wandb.log({metric_name: loss[metric_name].item()}, step=nsteps)
-                        if is_joker_param_model and not is_timing_model:
+                        if is_joker_param_model:
                             with torch.amp.autocast(device_type=device_type, dtype=dtype):
                                 train_outside_pct = encoder_outside_percentage(
                                     model, x['pitch']
@@ -908,19 +999,15 @@ def main():
                 scaler.step(optim)
                 scaler.update()
                 if is_timing_model:
+                    # Unlike the legacy logging counter, timing's schedule and
+                    # checkpoint step advance after every optimizer update.
                     nsteps += 1
-                    finished = nsteps >= cfg['timing_total_steps']
-                    if finished or nsteps % cfg['timing_save_every'] == 0:
-                        save_timing_checkpoint(model, optim, ep, nsteps, scaler)
-                    if finished:
-                        print(f'Timing training saved after {nsteps} steps')
-                        return
 
                 if i % 25 == 0 or i == len(train_loader) - 1:
                     bar_train.set_description(f'Epoch: {ep} Loss: {float(loss["loss_total"]):.4}')
                 bar_train.update(batch['pitch'].shape[0])
 
-                if not is_timing_model and ((i % cfg['validate_every'] == 0) or TESTING):
+                if (i % cfg['validate_every'] == 0) or TESTING:
                     trace.mark('validation_fetch', ep, i)
                     try:
                         val_batch = next(val_iter)
@@ -938,8 +1025,13 @@ def main():
                                 'style_pitch': val_batch['style_pitch'].to(device, non_blocking=True),
                                 'style_mask': val_batch['style_mask'].to(device, non_blocking=True),
                             }
+                            if is_timing_model:
+                                for key in ('timing_features', 'timing_mask'):
+                                    vx[key] = val_batch[key].to(device, non_blocking=True)
                             val_loss, val_acc = model(vx)
                             val_loss_temp = val_loss['loss_total'].item()
+                            logger.info('Validation metrics: epoch=%d batch=%d step=%d val_loss=%.6f val_acc=%.6f',
+                                        ep, i, nsteps, val_loss_temp, val_acc.item())
 
                             val_joker_loss = None
                             val_joker_acc = None
@@ -969,22 +1061,35 @@ def main():
                                         'val_encoder_outside_pct': val_outside_pct
                                     }, step=nsteps)
                     model.train()
+                    if is_timing_model:
+                        set_timing_stage(model, optim, nsteps)
                     del val_batch, vx
                     torch.cuda.empty_cache()
                 trace.mark('batch_end', ep, i)
                 trace.mark('fetch_next', ep, i)
 
         trace.mark('epoch_end', ep, resources=True)
-        if not is_timing_model and ep % cfg['save_every'] == 0:
+        logger.info('Epoch ended: epoch=%d step=%d', ep, nsteps)
+        if ep % cfg['save_every'] == 0:
             trace.mark('checkpoint_save', ep)
+            checkpoint_dir = str(Path(cfg['ckpt_file_name']).parent) if is_timing_model else './save_models'
             fname = (
-                './save_models/' + cfg['model_name'] + '_' +
+                checkpoint_dir + '/' + cfg['model_name'] + '_' +
                 str(ep) + '_eps_' +
                 str(nsteps) + '_steps_' +
                 str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(val_loss_temp), 4)) + '_val_loss_' +
                 str(round(float(acc.item()), 4)) + '_acc.pth'
             )
-            torch.save(model.state_dict(), fname)
+            if is_timing_model:
+                cfg['ckpt_file_name'] = fname
+                save_timing_checkpoint(model, optim, ep, nsteps, scaler)
+            else:
+                torch.save(model.state_dict(), fname)
+            logger.info('Checkpoint saved: path=%s epoch=%d step=%d', fname, ep, nsteps)
+
+    logger.info('Training finished: step=%d', nsteps)
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == '__main__':
