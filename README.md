@@ -128,7 +128,7 @@ disabled by default.
 Run correctness checks and the four-update trainer smoke test:
 
 ```bash
-python -m unittest test_timing test_train_style_joker tester.test_style_joker_param
+python -m unittest discover -s test
 ```
 
 The smoke test uses a small model, synthetic notes, and temporary checkpoints.

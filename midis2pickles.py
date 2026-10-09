@@ -48,12 +48,15 @@ from params import *
 # above are real time. Older folders (all_roman, all_roman_time_fixed) played at 2x / 4x slow.
 #
 # --- Playable notes: the only events that advance time ----------------------------------------
-#   chan 0   MELODY_CHANNEL    MIDI channel 1   [dtime, dur, pitch, vel, 0]
-#   chan 10  ACCOMP_CHANNEL    MIDI channel 11  [dtime, dur, pitch, vel, 10]
-#   dtime is measured from the previous PLAYABLE note (variable `pe` below). Every event listed
-#   from here on has dtime = 0 and never updates `pe`, so the playable-note timing is identical
-#   whether or not the harmony events are present.
-#   Which MIDI channels are kept is chosen by `useful_channels` (see its comment).
+#   chan 0   MELODY_CHANNEL         MIDI channel 1   [dtime, dur, pitch, vel, 0]
+#   chan 1   MELODY_CHORDS_CHANNEL  MIDI channel 2   [dtime, dur, pitch, vel, 1]
+#   chan 10  ACCOMP_CHANNEL         MIDI channel 11  [dtime, dur, pitch, vel, 10]
+#   chan 11  EXTRA_ACCOMP_CHANNEL   MIDI channel 12  [dtime, dur, pitch, vel, 11]
+#   dtime is measured from the previous PLAYABLE note (variable `pe` below), whatever its channel.
+#   Every event listed from here on has dtime = 0 and never updates `pe`, so the playable-note
+#   timing is identical whether or not the harmony events are present.
+#   Which MIDI channels are kept is chosen by `useful_channels` (see its comment). The default
+#   keeps all four note channels; the chord tones / tension / keys were computed from all of them.
 #
 # --- Harmony events: the conditioning data (all with dtime = 0) --------------------------------
 #   chan 4   CHORDS_CHANNEL        [0, dur, pitch, vel, 4]       one event per chord tone
@@ -112,16 +115,20 @@ train_and_test_ratio = 0.8 # 80% for training, 20% for testing
 # Which notes go into the pickle. Values refer to the pickle channel numbers (= MIDI channel - 1).
 #   MELODY_ONLY / ACCOMP_ONLY / MELODY_AND_ACCOMP : keep channel 0 and/or 10 plus the harmony
 #       channels. Everything else is dropped - in particular MIDI channels 2 and 12 (pickle 1
-#       and 11), which are NOT used with the default setting below.
+#       and 11); this is what the earlier pickles used.
 #   MELODY_AND_ACCOMP_NOT_HARMONY : melody + accompaniment only, no chords at all.
-#   ALL_CHANNELS : keep every channel (including pickle 1 and 11).
+#   ALL_CHANNELS : keep every channel, whatever it is (no filtering at all).
+#   ALL_NOTE_CHANNELS : keep exactly the four note channels MIDI 1, 2, 11 and 12 (pickle 0, 1,
+#       10, 11) plus the harmony channels, and nothing else. A stray channel in a MIDI file is
+#       still dropped, which ALL_CHANNELS would not do.
 MELODY_ONLY = 0 # melody only (harmony not used for dtime)
 ACCOMP_ONLY = 1 # accompaniment only (harmony not used for dtime)
 MELODY_AND_ACCOMP = 2 # melody and accompaniment (harmony not used for dtime)
 MELODY_AND_ACCOMP_NOT_HARMONY = 3 # melody, accompaniment. Not harmony no chords
 ALL_CHANNELS = 4 # we will use all channels in the pickle (harmony not used for dtime)
+ALL_NOTE_CHANNELS = 5 # MIDI channels 1, 2, 11, 12 + harmony (harmony not used for dtime)
 
-useful_channels = MELODY_AND_ACCOMP
+useful_channels = ALL_NOTE_CHANNELS
 
 # True  -> build the key+tension pickle: files that are not in the all_key_tension format are
 #          skipped, old-format content (movement notes, channel-5 chord notes, musiclang romans,
@@ -143,8 +150,10 @@ test_data1 = []
 
 # Channel statistics
 total_notes = 0
-channel_0_notes = 0
-channel_10_notes = 0
+channel_0_notes = 0      # MIDI channel 1
+channel_1_notes = 0      # MIDI channel 2
+channel_10_notes = 0     # MIDI channel 11
+channel_11_notes = 0     # MIDI channel 12
 channel_4_movements = 0  # legacy chan 3 events: must stay 0 for the key+tension pickle
 channel_5_chords = 0     # chord-tone events written on CHORDS_CHANNEL (pickle chan 4)
 chord_label_events = 0   # one packed (root, quality, function) event per chord
@@ -354,6 +363,10 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
             filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, ACCOMP_CHANNEL, HARMONY_CHANNEL, CHORDS_CHANNEL)]
           elif useful_channels == MELODY_AND_ACCOMP_NOT_HARMONY:
             filtered_events_matrix = [e for e in events_matrix if e[3] in (MELODY_CHANNEL, ACCOMP_CHANNEL)]
+          elif useful_channels == ALL_NOTE_CHANNELS:
+            filtered_events_matrix = [e for e in events_matrix if e[3] in (
+                MELODY_CHANNEL, MELODY_CHORDS_CHANNEL, ACCOMP_CHANNEL, EXTRA_ACCOMP_CHANNEL,
+                HARMONY_CHANNEL, CHORDS_CHANNEL)]
           else:
             filtered_events_matrix = events_matrix
 
@@ -530,8 +543,12 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
                   total_notes += 1
                   if e[3] == MELODY_CHANNEL:
                       channel_0_notes += 1
+                  elif e[3] == MELODY_CHORDS_CHANNEL:
+                      channel_1_notes += 1
                   elif e[3] == ACCOMP_CHANNEL:
                       channel_10_notes += 1
+                  elif e[3] == EXTRA_ACCOMP_CHANNEL:
+                      channel_11_notes += 1
 
                   pe = e
 
@@ -599,10 +616,11 @@ print(f'Files written: {files_count} (key+tension format: {key_tension_files}); 
       f'skipped as non-key+tension: {skipped_legacy_files}')
 print(f'Total notes processed: {total_notes}')
 if total_notes > 0:
-    channel_0_pct = (channel_0_notes / total_notes) * 100
-    channel_10_pct = (channel_10_notes / total_notes) * 100
-    print(f'Channel 0 (melody) notes: {channel_0_notes} ({channel_0_pct:.2f}%)')
-    print(f'Channel 10 (accompaniment) notes: {channel_10_notes} ({channel_10_pct:.2f}%)')
+    for label, count in (('Channel 0 (MIDI 1, melody)', channel_0_notes),
+                         ('Channel 1 (MIDI 2)', channel_1_notes),
+                         ('Channel 10 (MIDI 11, accompaniment)', channel_10_notes),
+                         ('Channel 11 (MIDI 12)', channel_11_notes)):
+        print(f'{label} notes: {count} ({count / total_notes * 100:.2f}%)')
 print(f'Legacy channel 3 harmony movement events inserted: {channel_4_movements}')
 print(f'Chord-tone (chan 4) events inserted: {channel_5_chords}')
 print(f'Chord-label events inserted: {chord_label_events} '

@@ -218,6 +218,8 @@ ROMAN_MOVE_CHANNEL = 122   # pseudo-event: [0, roman_move_id, 0, 0, 122] (>15, l
 TENSION_CHANNEL = 123      # pseudo-event: [0, tension_level, 0, 0, 123] at every chord onset
 HOME_KEY_CHANNEL = 124     # pseudo-event: [0, home_pc, mode, 0, 124] once per piece
 NUM_TENSION_LEVELS = 5     # tension_level 0 (relaxed) .. 4 (tense), corpus quintiles
+TENSION_NULL = 0          # conditioning token; corpus levels use tokens 1..5
+HOME_KEY_UNKNOWN = 24     # known keys: pitch class + 12 * mode
 
 # "unknown" sentinels (used when the analyzer provides null / no label)
 PC_UNKNOWN = 12            # pitch class 0..11, 12 = unknown

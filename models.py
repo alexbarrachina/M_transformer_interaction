@@ -1417,8 +1417,29 @@ MODELS_PARAMETERS = {
         "num_buttons": 12,
     },
 
+'D_Base_Joker_little_v1': {
+        'model_type': 'D_Base_Joker',
+        'description': 'Pitch-only causal decoder baseline; each joker press requests one pitch, with no timing, duration, button, style or harmony conditioning.',
+        'train_log': '',
+        'ckpt_file_name': './save_models/D_Base_Joker_little_v1_235_eps_823876_steps_1.9381_loss_2.8586_val_loss_0.492_acc.pth',
+        'seq_len': 512,
+        'pad_idx': 128,
+        'emb_dim': 512,
+        'num_layers': 4,
+        'heads': 32,
+        'num_buttons': 1,  # Performance trigger only; never embedded by the model.
+        'loss_recons': 1.0,
+        'timing_enabled': False,
+        'pitch_history_dropout': 0.0,
+        'dataset_train_path': './Training-Data/giantmidi_full_train',
+        'dataset_val_path': './Training-Data/giantmidi_full_test',
+        # Training settings
+        "save_every": 5,
+        "batch_size": 16,
+        "num_workers": 8,
+    },
 'Dec_no_conditioning_v1': {
-        'model_type': 'AutoregressiveDecoder_no_conditioning',
+        'model_type': 'D_base',
         'description': 'decoder only, no conditioning, full dataset',
         'train_log': '',
         'ckpt_file_name': './save_models/Dec_no_conditioning_v1_42_eps_172_steps_1.7524_loss_0.4802_acc.pth',
@@ -1435,7 +1456,7 @@ MODELS_PARAMETERS = {
         "num_workers": 8,
     },
 'Dec_no_conditioning_tester_v1': {
-        'model_type': 'AutoregressiveDecoder_no_conditioning',
+        'model_type': 'D_base',
         'description': 'light model decoder only, no conditioning, full dataset',
         'train_log': '',
         'ckpt_file_name': '',
@@ -2908,6 +2929,47 @@ MODELS_PARAMETERS = {
 
 
 #===================================================================================================
+
+# Tension adapts the existing pitch prior without changing its frozen weights.
+MODELS_PARAMETERS['D_Tension_Joker_little_v1'] = {
+    **MODELS_PARAMETERS['D_Base_Joker_little_v1'],
+    'model_type': 'D_Tension_Joker',
+    'description': 'Frozen base joker with five latched tension levels and gated home-key FiLM.',
+    'init_from_ckpt': MODELS_PARAMETERS['D_Base_Joker_little_v1']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/D_Tension_Joker_latest.pth',
+    'dataset_train_path': './Training-Data/giantmidi_key_tension_train',
+    # Validation is a deterministic piece-level subset of this same training file.
+    'dataset_val_path': './Training-Data/giantmidi_key_tension_train',
+    'dataset_test_path': './Training-Data/giantmidi_key_tension_test',
+    'tens_validation_fraction': 0.05,
+    'tens_split_seed': 42,
+    'tens_validation_seed': 1729,
+    'tens_cond_dim': 128,
+    'tens_film_start_frac': 0.5,
+    'tens_film_scale_limit': 0.5,
+    'tens_film_shift_limit': 0.5,
+    'tens_p_all_cond': 0.2,
+    'home_key_drop_prob': 0.1,
+    'loss_film_reg': 0.01,
+    'learning_rate': 1e-4,
+    'epochs': 10,
+    'save_every': 1,
+    'tens_max_samples': 0,
+    'tens_max_val_samples': 0,
+    'base_training_overlap': 'unknown',
+}
+MODELS_PARAMETERS['D_Tension_Joker_tester_v1'] = {
+    **MODELS_PARAMETERS['D_Tension_Joker_little_v1'],
+    'description': 'Short tension adapter smoke run; same architecture and base checkpoint.',
+    'ckpt_file_name': './save_models/D_Tension_Joker_tester_latest.pth',
+    'epochs': 2,
+    'batch_size': 2,
+    'num_workers': 0,
+    'tens_max_samples': 128,
+    'tens_max_val_samples': 32,
+    'validate_every': 16,
+    'use_logs': False,
+}
 
 # Timing is an opt-in extension of the same architecture and control mapping.
 MODELS_PARAMETERS['AE_style_jokerParam_dtime_tester_v1'] = {

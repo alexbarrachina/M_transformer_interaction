@@ -3,6 +3,7 @@
 import ast
 import math
 import random
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,9 @@ from typing import List, Tuple
 from unittest.mock import Mock, patch
 
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 import train_style
 from model_loader import load_model
@@ -422,9 +426,30 @@ class TimingTest(unittest.TestCase):
 
 
 class LiveIntegrationTest(unittest.TestCase):
+    def test_midi_clock_uses_event_deltas_across_releases(self):
+        source = (ROOT / 'interaction_buttons_style.py').read_text()
+        callback = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'midiin_callback')
+        clock = [100.0]
+        received = []
+        env = dict(time=SimpleNamespace(perf_counter=lambda: clock[0]),
+                   midi_event_time=None, NOTE_ON=0x90, NOTE_OFF=0x80,
+                   live_timing=object(),
+                   buffer_lock=Lock(),
+                   manageNote=lambda note, velocity, event_time: received.append(
+                       (note, velocity, event_time)))
+        exec(compile(ast.Module(body=[callback], type_ignores=[]), '<midi callback>', 'exec'), env)
+
+        env['midiin_callback'](([0x90, 60, 90], 0.0))
+        clock[0] += 1.0  # The previous note's inference occupied the callback.
+        env['midiin_callback'](([0x80, 60, 0], 0.03))
+        env['midiin_callback'](([0x90, 62, 90], 0.02))
+        self.assertAlmostEqual(received[2][2] - received[0][2], 0.05)
+        self.assertEqual([row[1] for row in received], [90, 0, 90])
+
     def test_toggle_pause_reset_recording_and_held_note_release(self):
         # Execute the real callbacks without opening MIDI/audio/GUI devices.
-        source = Path(__file__).with_name('interaction_buttons_style.py').read_text()
+        source = (ROOT / 'interaction_buttons_style.py').read_text()
         names = {'manageNote', 'reset_context', '_on_key_press', '_on_key_release', 'make_controls_legend'}
         definitions = [node for node in ast.parse(source).body
                        if isinstance(node, ast.FunctionDef) and node.name in names]

@@ -10030,7 +10030,7 @@ class Decoder_no_conditioning(nn.Module):
 
 
 # autoregressive wrapper class
-class AutoregressiveDecoder_no_conditioning(Module):
+class D_Base(Module):
     def __init__(
         self,
         decoder,
@@ -14042,6 +14042,127 @@ class HarmonyFiLM(nn.Module):
         for j, ind in enumerate(self.mod_inds):
             table[ind] = (scale[:, :, j, :], shift[:, :, j, :])
         return table
+
+
+class TensionTargetConditioner(nn.Module):
+    """Home key is part of the gated control, never an always-on pitch input."""
+
+    def __init__(self, dim: int = 128) -> None:
+        super().__init__()
+        self.target_emb = nn.Embedding(NUM_TENSION_LEVELS + 1, dim, padding_idx=TENSION_NULL)
+        self.home_emb = nn.Embedding(HOME_KEY_UNKNOWN + 1, dim, padding_idx=HOME_KEY_UNKNOWN)
+        self.out = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim), nn.LayerNorm(dim))
+
+    def forward(self, target: Tensor, home_key: Tensor) -> Tensor:
+        return self.out(self.target_emb(target) + self.home_emb(home_key).unsqueeze(1))
+
+
+class Decoder_tension_joker(Decoder_no_conditioning):
+    """Frozen pitch decoder with zero-initialized, bounded tension FiLM."""
+
+    def __init__(self, *, tens_cond_dim: int = 128, tens_film_start_frac: float = 0.5,
+                 tens_film_scale_limit: float = 0.5, tens_film_shift_limit: float = 0.5,
+                 **kwargs) -> None:
+        super().__init__(**kwargs)
+        if not 0.0 <= tens_film_start_frac < 1.0:
+            raise ValueError('tens_film_start_frac must be in [0, 1)')
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        self.tension_conditioner = TensionTargetConditioner(tens_cond_dim)
+        start = int(sum(t == 'a' for t in self.attn_layers.layer_types) * tens_film_start_frac)
+        mod_inds: List[int] = []
+        block = -1
+        for index, layer_type in enumerate(self.attn_layers.layer_types):
+            if layer_type == 'a':
+                block += 1
+            if layer_type in ('a', 'f') and block >= start:
+                mod_inds.append(index)
+        self.harm_film = HarmonyFiLM(tens_cond_dim, self.emb_dim, mod_inds,
+                                     tens_film_scale_limit, tens_film_shift_limit)
+        self.can_cache_kv = False
+
+    def train(self, mode: bool = True) -> 'Decoder_tension_joker':
+        super().train(mode)
+        # Frozen weights alone do not disable dropout. Keep the original prior fixed.
+        self.pitch_emb.eval()
+        self.emb_dropout.eval()
+        self.attn_layers.eval()
+        self.to_logits.eval()
+        return self
+
+    def forward(self, past_tokens: Dict[str, Tensor],
+                tension_target: Optional[Tensor] = None,
+                home_key: Optional[Tensor] = None) -> Tensor:
+        self.harm_film.last_penalty = self.pitch_emb.weight.new_zeros(())
+        if tension_target is None:
+            return super().forward(past_tokens)
+        if home_key is None:
+            home_key = tension_target.new_full((tension_target.size(0),), HOME_KEY_UNKNOWN)
+        gate = (tension_target != TENSION_NULL).unsqueeze(-1).to(self.pitch_emb.weight.dtype)
+        condition = self.tension_conditioner(tension_target, home_key)
+        table = self.harm_film(condition, gate)
+        return super().forward(past_tokens, film_table=table, film_intensity=gate)
+
+
+class D_Tension_Joker(D_Base):
+    """Next-pitch conditioning; controls are aligned with targets, not input notes."""
+
+    def pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        pitch = note_tokens['pitch']
+        if pitch.size(1) < 2 or pitch.size(1) > self.max_seq_len + 1:
+            raise ValueError('Expected 1..max_seq_len past pitches plus a target placeholder')
+        target = note_tokens.get('tension_target')
+        if target is not None and target.shape != pitch.shape:
+            raise ValueError('tension_target and pitch must have the same [batch, time] shape')
+        home = note_tokens.get('home_key')
+        if home is not None and (home.ndim != 1 or home.size(0) != pitch.size(0)):
+            raise ValueError('home_key must have shape [batch]')
+        return self.decoder({'pitch': pitch[:, :-1]},
+                            tension_target=None if target is None else target[:, 1:],
+                            home_key=home)
+
+    def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+        logits = self.pitch_logits(note_tokens)
+        labels = note_tokens['pitch'][:, 1:]
+        active = (note_tokens['tension_target'][:, 1:] != TENSION_NULL) & (labels != self.ignore_index)
+        weights = active.float()
+        count = weights.sum().clamp_min(1.0)
+        ce = F.cross_entropy(logits.transpose(1, 2), labels, ignore_index=self.ignore_index,
+                             reduction='none')
+        reconstruction = (ce * weights).sum() / count
+        penalty = self.decoder.harm_film.last_penalty if self.training else reconstruction.new_zeros(())
+        loss = {'loss_recons': reconstruction, 'loss_film_reg': penalty,
+                'loss_total': reconstruction + float(self.cfg.get('loss_film_reg', 0.01)) * penalty}
+        accuracy = ((logits.argmax(-1) == labels) * weights).sum() / count
+        return loss, accuracy
+
+    @torch.inference_mode()
+    def next_pitch_logits(self, note_tokens: Dict[str, Tensor], cfg_weight: float = 1.0) -> Tensor:
+        if cfg_weight < 0 or not math.isfinite(cfg_weight):
+            raise ValueError('cfg_weight must be finite and non-negative')
+        target = note_tokens.get('tension_target')
+        if target is None or cfg_weight == 0.0 or not bool(target[:, 1:].any()):
+            return self.pitch_logits({'pitch': note_tokens['pitch']})[:, -1]
+        if cfg_weight == 1.0:
+            return self.pitch_logits(note_tokens)[:, -1]
+        pitch = note_tokens['pitch']
+        home = note_tokens.get('home_key', pitch.new_full((pitch.size(0),), HOME_KEY_UNKNOWN))
+        # Same pitch history in both branches; NULL removes the entire control history.
+        paired = {'pitch': torch.cat((pitch, pitch)),
+                  'tension_target': torch.cat((torch.zeros_like(target), target)),
+                  'home_key': torch.cat((home, home))}
+        base, conditional = self.pitch_logits(paired)[:, -1].chunk(2)
+        return base + cfg_weight * (conditional - base)
+
+    @torch.inference_mode()
+    def gen_pitch_token(self, note_tokens: Dict[str, Tensor], temperature: float = 1.0,
+                        cfg_weight: float = 1.0) -> int:
+        if temperature <= 0 or not math.isfinite(temperature):
+            raise ValueError('temperature must be finite and positive')
+        if note_tokens['pitch'].size(0) != 1:
+            raise ValueError('gen_pitch_token expects one performance')
+        logits = self.next_pitch_logits(note_tokens, cfg_weight)
+        return int(torch.multinomial(F.softmax(logits / temperature, dim=-1), 1).item())
 
 
 class ChordPlanner(nn.Module):

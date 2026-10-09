@@ -25,6 +25,8 @@ import sys
 import fluidsynth
 import os 
 import atexit
+import json
+import pygame
 # pip install pyfluidsynth
 from typing import Optional, List
 from rtmidi.midiconstants import NOTE_ON, NOTE_OFF
@@ -41,6 +43,7 @@ from model_loader import load_model
 from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
+from tension_joker import TensionControls, read_tension_performance
 
 TRACES = False
 USE_CACHE = False
@@ -50,27 +53,33 @@ CACHE_IDLE_TIMEOUT = 2.0  # seconds - clear KV cache after this idle gap
 if torch.backends.mps.is_available():
     device = torch.device('mps')
 else:
-    device = torch.device('cuda')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 ''' MODEL '''
-model_name = 'Dec_no_conditioning_v1'
+model_name = os.environ.get('MODEL_NAME', 'Dec_no_conditioning_v1')
 cfg = get_model_hparams(model_name)
-model = load_model(model_name=model_name, cfg=cfg )
+is_tension_joker = cfg['model_type'] == 'D_Tension_Joker'
+is_base_joker = cfg['model_type'] in ('D_Base_Joker', 'D_Tension_Joker')
+model = load_model(model_name=model_name, cfg=cfg,
+                   compile_mode='none' if is_base_joker else 'max-autotune')
 model.to(device)
 model.eval()
+if is_base_joker:
+    USE_CACHE = False
 
 ''' PARAMS '''
 # Get sample seed MIDI path
-sample_midi_path = './samples/Bach_Prelude_and_Fugue_in_C_major.mid'
+sample_midi_path = os.environ.get('PRIMER_MIDI', './samples/Bach_Prelude_and_Fugue_in_C_major.mid')
 #sample_midi_path = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 # Base path; save_performance appends _YYYYMMDD_HHMMSS before .mid
 output_midi_name = './out/interactive_performance'
 # Raw MIDI note numbers: control only (no model / no button mapping)
 MIDI_NOTE_RESET_CONTEXT = 30
 MIDI_NOTE_SAVE_PERFORMANCE = 31
+JOKER_MIDI_NOTE = int(os.environ.get('JOKER_MIDI_NOTE', '48'))
 
-CTX_LEN = 300 # num notes in context. tokens = CTX_LENGTH * 3
+CTX_LEN = min(300, cfg['seq_len']) # num notes in context. tokens = CTX_LENGTH * 3
 # Audible primer preview: only the tail of the context (model + visualizer still use full CTX_LEN).
 PRIMER_PLAYBACK_LAST_N = 40
 # >1.0 shortens wall-clock waits during play_primer (musical spacing unchanged in tokens).
@@ -85,7 +94,10 @@ save_lock = Lock()
 reset_requested = Event()
 
 '''VISUALIZER'''
-visualizer = Visualizer(button_slots=cfg.get('num_buttons', 12))
+visualizer = Visualizer(button_slots=cfg.get('num_buttons', 12),
+    controls_legend=[('0–4', 'tension'), ('space', 'free'), ('[ / ]', 'guidance')]
+    if is_tension_joker else None,
+    status_text='Loading tension controls…' if is_tension_joker else '')
 
 '''MIDI IN CALLBACK'''
 def midiin_callback(event, data=None):
@@ -100,7 +112,8 @@ def midiin_callback(event, data=None):
     if message[0] & 0xF0 == NOTE_OFF: 
         status, note, velocity = message
         #with buffer_lock: # lock to avoid race condition, temporary disabled for debugging
-        manageNote(note, 0)
+        with buffer_lock:
+            manageNote(note, 0)
     
     if message[0] & 0xF0 == 176:  # 176 is the status for control change
 
@@ -167,32 +180,50 @@ def save_performance():
       'pitch': dict_output_tokens['pitch'][CTX_LEN:CTX_LEN + i],
       'dur': dict_output_tokens['dur'][CTX_LEN:CTX_LEN + i],
     }
+  if is_tension_joker:
+      context['vel'] = dict_output_tokens['vel'][CTX_LEN:CTX_LEN + i]
+      context['chan'] = dict_output_tokens['chan'][CTX_LEN:CTX_LEN + i]
 
   if TRACES:
     print("dtime_save", dict_output_tokens['dtime'][CTX_LEN:CTX_LEN + i])
 
-  song_d = dict_to_song(context)
+  song_d = dict_to_song(context, force_vel=not is_tension_joker)
 
   stamped_path = output_midi_name + '_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
   detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name=stamped_path,
                                                             timings_multiplier=1
                                                             )
   print("saved performance", stamped_path + '.mid')
+  if is_tension_joker:
+      with open(stamped_path + '.json', 'w') as output:
+          json.dump({'model': model_name, 'home_key': home_key, 'controls': control_events,
+                     'notes': note_events}, output, indent=2)
 
-def reset_context():
+def reset_context() -> None:
     global i
     global dict_output_tokens, dict_input_tokens
     global kv_cache
     global b
+    global first_note, timeLast, last_gen_time
 
     with buffer_lock:
         i = 0
         kv_cache = None
+        first_note = True
+        timeLast = 0
+        last_gen_time = 0.0
+        for pitch, _, _ in noteOn_dict.values():
+            playNote(pitch, 0)
+        noteOn_dict.clear()
         for key in dict_input_tokens.keys():
             extended_list = dict_input_tokens[key].copy()
             extended_list.extend([0] * (TOTAL_GEN_LEN + CTX_LEN - len(extended_list)))
             dict_output_tokens[key] = extended_list
         b = torch.zeros(len(dict_output_tokens['pitch']), dtype=torch.long)
+        if is_tension_joker:
+            tension_controls.reset(CTX_LEN)
+            control_events.clear()
+            note_events.clear()
         visualizer.play_primer(playNote, last_n=PRIMER_PLAYBACK_LAST_N,
                                playback_speed=PRIMER_PLAYBACK_SPEED)
 
@@ -207,7 +238,20 @@ last_gen_time: float = 0.0
 
 ''' BUILD CTX '''
 # Load seed MIDI
-dict_input_tokens, num_notes = midi_to_dict(sample_midi_path) # tokens, without vel
+home_key = HOME_KEY_UNKNOWN
+if is_tension_joker:
+    performance = read_tension_performance(sample_midi_path, os.environ.get('HOME_KEY'))
+    dict_input_tokens = performance.tokens()
+    num_notes = len(performance.pitches)
+    home_key = performance.home_key
+else:
+    dict_input_tokens, num_notes = midi_to_dict(sample_midi_path) # tokens, without vel
+CTX_LEN = min(CTX_LEN, len(dict_input_tokens['pitch']))
+if CTX_LEN == 0:
+    raise ValueError('The primer MIDI must contain at least one pitch')
+tension_controls = TensionControls(CTX_LEN, CTX_LEN)
+control_events = []
+note_events = []
 
 dict_output_tokens = {}
 for key in dict_input_tokens.keys():
@@ -229,7 +273,7 @@ context = to_device(context, device)
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
 
-def manageNote(note, velocity): 
+def manageNote(note: int, velocity: int) -> None:
   global context  # Access the global context
   global timeLast # time of last note, global variable
   global b # button array
@@ -261,6 +305,13 @@ def manageNote(note, velocity):
             save_performance()
         sys.exit(0)
 
+    if is_base_joker and note != JOKER_MIDI_NOTE:
+        return
+    if i + CTX_LEN >= len(dict_output_tokens['pitch']):
+        for values in dict_output_tokens.values():
+            values.extend([0] * TOTAL_GEN_LEN)
+        b = torch.cat((b, b.new_zeros(TOTAL_GEN_LEN)))
+
     # Update position token
     dtime = max(0, min(127, int(timeNew) - int(timeLast))) # time difference from previous events, but trunk to maximum 127
     if first_note:
@@ -270,19 +321,33 @@ def manageNote(note, velocity):
     timeLast = timeNew
     dict_output_tokens['dtime'][i+CTX_LEN] = dtime
     # MIDI note to button
-    try:
-        but = key_to_button(note)
-    except:
-        but = 0
-        print("ERROR key_to_button", note)
+    but = 0
+    if not is_base_joker:
+        try:
+            but = key_to_button(note)
+        except:
+            print("ERROR key_to_button", note)
     b[i+CTX_LEN] = but
     context = {
       'pitch': torch.tensor(dict_output_tokens['pitch'][i:i+CTX_LEN+1], dtype=torch.long).unsqueeze(0),
     }
+    if is_tension_joker:
+        context['tension_target'] = torch.tensor([tension_controls.next_targets()], dtype=torch.long)
+        context['home_key'] = torch.tensor([home_key], dtype=torch.long)
     context = to_device(context, device)
                  
     with torch.inference_mode():
-        if USE_CACHE:
+        if is_tension_joker:
+            generated_at = time.perf_counter()
+            new_pitch_token = model.gen_pitch_token(context, cfg_weight=tension_controls.cfg_weight)
+            note_events.append({'note_index': i, 'pitch': new_pitch_token,
+                                'target': tension_controls.target, 'velocity': velocity,
+                                'guidance': tension_controls.cfg_weight,
+                                'generation_ms': (time.perf_counter() - generated_at) * 1000})
+            tension_controls.commit_note()
+            dict_output_tokens['vel'][i+CTX_LEN] = velocity
+            dict_output_tokens['chan'][i+CTX_LEN] = 0
+        elif USE_CACHE:
             new_pitch_token, kv_cache = model.gen_pitch_token(context, cache=kv_cache, use_cache=True)
         else:
             new_pitch_token = model.gen_pitch_token(context)
@@ -290,25 +355,30 @@ def manageNote(note, velocity):
     dict_output_tokens['pitch'][i+CTX_LEN] = new_pitch_token
 
     playNote(new_pitch_token, velocity) 
-    visualizer.get_note(new_pitch_token, velocity)
-    visualizer.get_button(0, velocity) # button is 0. No button influence, no button visualization
+    visualizer.get_note(new_pitch_token, velocity, is_joker=is_base_joker)
+    if is_base_joker:
+        visualizer.get_joker(velocity)
+    else:
+        visualizer.get_button(0, velocity) # button is 0. No button influence, no button visualization
 
     # add (user_note, pitch, time) to dictionary
-    noteOn_dict[but] = (new_pitch_token, timeNew)
+    noteOn_dict[note] = (new_pitch_token, timeNew, i + CTX_LEN)
     i += 1
 
   else: # noteOff
     if note == MIDI_NOTE_RESET_CONTEXT or note == MIDI_NOTE_SAVE_PERFORMANCE:
         return
-    but = key_to_button(note)
-    #print("but", but)
-    if but in noteOn_dict:
+    if note in noteOn_dict:
 
       # get pitch and time in dictionary of accumulated notesOns without noteOff
-      pitch, noteOn_time = noteOn_dict[but]
+      pitch, noteOn_time, position = noteOn_dict.pop(note)
+      dict_output_tokens['dur'][position] = max(1, int(timeNew - noteOn_time))
       playNote(pitch, 0)
       visualizer.get_note(pitch, 0)
-      visualizer.get_button(but, 0)
+      if is_base_joker:
+          visualizer.get_joker(0)
+      else:
+          visualizer.get_button(0, 0)
       #visualizer.update(noteOn_time)
 
 
@@ -351,7 +421,19 @@ try:
           reset_context()
       #visualizer.get_note(60, 100)
       #visualizer.get_button(0, 100)
-      visualizer.draw()
+      if is_tension_joker:
+          # Handle keys on the existing SDL/main thread; no global keyboard listener.
+          for event in pygame.event.get():
+              if event.type == pygame.QUIT:
+                  visualizer.stop()
+                  raise SystemExit
+              if event.type == pygame.KEYDOWN:
+                  with buffer_lock:
+                      if tension_controls.handle_key(event.unicode):
+                          control_events.append({'note_index': i, 'key': event.unicode,
+                                                 'target': tension_controls.target,
+                                                 'guidance': tension_controls.cfg_weight})
+          visualizer.status_text = tension_controls.status(home_key)
+      visualizer.draw(handle_events=not is_tension_joker)
 except (EOFError, KeyboardInterrupt, SystemExit):
     print("Bye.")
-

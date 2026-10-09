@@ -219,19 +219,27 @@ visualizer = Visualizer(
 )
 
 '''MIDI IN CALLBACK'''
+midi_event_time: Optional[float] = None
+
 def midiin_callback(event, data=None):
+    global midi_event_time
     message, deltatime = event
+    # RtMidi reports elapsed time since the previous MIDI message. Advance the
+    # clock for every message, including releases, before pitch inference runs.
+    midi_event_time = (time.perf_counter() if midi_event_time is None
+                       else midi_event_time + deltatime)
+    note_time = midi_event_time if live_timing is not None else None
 
     if message[0] & 0xF0 == NOTE_ON:
         status, note, velocity = message
         #channel = (status & 0xF) + 1
         with buffer_lock: # lock to avoid race condition
-            manageNote(note, velocity)
+            manageNote(note, velocity, note_time)
 
     if message[0] & 0xF0 == NOTE_OFF: 
         status, note, velocity = message
         with buffer_lock:
-            manageNote(note, 0)
+            manageNote(note, 0, note_time)
     
     if message[0] & 0xF0 == 176:  # 176 is the status for control change
 
@@ -467,7 +475,7 @@ if cfg.get('timing_enabled', False):
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
 
-def manageNote(note, velocity): 
+def manageNote(note, velocity, event_time=None):
   global context  # Access the global context
   global timeLast # time of last note, global variable
   global b # button array
@@ -483,13 +491,13 @@ def manageNote(note, velocity):
   if TRACES:
     print("key", note)
 
-  # Use event arrival time rather than inference completion time for spacing.
-  # Keep raw seconds for detecting long phrase gaps.
-  now = time.perf_counter()
+  # Use the MIDI event clock for spacing and note duration. Direct calls can
+  # still use the local clock; keep raw seconds for long phrase detection.
+  now = time.perf_counter() if event_time is None else event_time
   timeNew = now / TIME_UNIT
 
   if velocity > 0: # noteOn
-    if USE_CACHE and kv_cache is not None and (now - last_gen_time) > CACHE_IDLE_TIMEOUT:
+    if USE_CACHE and kv_cache is not None and (time.perf_counter() - last_gen_time) > CACHE_IDLE_TIMEOUT:
         kv_cache = None
     # Update position token
 
@@ -508,7 +516,7 @@ def manageNote(note, velocity):
     timeLast = timeNew
     dict_output_tokens['dtime'][i+CTX_LEN] = dtime
     # Keep tracking fast 2-key alternation while Space or T forces Joker notes.
-    timestamp_ms = time.perf_counter() * 1000
+    timestamp_ms = now * 1000
     repeated_pair_joker = joker_detector.update(note, timestamp_ms)
     is_joker = (space_joker_held.is_set() or joker_toggle_active.is_set()
                 or repeated_pair_joker or note in JOKER_FORCED_KEYS)

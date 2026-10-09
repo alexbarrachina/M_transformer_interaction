@@ -32,6 +32,24 @@ from x_transformer import *
 
 #===================================================================================================
 
+def warm_start_tension(model: D_Tension_Joker, checkpoint_path: str) -> None:
+    """Load only an exact base decoder; never silently train a random frozen prior."""
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f'Base joker checkpoint missing: {checkpoint_path}. '
+                                'Provide INIT_FROM_CKPT or train D_Base_Joker_little_v1 first.')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    state = checkpoint.get('model_state_dict', checkpoint)
+    adapter = ('decoder.tension_conditioner.', 'decoder.harm_film.')
+    expected = {name for name in model.state_dict() if not name.startswith(adapter)}
+    missing, unexpected = expected - state.keys(), state.keys() - expected
+    if missing or unexpected:
+        raise ValueError(f'Not a matching base joker checkpoint: missing={sorted(missing)}, '
+                         f'unexpected={sorted(unexpected)}')
+    result = model.load_state_dict(state, strict=False)
+    if result.unexpected_keys or any(not name.startswith(adapter) for name in result.missing_keys):
+        raise ValueError(f'Unexpected warm-start mismatch: {result}')
+
+
 def load_model(model_name='default',
                cfg=None,
                compile_mode='max-autotune',
@@ -382,8 +400,8 @@ def load_model(model_name='default',
                 attn_flash = True
             )
         )
-    elif cfg['model_type'] == 'AutoregressiveDecoder_no_conditioning':
-        # Autoencoder with Tonnetz harmony conditioning (decoder-only)
+    elif cfg['model_type'] in ('AutoregressiveDecoder_no_conditioning', 'D_Base_Joker'):
+        # Pitch-only causal decoder; the joker is an external generation trigger.
         mpt_model = AutoregressiveDecoder_no_conditioning(
             cfg = cfg,
             decoder = Decoder_no_conditioning(
@@ -396,6 +414,14 @@ def load_model(model_name='default',
             ),
 
         )
+    elif cfg['model_type'] == 'D_Tension_Joker':
+        mpt_model = D_Tension_Joker(cfg=cfg, decoder=Decoder_tension_joker(
+            max_seq_len=cfg['seq_len'], dim=cfg['emb_dim'], depth=cfg['num_layers'],
+            heads=cfg['heads'], rotary_pos_emb=True, attn_flash=True,
+            tens_cond_dim=cfg.get('tens_cond_dim', 128),
+            tens_film_start_frac=cfg.get('tens_film_start_frac', 0.5),
+            tens_film_scale_limit=cfg.get('tens_film_scale_limit', 0.5),
+            tens_film_shift_limit=cfg.get('tens_film_shift_limit', 0.5)))
     elif cfg['model_type'] == 'AE_style':
         # Style-conditioned autoencoder (no harmony): buttons + cross-attention to style reference
         mpt_model = AE_style(
@@ -748,7 +774,9 @@ def load_model(model_name='default',
             state = state['model_state_dict']
         # Trained timing checkpoints must contain the full branch. Loading the
         # pitch-only base is handled separately by warm_start_timing in training.
-        mpt_model.load_state_dict(state, strict=cfg.get('timing_enabled', False))
+        mpt_model.load_state_dict(
+            state, strict=cfg.get('timing_enabled', False)
+            or cfg['model_type'] in ('D_Base_Joker', 'D_Tension_Joker'))
 
         if compile_mode != 'none':
             mpt_model = torch.compile(mpt_model, mode=compile_mode)

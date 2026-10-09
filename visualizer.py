@@ -89,6 +89,7 @@ class Visualizer:
         harmony_trail_length: int = 50,
         show_event_numbers: bool = False,
         controls_legend: Optional[List[Tuple[str, str]]] = None,
+        status_text: str = '',
     ) -> None:
         pygame.init()
         self.width = width
@@ -99,7 +100,8 @@ class Visualizer:
         self.joker_height = 30  # Thin strip between pitches and buttons
         self.height = self.ref_height + 10 + self.pitch_height + 10 + self.joker_height + 10 + self.button_height + 20
         self.controls_legend = list(controls_legend or [])
-        self.legend_height = 38 if self.controls_legend else 0
+        self.status_text = status_text
+        self.legend_height = (38 if self.controls_legend else 0) + (28 if status_text else 0)
         self.content_height = self.height - self.legend_height
         self.fps = fps
         self.button_slots = button_slots
@@ -508,11 +510,15 @@ class Visualizer:
 
     def _draw_controls_legend(self) -> None:
         """Draw configured keyboard shortcuts in a footer below the rolls."""
-        if not self.controls_legend:
+        if not self.controls_legend and not self.status_text:
             return
         footer = pygame.Rect(0, self.content_height, self.width, self.legend_height)
         pygame.draw.rect(self.screen, (24, 27, 34), footer)
         pygame.draw.line(self.screen, (115, 120, 132), footer.topleft, footer.topright)
+        if self.status_text:
+            text = self._legend_font.render(self.status_text, True, (255, 230, 160))
+            self.screen.blit(text, (12, self.content_height + (40 if self.controls_legend else 4)))
+        center_y = self.content_height + 19
 
         entries = []
         for key, action in self.controls_legend:
@@ -524,11 +530,11 @@ class Visualizer:
         total_width = sum(entry[3] for entry in entries) + gap * (len(entries) - 1)
         x = max(8, (self.width - total_width) // 2)
         for key_text, action_text, key_width, entry_width in entries:
-            key_rect = pygame.Rect(x, footer.centery - 12, key_width, 24)
+            key_rect = pygame.Rect(x, center_y - 12, key_width, 24)
             pygame.draw.rect(self.screen, (62, 68, 80), key_rect, border_radius=4)
             pygame.draw.rect(self.screen, (135, 140, 151), key_rect, 1, border_radius=4)
             self.screen.blit(key_text, key_text.get_rect(center=key_rect.center))
-            self.screen.blit(action_text, (key_rect.right + 8, footer.centery - action_text.get_height() // 2))
+            self.screen.blit(action_text, (key_rect.right + 8, center_y - action_text.get_height() // 2))
             x += entry_width + gap
 
     def _draw_primer_status(self, rect: pygame.Rect) -> None:
