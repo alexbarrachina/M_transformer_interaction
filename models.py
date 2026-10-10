@@ -1434,7 +1434,7 @@ MODELS_PARAMETERS = {
         'dataset_train_path': './Training-Data/giantmidi_full_train',
         'dataset_val_path': './Training-Data/giantmidi_full_test',
         # Training settings
-        "save_every": 5,
+        "save_every": 20,
         "batch_size": 16,
         "num_workers": 8,
     },
@@ -2952,8 +2952,8 @@ MODELS_PARAMETERS['D_Tension_Joker_little_v1'] = {
     'home_key_drop_prob': 0.1,
     'loss_film_reg': 0.01,
     'learning_rate': 1e-4,
-    'epochs': 10,
-    'save_every': 1,
+    'epochs': None,  # Continue until Ctrl+C; checkpoints save every epoch.
+    'save_every': 15,
     'tens_max_samples': 0,
     'tens_max_val_samples': 0,
     'base_training_overlap': 'unknown',
@@ -2961,10 +2961,7 @@ MODELS_PARAMETERS['D_Tension_Joker_little_v1'] = {
 MODELS_PARAMETERS['D_Tension_Joker_tester_v1'] = {
     **MODELS_PARAMETERS['D_Tension_Joker_little_v1'],
     'description': 'Short tension adapter smoke run; same architecture and base checkpoint.',
-    'ckpt_file_name': './save_models/D_Tension_Joker_tester_latest.pth',
-    'epochs': 2,
-    'batch_size': 2,
-    'num_workers': 0,
+    'ckpt_file_name': './save_models/D_Tension_Joker_little_v1_600_eps_1546373_steps_2.0271_loss_2.131_val_loss_0.4492_acc.pth',
     'tens_max_samples': 128,
     'tens_max_val_samples': 32,
     'validate_every': 16,

@@ -95,7 +95,7 @@ reset_requested = Event()
 
 '''VISUALIZER'''
 visualizer = Visualizer(button_slots=cfg.get('num_buttons', 12),
-    controls_legend=[('0–4', 'tension'), ('space', 'free'), ('[ / ]', 'guidance')]
+    controls_legend=[('1–5', 'tension 0–4'), ('space', 'free'), ('- / +', 'intensity')]
     if is_tension_joker else None,
     status_text='Loading tension controls…' if is_tension_joker else '')
 
@@ -250,6 +250,8 @@ CTX_LEN = min(CTX_LEN, len(dict_input_tokens['pitch']))
 if CTX_LEN == 0:
     raise ValueError('The primer MIDI must contain at least one pitch')
 tension_controls = TensionControls(CTX_LEN, CTX_LEN)
+if is_tension_joker:
+    visualizer.status_text = tension_controls.status(home_key)
 control_events = []
 note_events = []
 

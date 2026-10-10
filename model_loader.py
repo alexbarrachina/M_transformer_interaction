@@ -400,9 +400,9 @@ def load_model(model_name='default',
                 attn_flash = True
             )
         )
-    elif cfg['model_type'] in ('AutoregressiveDecoder_no_conditioning', 'D_Base_Joker'):
+    elif cfg['model_type'] in ('D_base', 'D_Base_Joker'):
         # Pitch-only causal decoder; the joker is an external generation trigger.
-        mpt_model = AutoregressiveDecoder_no_conditioning(
+        mpt_model = D_Base(
             cfg = cfg,
             decoder = Decoder_no_conditioning(
                 max_seq_len = cfg['seq_len'],

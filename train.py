@@ -31,6 +31,7 @@ import glob
 import re
 import copy
 import hashlib
+from itertools import count
 from typing import Dict, Optional, Tuple
 
 os.environ['USE_FLASH_ATTENTION'] = '1'
@@ -553,7 +554,8 @@ def main():
 
 
     ''' TRAINING '''
-    for ep in range(start_epoch, cfg['epochs']):
+    epochs = count(start_epoch) if cfg['epochs'] is None else range(start_epoch, cfg['epochs'])
+    for ep in epochs:
         print('Epoch #', ep)
         
         model.train()

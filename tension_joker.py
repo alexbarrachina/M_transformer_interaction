@@ -64,13 +64,13 @@ class TensionControls:
         self.history.append(self.target)
 
     def handle_key(self, key: str) -> bool:
-        if key in ('0', '1', '2', '3', '4'):
-            self.set_level(int(key))
+        if key in ('1', '2', '3', '4', '5'):
+            self.set_level(int(key) - 1)
         elif key == ' ':
             self.set_level(None)
-        elif key == '[':
+        elif key == '-':
             self.cfg_weight = max(0.0, self.cfg_weight - 0.5)
-        elif key == ']':
+        elif key == '+':
             self.cfg_weight += 0.5
         else:
             return False
@@ -78,7 +78,8 @@ class TensionControls:
 
     def status(self, home_key: int) -> str:
         level = 'free' if self.target == TENSION_NULL else str(self.target - 1)
-        return f'Requested tension: {level} | Home: {home_key_name(home_key)} | Guidance: {self.cfg_weight:.1f}'
+        return (f'Requested tension: {level} | Intensity: {self.cfg_weight:.1f}x '
+                f'| Home: {home_key_name(home_key)}')
 
 
 @dataclass

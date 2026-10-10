@@ -25,13 +25,13 @@ sys.path.insert(0, str(ROOT))
 from midiUtils import dict_to_song, midi_to_dict, ms_SONG_to_MIDI_Converter
 from model_loader import load_model, warm_start_tension
 from models import get_model_hparams
-from x_transformer import D_base, D_Tension_Joker
+from x_transformer import D_Base, D_Tension_Joker
 from tension_joker import (TensionControls, TensionScorer, PianoPerformance,
                           read_tension_performance, HOME_KEY_UNKNOWN)
 
 
 @torch.inference_mode()
-def generate_pitches(model: D_base,
+def generate_pitches(model: D_Base,
                      primer: List[int], notes: int, context_length: int,
                      temperature: float, seed: int, device: torch.device) -> List[int]:
     torch.manual_seed(seed)

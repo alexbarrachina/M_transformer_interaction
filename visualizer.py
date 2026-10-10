@@ -101,7 +101,7 @@ class Visualizer:
         self.height = self.ref_height + 10 + self.pitch_height + 10 + self.joker_height + 10 + self.button_height + 20
         self.controls_legend = list(controls_legend or [])
         self.status_text = status_text
-        self.legend_height = (38 if self.controls_legend else 0) + (28 if status_text else 0)
+        self.legend_height = (38 if self.controls_legend else 0) + 28 * len(status_text.splitlines())
         self.content_height = self.height - self.legend_height
         self.fps = fps
         self.button_slots = button_slots
@@ -467,6 +467,8 @@ class Visualizer:
 
     def draw(self, handle_events: bool = True) -> None:
         self.update()
+        self.legend_height = (38 if self.controls_legend else 0) + 28 * len(self.status_text.splitlines())
+        self.content_height = self.height - self.legend_height
         if handle_events:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -516,8 +518,11 @@ class Visualizer:
         pygame.draw.rect(self.screen, (24, 27, 34), footer)
         pygame.draw.line(self.screen, (115, 120, 132), footer.topleft, footer.topright)
         if self.status_text:
-            text = self._legend_font.render(self.status_text, True, (255, 230, 160))
-            self.screen.blit(text, (12, self.content_height + (40 if self.controls_legend else 4)))
+            status_y = self.content_height + (40 if self.controls_legend else 4)
+            for line in self.status_text.splitlines():
+                text = self._legend_font.render(line, True, (255, 230, 160))
+                self.screen.blit(text, (12, status_y))
+                status_y += 28
         center_y = self.content_height + 19
 
         entries = []
