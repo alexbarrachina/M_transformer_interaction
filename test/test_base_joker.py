@@ -26,7 +26,7 @@ from midiUtils import dict_to_song, midi_to_dict, ms_SONG_to_MIDI_Converter
 from model_loader import load_model, warm_start_tension
 from models import get_model_hparams
 from x_transformer import D_Base, D_Tension_Joker
-from tension_joker import (TensionControls, TensionScorer, PianoPerformance,
+from harmony.tension_joker import (TensionControls, TensionScorer, PianoPerformance,
                           read_tension_performance, HOME_KEY_UNKNOWN)
 
 
@@ -155,7 +155,11 @@ def summarize_tension(runs: List[dict]) -> Dict[str, object]:
 def check_tension() -> None:
     """Focused CPU checks, including optimization, boundaries, release and checkpoint loading."""
     import mido
-    from train import TensionPitchSamplerDataset, load_checkpoint
+    from train_tension import (TensionPitchSamplerDataset, load_checkpoint, validate_tension,
+                               tension_control_score, tension_selection_state,
+                               save_tension_checkpoint, find_latest_checkpoint)
+    from harmony.tension_joker import validate_tension_controls
+    from unittest.mock import patch
 
     torch.manual_seed(7)
     cfg = get_model_hparams('D_Base_Joker_little_v1')
@@ -173,6 +177,20 @@ def check_tension() -> None:
         original = base.decoder({'pitch': batch['pitch'][:, :-1]})
         model.eval()
         torch.testing.assert_close(model.pitch_logits(batch), original, rtol=0, atol=0)
+        with torch.inference_mode():
+            cached, state = model.decoder({'pitch': batch['pitch'][:, :4]},
+                                          tension_target=batch['tension_target'][:, 1:5],
+                                          home_key=batch['home_key'], return_intermediates=True)
+            torch.testing.assert_close(cached[:, -1], model.pitch_logits({
+                **batch, 'pitch': batch['pitch'][:, :5],
+                'tension_target': batch['tension_target'][:, :5]})[:, -1])
+            cached, _ = model.decoder({'pitch': batch['pitch'][:, 4:5]},
+                                      tension_target=batch['tension_target'][:, 5:6],
+                                      home_key=batch['home_key'], cache=state,
+                                      return_intermediates=True)
+            torch.testing.assert_close(cached[:, -1], model.pitch_logits({
+                **batch, 'pitch': batch['pitch'][:, :6],
+                'tension_target': batch['tension_target'][:, :6]})[:, -1])
         optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=0.01)
         frozen = {name: p.clone() for name, p in model.named_parameters() if not p.requires_grad}
         model.train()
@@ -196,6 +214,16 @@ def check_tension() -> None:
         torch.testing.assert_close(model.pitch_logits(batch), model.pitch_logits(placeholder))
         expected = original[:, -1] + 1.5 * (model.pitch_logits(batch)[:, -1] - original[:, -1])
         torch.testing.assert_close(model.next_pitch_logits(batch, 1.5), expected, rtol=1e-5, atol=1e-6)
+        metrics = validate_tension(model, [batch], torch.device('cpu'))
+        wrong_nll = []
+        mask = batch['tension_target'][:, 1:] > 0
+        for offset in range(1, 5):
+            target = batch['tension_target']
+            wrong = torch.where(target > 0, (target - 1 + offset) % 5 + 1, 0)
+            logits = model.pitch_logits({**batch, 'tension_target': wrong})
+            ce = torch.nn.functional.cross_entropy(logits.transpose(1, 2), batch['pitch'][:, 1:], reduction='none')
+            wrong_nll.append(ce[mask].mean().item())
+        assert abs(metrics['nll_wrong'] - sum(wrong_nll) / 4) < 1e-6
 
         trained = Path(directory) / 'tension.pth'
         torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
@@ -237,6 +265,7 @@ def check_tension() -> None:
         source = read_tension_performance(str(source_path), 'C major')
         assert source.pitches == [72, 60, 64] and source.home_key == 18
         assert source.starts_ms == [0, 0, 100] and source.durations_ms == [200, 200, 400]
+        assert source.chord_spans_ms == [(0.0, 500.0)]
         source.write(str(Path(directory) / 'roundtrip.mid'), [73, 61, 65])
         roundtrip = read_tension_performance(str(Path(directory) / 'roundtrip.mid'))
         assert roundtrip.starts_ms == source.starts_ms and roundtrip.durations_ms == source.durations_ms
@@ -254,7 +283,8 @@ def check_tension() -> None:
             rows.append([1, 2, 30 + piece + note % 12, 90, (0, 1, 10)[note % 3]])
     data = torch.tensor(rows).flatten()
     dataset = TensionPitchSamplerDataset(data, 8, cfg={'home_key_drop_prob': 0.0,
-                                                     'tens_validation_fraction': 0.3}, split='all')
+                                                     'tens_validation_fraction': 0.3,
+                                                     'tens_lead_max': 0}, split='all')
     assert (dataset.levels.reshape(40, 24)[:, :2] == 0).all()
     assert torch.equal(dataset.home_keys[1:], torch.arange(40) % 12 + 12 * (torch.arange(40) % 2))
     for seed in range(20):
@@ -274,6 +304,109 @@ def check_tension() -> None:
     assert all(torch.equal(validation[0][key], validation[0][key]) for key in validation[0])
     dataset.home_drop = 1.0
     assert dataset[0]['home_key'] == HOME_KEY_UNKNOWN
+
+    # Fixed windows expose the lead, including lookahead outside a window and piece tails.
+    anticipating = TensionPitchSamplerDataset(
+        data, 8, is_eval=True, cfg={'tens_p_all_cond': 0, 'tens_transition_prob': 1,
+                                  'tens_validation_fraction': 0.3}, split='all')
+    leads = set()
+    for seed in range(40):
+        anticipating.validation_seed = seed
+        lead = int(torch.randint(7, (), generator=torch.Generator().manual_seed(seed)))
+        leads.add(lead)
+        with patch.object(anticipating, '_sample_window', return_value=(1, 9, dataset.pitches[9:18], 0)):
+            item = anticipating[0]
+        target = item['tension_target']
+        active = target > 0
+        torch.testing.assert_close(target[active], dataset.levels[9 + lead:18 + lead][active])
+        if 1 <= lead <= 4:
+            assert int(torch.nonzero(active)[0]) == 6 - lead
+            assert int(target[6 - lead]) == 2  # New label before the actual change at note 15.
+        with patch.object(anticipating, '_sample_window', return_value=(1, 15, dataset.pitches[15:24], 0)):
+            tail = anticipating[0]['tension_target']
+        assert (tail[tail > 0] == 2).all()  # No labels from the next piece.
+    assert leads == set(range(7))
+    anticipating.p_all_cond = 1
+    with patch.object(anticipating, '_sample_window', return_value=(1, 1, dataset.pitches[1:10], 0)):
+        expected_lead = int(torch.randint(7, (), generator=torch.Generator().manual_seed(seed)))
+        torch.testing.assert_close(anticipating[0]['tension_target'][1:],
+                                   dataset.levels[2 + expected_lead:10 + expected_lead])
+    anticipating.select_split('validation')
+    assert all(torch.equal(anticipating[0][key], anticipating[0][key]) for key in anticipating[0])
+
+    control_cfg = {**get_model_hparams('D_Tension_Joker_little_v1'),
+                   'tens_control_pieces': 2, 'tens_control_seeds': 2,
+                   'tens_control_primer': 4, 'tens_control_notes': 8, 'tens_control_settle': 2}
+    performances, manifest = validation.control_performances(data, control_cfg)
+    repeated, manifest_again = validation.control_performances(data, control_cfg)
+    assert manifest == manifest_again and performances == repeated
+    assert all(0 <= row['start'] < 24 for row in manifest)
+    assert all(row['piece'] in validation.piece_ids and row['piece'] not in dataset.piece_ids for row in manifest)
+    assert performances[0].starts_ms == list(range(0, 120, 10))
+    assert performances[0].durations_ms == [40] * 12
+
+    class ControlProbe:
+        max_seq_len = 8
+        ignores_target = False
+
+        def eval(self):
+            return self
+
+        def next_pitch_logits(self, tokens, cfg_weight):
+            target = tokens['tension_target'][:, -1]
+            level = torch.full_like(target, 2) if self.ignores_target else torch.where(target > 0, target - 1, 2)
+            logits = torch.full((target.size(0), 128), -1000.0)
+            return logits.scatter_(1, (level + 60)[:, None], 0)
+
+    class ScoreProbe:
+        def score(self, source, pitches):
+            return {'levels': [max(0, min(4, pitch - 60)) for pitch in pitches]}
+
+    probe = ControlProbe()
+    rng = torch.get_rng_state()
+    steering = validate_tension_controls(probe, performances, ScoreProbe(), control_cfg, torch.device('cpu'))
+    assert torch.equal(rng, torch.get_rng_state())
+    assert steering == validate_tension_controls(probe, performances, ScoreProbe(), control_cfg, torch.device('cpu'))
+    assert steering['control_score'] == 1 and steering['control_span'] == 4
+    assert torch.equal(torch.tensor(steering['control_confusion_matrix']), torch.eye(5) * 24)
+    candidate = {**steering, 'nll_true': 2.1, 'nll_null': 2.2, 'nll_control_gap': 0.01}
+    assert tension_control_score(candidate, control_cfg) == 1
+    # A lower NLL must not beat stronger steering; degenerate/non-finite runs are ineligible.
+    assert tension_control_score({**candidate, 'nll_true': 2.0, 'control_score': 0.4}, control_cfg) < 1
+    assert tension_control_score({**candidate, 'nll_true': 3.0}, control_cfg) is None
+    assert tension_control_score({**candidate, 'control_free_repeat_rate': 0.0}, control_cfg) is None
+    assert tension_control_score({**candidate, 'control_score': float('nan')}, control_cfg) is None
+    probe.ignores_target = True
+    ignored = validate_tension_controls(probe, performances, ScoreProbe(), control_cfg, torch.device('cpu'))
+    assert ignored['control_score'] == 0 and ignored['control_span'] == 0
+    assert tension_control_score({**candidate, **ignored}, control_cfg) is None
+
+    with tempfile.TemporaryDirectory() as directory:
+        latest = str(Path(directory) / 'tension_latest.pth')
+        best = Path(directory) / 'tension_latest_best_control_10_steps.pth'
+        protocol = {'version': 2, 'seed': 1}
+        checkpoint = {'epoch': 1, 'steps': 10, 'cfg': {'model_name': 'tension'},
+                      'best_val_nll': 2.1, 'best_control_score': 1.0,
+                      'best_control_validation': candidate, 'tension_validation_protocol': protocol}
+        # Improvements between numbered archive epochs must still persist.
+        save_tension_checkpoint(checkpoint, latest, None, improved=True)
+        assert best.is_file() and torch.load(best)['steps'] == 10
+        newer_checkpoint = {**checkpoint, 'epoch': 2, 'steps': 20, 'best_control_score': 1.2}
+        save_tension_checkpoint(newer_checkpoint, latest, None, improved=True)
+        newer_best = Path(directory) / 'tension_latest_best_control_20_steps.pth'
+        assert newer_best.is_file() and torch.load(newer_best)['best_control_checkpoint'] == str(newer_best)
+        save_tension_checkpoint({**checkpoint, 'epoch': 2, 'steps': 20}, latest, None, improved=False)
+        assert torch.load(best)['steps'] == 10 and torch.load(newer_best)['steps'] == 20
+        assert find_latest_checkpoint(directory, 'tension', latest) == (latest, 2, 20)
+        assert tension_selection_state(torch.load(latest), protocol) == (2.1, 1.0, candidate)
+        assert tension_selection_state(checkpoint, {'version': 2, 'seed': 2}) == (float('inf'), float('-inf'), {})
+        assert tension_selection_state({'best_val_nll': 1.0}, protocol) == (float('inf'), float('-inf'), {})
+        with patch('train_tension.torch.save', side_effect=KeyboardInterrupt):
+            try:
+                save_tension_checkpoint(checkpoint, latest, None, improved=True)
+            except KeyboardInterrupt:
+                pass
+        assert torch.load(latest)['steps'] == 20
     controls = TensionControls(3, 4)
     controls.set_level(4)
     assert controls.next_targets() == [0, 0, 0, 5]
@@ -288,7 +421,8 @@ def check_tension() -> None:
     controls.reset(3)
     assert controls.next_targets() == [0, 0, 0, 0]
     print('Tension checks passed: alignment, transposition, split, causality, initialization, '
-          'frozen weights, gradients, release, guidance, MIDI filtering and checkpoint resume.')
+          'frozen weights, gradients, release, guidance, MIDI filtering, anticipation, '
+          'paired controllability scoring, checkpoint selection and resume.')
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -309,7 +443,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument('--home-key', help='Fallback when a MIDI has no home marker, e.g. C major')
     parser.add_argument('--guidance', type=float, default=1.0)
     parser.add_argument('--score-tension', action='store_true')
-    parser.add_argument('--analyzer-root', type=Path, default=ROOT.parent / 'PROCESS/harmony_detector')
     parser.add_argument('--calibration', type=Path, help='Frozen corpus calibration JSON; otherwise use builder defaults')
     parser.add_argument('--blind', action='store_true', help='Randomized MIDI names; identities remain in report.json')
     parser.add_argument('--check-tension', action='store_true', help='Run focused CPU checks without a trained checkpoint')
@@ -352,7 +485,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     cfg['ckpt_file_name'] = str(args.checkpoint)
     model = load_model(args.model, cfg=cfg, compile_mode='none').to(device).eval()
     args.output.mkdir(parents=True, exist_ok=True)
-    scorer = TensionScorer(str(args.analyzer_root), str(args.calibration) if args.calibration else None) if args.score_tension else None
+    scorer = TensionScorer(str(args.calibration) if args.calibration else None) if args.score_tension else None
     try:
         schedules = ([parse_schedule('0:' + level) for level in args.targets.split(',')]
                      + [parse_schedule(text) for text in args.schedule]) if tension else [{0: None}]

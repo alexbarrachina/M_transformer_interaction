@@ -50,6 +50,21 @@ def warm_start_tension(model: D_Tension_Joker, checkpoint_path: str) -> None:
         raise ValueError(f'Unexpected warm-start mismatch: {result}')
 
 
+def warm_start_chord(model: D_Chord_Joker, checkpoint_path: str) -> None:
+    """Require the complete, matching pretrained pitch prior before adapter training."""
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f'Base joker checkpoint missing: {checkpoint_path}')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    state = checkpoint.get('model_state_dict', checkpoint)
+    adapter = ('decoder.chord_conditioner.', 'decoder.harm_film.')
+    expected = {name for name in model.state_dict() if not name.startswith(adapter)}
+    missing, unexpected = expected - state.keys(), state.keys() - expected
+    if missing or unexpected:
+        raise ValueError(f'Not a matching base joker checkpoint: missing={sorted(missing)}, '
+                         f'unexpected={sorted(unexpected)}')
+    model.load_state_dict(state, strict=False)
+
+
 def load_model(model_name='default',
                cfg=None,
                compile_mode='max-autotune',
@@ -414,6 +429,14 @@ def load_model(model_name='default',
             ),
 
         )
+    elif cfg['model_type'] == 'D_Chord_Joker':
+        mpt_model = D_Chord_Joker(cfg=cfg, decoder=Decoder_chord_joker(
+            max_seq_len=cfg['seq_len'], dim=cfg['emb_dim'], depth=cfg['num_layers'],
+            heads=cfg['heads'], rotary_pos_emb=True, attn_flash=True,
+            chord_cond_dim=cfg.get('chord_cond_dim', 128),
+            chord_film_start_frac=cfg.get('chord_film_start_frac', 0.5),
+            chord_film_scale_limit=cfg.get('chord_film_scale_limit', 0.5),
+            chord_film_shift_limit=cfg.get('chord_film_shift_limit', 0.5)))
     elif cfg['model_type'] == 'D_Tension_Joker':
         mpt_model = D_Tension_Joker(cfg=cfg, decoder=Decoder_tension_joker(
             max_seq_len=cfg['seq_len'], dim=cfg['emb_dim'], depth=cfg['num_layers'],
@@ -776,7 +799,7 @@ def load_model(model_name='default',
         # pitch-only base is handled separately by warm_start_timing in training.
         mpt_model.load_state_dict(
             state, strict=cfg.get('timing_enabled', False)
-            or cfg['model_type'] in ('D_Base_Joker', 'D_Tension_Joker'))
+            or cfg['model_type'] in ('D_Base_Joker', 'D_Tension_Joker', 'D_Chord_Joker'))
 
         if compile_mode != 'none':
             mpt_model = torch.compile(mpt_model, mode=compile_mode)

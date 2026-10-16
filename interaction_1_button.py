@@ -43,7 +43,7 @@ from model_loader import load_model
 from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
-from tension_joker import TensionControls, read_tension_performance
+from harmony.tension_joker import TensionControls, read_tension_performance
 
 TRACES = False
 USE_CACHE = False

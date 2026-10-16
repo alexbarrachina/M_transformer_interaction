@@ -93,6 +93,11 @@ from params import *
 #                      'tension: 0..4'  (the old java / musiclang markers were removed)
 #      A file is recognised as this format by having a 'home:' or 'tension:' marker.
 #
+# 1b) all_key_rnbert  (DATASET = 'rnbert_chords')   built by add_rnbert_chords.py --timeline performance
+#      the all_key_tension performances with the RNBert chord tones on MIDI channel 5 (root position,
+#      root = lowest tone, velocity 60) instead of the java chords, and only 'home:' / 'key:' /
+#      'change key:' markers. Read as format 1 with KEY_TENSION_CHORD_TONES_CHANNEL = 4; no tension.
+#
 # 2) legacy (all_roman, harmony_*): chord notes on MIDI channel 5, movement notes on MIDI channel
 #    4, German chord labels or musiclang romans as markers. Only processed with
 #    KEY_TENSION_ONLY = False. MIDI channel 4 means something DIFFERENT in the two formats
@@ -170,15 +175,30 @@ tension_histogram = [0] * NUM_TENSION_LEVELS
 #===================================================================================================
 # INPUT / OUTPUT
 #===================================================================================================
+# Which pickle to build:
+#   'key_tension'   all_key_tension: java chord tones on MIDI channel 4 (mido 3), 'home:' / 'key:' /
+#                   'change key:' / 'tension:' markers -> giantmidi_key_tension_*.pickle
+#   'rnbert_chords' all_key_rnbert (PROCESS/harmony_detector/add_rnbert_chords.py --timeline
+#                   performance): the same performances (MIDI channels 1 2 11 12), the RNBert
+#                   chord tones in root position on MIDI channel 5 (mido 4) instead of the java
+#                   chords, and only 'home:' / 'key:' / 'change key:' markers (RNBert local keys,
+#                   all_key_tension home key) -> giantmidi_full_w_chords_*.pickle. No tension events.
+DATASET = 'rnbert_chords'
+
 # dataset_addr = "./Samples"  # when testing
 # dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_roman"   # legacy: misaligned, 2x/4x slow
-dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_key_tension"
 # Output file names (written to ./Training-Data/<output_name>_train.pickle / _test.pickle)
-output_name = 'giantmidi_key_tension'
-
-# all_key_tension: java chord tones live on MIDI channel 4 (mido 3), not on channel 5. They are
-# renamed to CHORDS_CHANNEL below, because pickle channel 3 means "legacy movement note".
-KEY_TENSION_CHORD_TONES_CHANNEL = 3
+if DATASET == 'rnbert_chords':
+    dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_key_rnbert"
+    output_name = 'giantmidi_full_w_chords'
+    # RNBert chord tones are on MIDI channel 5 (mido 4), which already is CHORDS_CHANNEL.
+    KEY_TENSION_CHORD_TONES_CHANNEL = CHORDS_CHANNEL
+else:
+    dataset_addr = "../../../DataSets/MIDI/giantMIDI/all_key_tension"
+    output_name = 'giantmidi_key_tension'
+    # all_key_tension: java chord tones live on MIDI channel 4 (mido 3), not on channel 5. They are
+    # renamed to CHORDS_CHANNEL below, because pickle channel 3 means "legacy movement note".
+    KEY_TENSION_CHORD_TONES_CHANNEL = HARMONY_CHANNEL
 
 # Marker grammar of all_key_tension (case/space tolerant):
 #   'tension: 3'   'home: F# minor'   'change key: C major -> G major'
@@ -335,13 +355,17 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
 
         if is_key_tension:
             # Defensive: a key+tension file must not carry any legacy harmony content, so
-            # ignore legacy-format markers and legacy MIDI channel-5 chord notes (pickle chan 4).
+            # ignore legacy-format markers, and keep only the configured chord channel: the
+            # other one (MIDI 4 = pickle 3, MIDI 5 = pickle 4) would be read as legacy movement
+            # notes or legacy chroma.
             label_events_ms = []
             roman_events_ms = []
-            events_matrix = [e for e in events_matrix if e[3] != CHORDS_CHANNEL]
+            stray_chord_channel = HARMONY_CHANNEL if KEY_TENSION_CHORD_TONES_CHANNEL == CHORDS_CHANNEL else CHORDS_CHANNEL
+            events_matrix = [e for e in events_matrix if e[3] != stray_chord_channel]
             # The java chord tones are on MIDI channel 4 (pickle chan 3 = HARMONY_CHANNEL in the
             # legacy layout, i.e. movement notes) -> rename them to the chord channel so they
             # go through the chord path below instead of being read as movement events.
+            # The RNBert chord tones already are on CHORDS_CHANNEL.
             for event in events_matrix:
                 if event[3] == KEY_TENSION_CHORD_TONES_CHANNEL:
                     event[3] = CHORDS_CHANNEL
@@ -585,6 +609,15 @@ if KEY_TENSION_ONLY:
     if any(legacy_found.values()) or channel_4_movements or roman_move_events:
         raise SystemExit(f'ABORTED, nothing saved: legacy harmony events found in the pickle: {legacy_found}')
     print('Legacy-content guard OK: no chan 3 (movement) and no chan 122 (roman movement) events.')
+    if DATASET == 'rnbert_chords':
+        # Only chords (tones + chord-start labels), key and home key may sit next to the notes.
+        allowed = {MELODY_CHANNEL, MELODY_CHORDS_CHANNEL, ACCOMP_CHANNEL, EXTRA_ACCOMP_CHANNEL,
+                   CHORDS_CHANNEL, CHORD_LABEL_CHANNEL, KEY_CHANNEL, HOME_KEY_CHANNEL}
+        unexpected = {split: {c: n for c, n in counts.items() if c not in allowed}
+                      for split, counts in census.items()}
+        if any(unexpected.values()):
+            raise SystemExit(f'ABORTED, nothing saved: unexpected channels in the RNBert pickle: {unexpected}')
+        print('RNBert guard OK: notes, chan 4 chords, chan 120 chord starts, chan 121 key, chan 124 home key only.')
 print('=' * 70)
 
 #===================================================================================================

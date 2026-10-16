@@ -14092,16 +14092,20 @@ class Decoder_tension_joker(Decoder_no_conditioning):
 
     def forward(self, past_tokens: Dict[str, Tensor],
                 tension_target: Optional[Tensor] = None,
-                home_key: Optional[Tensor] = None) -> Tensor:
+                home_key: Optional[Tensor] = None,
+                cache: Optional[LayerIntermediates] = None,
+                return_intermediates: bool = False):
         self.harm_film.last_penalty = self.pitch_emb.weight.new_zeros(())
         if tension_target is None:
-            return super().forward(past_tokens)
+            return super().forward(past_tokens, cache=cache,
+                                   return_intermediates=return_intermediates)
         if home_key is None:
             home_key = tension_target.new_full((tension_target.size(0),), HOME_KEY_UNKNOWN)
         gate = (tension_target != TENSION_NULL).unsqueeze(-1).to(self.pitch_emb.weight.dtype)
         condition = self.tension_conditioner(tension_target, home_key)
         table = self.harm_film(condition, gate)
-        return super().forward(past_tokens, film_table=table, film_intensity=gate)
+        return super().forward(past_tokens, film_table=table, film_intensity=gate,
+                               cache=cache, return_intermediates=return_intermediates)
 
 
 class D_Tension_Joker(D_Base):
@@ -14162,6 +14166,128 @@ class D_Tension_Joker(D_Base):
         if note_tokens['pitch'].size(0) != 1:
             raise ValueError('gen_pitch_token expects one performance')
         logits = self.next_pitch_logits(note_tokens, cfg_weight)
+        return int(torch.multinomial(F.softmax(logits / temperature, dim=-1), 1).item())
+
+
+class ChordTargetConditioner(nn.Module):
+    """Octave-independent chord tones plus the lowest exported pitch class."""
+
+    def __init__(self, dim: int = 128) -> None:
+        super().__init__()
+        self.chroma_proj = nn.Linear(12, dim, bias=False)
+        self.anchor_emb = nn.Embedding(12, dim)
+        self.out = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim), nn.LayerNorm(dim))
+
+    def forward(self, chroma: Tensor, anchor_pc: Tensor) -> Tensor:
+        return self.out(self.chroma_proj(chroma.to(self.chroma_proj.weight.dtype))
+                        + self.anchor_emb(anchor_pc))
+
+
+class Decoder_chord_joker(Decoder_no_conditioning):
+    """Frozen pitch prior with momentary, zero-initialized chord FiLM."""
+
+    def __init__(self, *, chord_cond_dim: int = 128, chord_film_start_frac: float = 0.5,
+                 chord_film_scale_limit: float = 0.5, chord_film_shift_limit: float = 0.5,
+                 **kwargs) -> None:
+        super().__init__(**kwargs)
+        if not 0.0 <= chord_film_start_frac < 1.0:
+            raise ValueError('chord_film_start_frac must be in [0, 1)')
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        self.chord_conditioner = ChordTargetConditioner(chord_cond_dim)
+        start = int(sum(t == 'a' for t in self.attn_layers.layer_types) * chord_film_start_frac)
+        mod_inds: List[int] = []
+        block = -1
+        for index, layer_type in enumerate(self.attn_layers.layer_types):
+            if layer_type == 'a':
+                block += 1
+            if layer_type in ('a', 'f') and block >= start:
+                mod_inds.append(index)
+        self.harm_film = HarmonyFiLM(chord_cond_dim, self.emb_dim, mod_inds,
+                                     chord_film_scale_limit, chord_film_shift_limit)
+        self.can_cache_kv = False
+
+    def train(self, mode: bool = True) -> 'Decoder_chord_joker':
+        super().train(mode)
+        self.pitch_emb.eval()
+        self.emb_dropout.eval()
+        self.attn_layers.eval()
+        self.to_logits.eval()
+        return self
+
+    def forward(self, past_tokens: Dict[str, Tensor],
+                chord_chroma: Optional[Tensor] = None,
+                chord_anchor_pc: Optional[Tensor] = None,
+                chord_active: Optional[Tensor] = None) -> Tensor:
+        self.harm_film.last_penalty = self.pitch_emb.weight.new_zeros(())
+        if chord_active is None:
+            return super().forward(past_tokens)
+        if chord_chroma is None or chord_anchor_pc is None:
+            raise ValueError('Active chord inputs require chroma and anchor_pc')
+        gate = chord_active.unsqueeze(-1).to(self.pitch_emb.weight.dtype)
+        condition = self.chord_conditioner(chord_chroma, chord_anchor_pc)
+        table = self.harm_film(condition, gate)
+        return super().forward(past_tokens, film_table=table, film_intensity=gate)
+
+
+class D_Chord_Joker(D_Base):
+    """Chord controls describe target notes; performed pitches remain the full history."""
+
+    def pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        pitch = note_tokens['pitch']
+        if pitch.ndim != 2 or not 2 <= pitch.size(1) <= self.max_seq_len + 1:
+            raise ValueError('Expected 1..max_seq_len past pitches plus a target placeholder')
+        chroma = note_tokens.get('chord_chroma')
+        anchor = note_tokens.get('chord_anchor_pc')
+        active = note_tokens.get('chord_active')
+        if chroma is None and anchor is None and active is None:
+            return self.decoder({'pitch': pitch[:, :-1]})
+        if chroma is None or anchor is None or active is None:
+            raise ValueError('Supply all three chord inputs, or only pitch for free generation')
+        if (anchor.shape != pitch.shape or active.shape != pitch.shape
+                or chroma.shape != (*pitch.shape, 12)):
+            raise ValueError('Chord inputs must match pitch [batch, time], with chroma [batch, time, 12]')
+        return self.decoder({'pitch': pitch[:, :-1]}, chord_chroma=chroma[:, 1:],
+                            chord_anchor_pc=anchor[:, 1:], chord_active=active[:, 1:])
+
+    def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+        # Each training window contains one press interval. Only its target notes
+        # train the adapter; the unconditioned prefix/suffix retain the frozen prior.
+        logits = self.pitch_logits(note_tokens)
+        labels = note_tokens['pitch'][:, 1:]
+        active = note_tokens['chord_active'][:, 1:].bool() & (labels != self.ignore_index)
+        weights = active.float()
+        count = weights.sum().clamp_min(1.0)
+        ce = F.cross_entropy(logits.transpose(1, 2), labels, ignore_index=self.ignore_index,
+                             reduction='none')
+        reconstruction = (ce * weights).sum() / count
+        penalty = self.decoder.harm_film.last_penalty if self.training else reconstruction.new_zeros(())
+        losses = {'loss_recons': reconstruction, 'loss_film_reg': penalty,
+                  'loss_total': reconstruction + float(self.cfg.get('loss_film_reg', 0.01)) * penalty}
+        accuracy = ((logits.argmax(-1) == labels) * weights).sum() / count
+        return losses, accuracy
+
+    @torch.inference_mode()
+    def next_pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        active = note_tokens.get('chord_active')
+        if active is None or not bool(active[:, -1].any()):
+            # Recompute the entire actual pitch history without any harmony input.
+            return self.pitch_logits({'pitch': note_tokens['pitch']})[:, -1]
+        # Forget controls before the last release, including in mixed active/free
+        # batches. This never erases the pitches produced during earlier guidance.
+        releases = (~active.bool()).long().cumsum(dim=1)
+        current_episode = active.bool() & (releases == releases[:, -1:])
+        controls = dict(note_tokens)
+        controls['chord_active'] = current_episode
+        return self.pitch_logits(controls)[:, -1]
+
+    @torch.inference_mode()
+    def gen_pitch_token(self, note_tokens: Dict[str, Tensor], temperature: float = 1.0) -> int:
+        if temperature <= 0 or not math.isfinite(temperature):
+            raise ValueError('temperature must be finite and positive')
+        if note_tokens['pitch'].size(0) != 1:
+            raise ValueError('gen_pitch_token expects one performance')
+        logits = self.next_pitch_logits(note_tokens)
         return int(torch.multinomial(F.softmax(logits / temperature, dim=-1), 1).item())
 
 

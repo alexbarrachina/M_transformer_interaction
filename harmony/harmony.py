@@ -337,7 +337,7 @@ Sapp, C. S. "simple" key weights, as distributed with Humdrum's keycor tool
 
 Usage from an interaction_*.py application
 ------------------------------------------
-    from harmony import HarmonyTracker
+    from harmony.harmony import HarmonyTracker
     harmony = HarmonyTracker(home_key=home_key)          # int 0..23 (pc + 12*minor), 'C major', or None
     harmony.prime(performance.pitches, performance.starts_ms, performance.durations_ms,
                   end_at_ms=time.perf_counter() * 1000)  # optional warm-up with the primer
@@ -348,7 +348,7 @@ Usage from an interaction_*.py application
     state = harmony.update(time.perf_counter() * 1000)
     visualizer.status_text = state.describe()   # 'Tension 3 [####.] | Key: G major (home C major) | Chord: D7'
 
-`python harmony.py some.mid [--home 'C major' | --home none]` replays a MIDI file in simulated
+`python -m harmony.harmony some.mid [--home 'C major' | --home none]` replays a MIDI file in simulated
 real time and, for all_key_tension files, reports agreement with their offline labels.
 """
 

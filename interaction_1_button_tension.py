@@ -44,8 +44,8 @@ from model_loader import load_model
 from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
-from harmony import HarmonyTracker, key_label
-from tension_joker import TensionControls, home_key_name, read_tension_performance
+from harmony.harmony import HarmonyTracker, key_label
+from harmony.tension_joker import TensionControls, home_key_name, read_tension_performance
 
 TRACES = False
 USE_CACHE = False
@@ -64,11 +64,13 @@ sample_midi_path2 = './samples/Debussy_Clair_de_lune_tension.mid'
 sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor_tension.mid'
 sample_midi_path4 = './samples/Scott_Lotus_Land_Op_47_No1_tension.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1_tension.midi'
+sample_midi_path6 = './samples/scott_tester.midi'
 
-sample_midi_path_init = sample_midi_path3
+
+sample_midi_path_init = sample_midi_path6
 
 ''' MODEL '''
-model_name = os.environ.get('MODEL_NAME', 'D_Tension_Joker_little_v1')
+model_name = os.environ.get('MODEL_NAME', 'D_Tension_Joker_little_v2')
 cfg = get_model_hparams(model_name)
 if cfg['model_type'] != 'D_Tension_Joker':
     raise ValueError(f'{model_name} is not a D_Tension_Joker model')

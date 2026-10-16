@@ -1421,7 +1421,7 @@ MODELS_PARAMETERS = {
         'model_type': 'D_Base_Joker',
         'description': 'Pitch-only causal decoder baseline; each joker press requests one pitch, with no timing, duration, button, style or harmony conditioning.',
         'train_log': '',
-        'ckpt_file_name': './save_models/D_Base_Joker_little_v1_235_eps_823876_steps_1.9381_loss_2.8586_val_loss_0.492_acc.pth',
+        'ckpt_file_name': './save_models/D_Base_Joker_little_v1_305_eps_1068246_steps_1.5186_loss_2.5752_val_loss_0.5694_acc.pth',
         'seq_len': 512,
         'pad_idx': 128,
         'emb_dim': 512,
@@ -2930,6 +2930,27 @@ MODELS_PARAMETERS = {
 
 #===================================================================================================
 
+# Momentary chord guidance; no key, anticipation, planner or history masking.
+MODELS_PARAMETERS['D_Chord_Joker_little_v1'] = {
+    **MODELS_PARAMETERS['D_Base_Joker_little_v1'],
+    'model_type': 'D_Chord_Joker',
+    'description': 'Frozen base joker with held chroma + anchor chord FiLM and release-to-free generation.',
+    'init_from_ckpt': MODELS_PARAMETERS['D_Base_Joker_little_v1']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/D_Chord_Joker_latest.pth',
+    'dataset_train_path': './Training-Data/giantmidi_full_w_chords_train.pickle',
+    'dataset_val_path': './Training-Data/giantmidi_full_w_chords_test.pickle',
+    'chord_cond_dim': 128,
+    'chord_film_start_frac': 0.5,
+    'chord_film_scale_limit': 0.5,
+    'chord_film_shift_limit': 0.5,
+    'chord_whole_span_prob': 0.5,
+    'chord_validation_seed': 1729,
+    'num_workers': 0,  # Sampling is cheap; spawned workers would copy the large NumPy corpus.
+    'loss_film_reg': 0.01,
+    'learning_rate': 1e-4,
+    'save_every': 20,
+}
+
 # Tension adapts the existing pitch prior without changing its frozen weights.
 MODELS_PARAMETERS['D_Tension_Joker_little_v1'] = {
     **MODELS_PARAMETERS['D_Base_Joker_little_v1'],
@@ -2949,10 +2970,67 @@ MODELS_PARAMETERS['D_Tension_Joker_little_v1'] = {
     'tens_film_scale_limit': 0.5,
     'tens_film_shift_limit': 0.5,
     'tens_p_all_cond': 0.2,
+    'tens_lead_max': 6,
+    'tens_transition_prob': 0.5,
+    # Fixed held-out generation benchmark; paired levels 0..4 and free at CFG 1.
+    'tens_control_pieces': 8,
+    'tens_control_seeds': 2,
+    'tens_control_seed': 314159,
+    'tens_control_primer': 300,
+    'tens_control_notes': 48,
+    'tens_control_settle': 6,
+    'tens_control_temperature': 1.0,
+    'tens_control_guidance': 1.0,
+    'tens_control_nll_tolerance': 0.02,
+    'tens_control_repeat_tolerance': 0.1,
+    'tens_calibration_path': None,
     'home_key_drop_prob': 0.1,
     'loss_film_reg': 0.01,
     'learning_rate': 1e-4,
-    'epochs': None,  # Continue until Ctrl+C; checkpoints save every epoch.
+    'epochs': None,  # Continue until Ctrl+C; latest/control-best save every epoch.
+    'save_every': 15,
+    'tens_max_samples': 0,
+    'tens_max_val_samples': 0,
+    'base_training_overlap': 'unknown',
+}
+
+# Tension adapts the existing pitch prior without changing its frozen weights.
+MODELS_PARAMETERS['D_Tension_Joker_little_v2'] = {
+    **MODELS_PARAMETERS['D_Base_Joker_little_v1'],
+    'model_type': 'D_Tension_Joker',
+    'description': 'Frozen base joker with five latched tension levels and gated home-key FiLM, anticipating tension levels.',
+    'init_from_ckpt': MODELS_PARAMETERS['D_Base_Joker_little_v1']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/D_Tension_Joker_latest_best_control_445129_steps.pth',
+    'dataset_train_path': './Training-Data/giantmidi_key_tension_train',
+    # Validation is a deterministic piece-level subset of this same training file.
+    'dataset_val_path': './Training-Data/giantmidi_key_tension_train',
+    'dataset_test_path': './Training-Data/giantmidi_key_tension_test',
+    'tens_validation_fraction': 0.05,
+    'tens_split_seed': 42,
+    'tens_validation_seed': 1729,
+    'tens_cond_dim': 128,
+    'tens_film_start_frac': 0.5,
+    'tens_film_scale_limit': 0.5,
+    'tens_film_shift_limit': 0.5,
+    'tens_p_all_cond': 0.2,
+    'tens_lead_max': 6,
+    'tens_transition_prob': 0.5,
+    # Fixed held-out generation benchmark; paired levels 0..4 and free at CFG 1.
+    'tens_control_pieces': 8,
+    'tens_control_seeds': 2,
+    'tens_control_seed': 314159,
+    'tens_control_primer': 300,
+    'tens_control_notes': 48,
+    'tens_control_settle': 6,
+    'tens_control_temperature': 1.0,
+    'tens_control_guidance': 1.0,
+    'tens_control_nll_tolerance': 0.02,
+    'tens_control_repeat_tolerance': 0.1,
+    'tens_calibration_path': None,
+    'home_key_drop_prob': 0.1,
+    'loss_film_reg': 0.01,
+    'learning_rate': 1e-4,
+    'epochs': None,  # Continue until Ctrl+C; latest/control-best save every epoch.
     'save_every': 15,
     'tens_max_samples': 0,
     'tens_max_val_samples': 0,
@@ -2964,6 +3042,8 @@ MODELS_PARAMETERS['D_Tension_Joker_tester_v1'] = {
     'ckpt_file_name': './save_models/D_Tension_Joker_little_v1_600_eps_1546373_steps_2.0271_loss_2.131_val_loss_0.4492_acc.pth',
     'tens_max_samples': 128,
     'tens_max_val_samples': 32,
+    'tens_control_pieces': 2,
+    'tens_control_seeds': 1,
     'validate_every': 16,
     'use_logs': False,
 }

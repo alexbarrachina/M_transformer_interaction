@@ -90,6 +90,7 @@ class PianoPerformance:
     velocities: List[int]
     channels: List[int]
     home_key: int = HOME_KEY_UNKNOWN
+    chord_spans_ms: Optional[List[Tuple[float, float]]] = None
 
     def tokens(self) -> Dict[str, List[int]]:
         # The live visualizer and recorder use 32 ms units; offline scoring uses
@@ -148,6 +149,9 @@ def read_tension_performance(path: str, home_override: Optional[str] = None) -> 
     velocities: List[int] = []
     channels: List[int] = []
     active: Dict[Tuple[int, int], Deque[int]] = {}
+    chord_active: Dict[Tuple[int, int], Deque[int]] = {}
+    chord_starts: List[float] = []
+    chord_ends: List[float] = []
     tempo = 500_000
     time_ms = 0.0
     for message in mido.merge_tracks(midi.tracks):
@@ -155,6 +159,16 @@ def read_tension_performance(path: str, home_override: Optional[str] = None) -> 
         if message.type == 'set_tempo':
             tempo = message.tempo
         if message.type not in ('note_on', 'note_off'):
+            continue
+        if annotated and message.channel == 3:
+            key = (message.channel, message.note)
+            if message.type == 'note_on' and message.velocity > 0:
+                chord_active.setdefault(key, deque()).append(len(chord_starts))
+                chord_starts.append(time_ms)
+                chord_ends.append(time_ms + 1.0)
+            elif chord_active.get(key):
+                index = chord_active[key].popleft()
+                chord_ends[index] = max(chord_starts[index] + 1.0, time_ms)
             continue
         if message.channel == 9 or (annotated and message.channel not in (0, 1, 10, 11)):
             continue
@@ -172,11 +186,19 @@ def read_tension_performance(path: str, home_override: Optional[str] = None) -> 
     for pending in active.values():
         for index in pending:
             ends[index] = max(starts[index] + 1.0, time_ms)
+    for pending in chord_active.values():
+        for index in pending:
+            chord_ends[index] = max(chord_starts[index] + 1.0, time_ms)
+    chord_ends_by_start: Dict[float, float] = {}
+    for start, end in zip(chord_starts, chord_ends):
+        chord_ends_by_start[start] = max(chord_ends_by_start.get(start, end), end)
+    chord_spans = sorted(chord_ends_by_start.items()) or None
     # The pickle builder orders exact simultaneous onsets by descending pitch.
     order = sorted(range(len(pitches)), key=lambda index: (starts[index], -pitches[index]))
     return PianoPerformance([pitches[i] for i in order], [starts[i] for i in order],
                             [ends[i] - starts[i] for i in order],
-                            [velocities[i] for i in order], [channels[i] for i in order], home_key)
+                            [velocities[i] for i in order], [channels[i] for i in order],
+                            home_key, chord_spans)
 
 
 class TensionScorer:
@@ -187,24 +209,15 @@ independent perceptual judge. Chords use fixed 500 ms chroma-template frames;
 neither source chord tones nor source local-key/tension annotations are read.
 """
 
-    def __init__(self, analyzer_root: str, calibration_path: Optional[str] = None) -> None:
+    def __init__(self, calibration_path: Optional[str] = None) -> None:
         import hashlib
-        import importlib.util
         import json
         from pathlib import Path
-        import sys
         import numpy as np
         from params import QUALITY_TEMPLATES
+        from . import build_key_tension_dataset as module
 
-        root = Path(analyzer_root).resolve()
-        path = root / 'build_key_tension_dataset.py'
-        if not path.is_file():
-            raise FileNotFoundError(f'Tension evaluator not found: {path}; set --analyzer-root')
-        sys.path.insert(0, str(root))
-        spec = importlib.util.spec_from_file_location('_joker_tension_builder', path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+        root = Path(__file__).resolve().parent
         self.builder = module
         self.calibration = (json.loads(Path(calibration_path).read_text()) if calibration_path
                             else dict(module.DEFAULT_CALIBRATION))
@@ -214,9 +227,11 @@ neither source chord tones nor source local-key/tension annotations are read.
         templates = np.array([[float(pc in pcs) for pc in range(12)] for _, pcs in self.chords])
         self.templates = templates / np.linalg.norm(templates, axis=1, keepdims=True)
         self.provenance = {
-            'calibration': self.calibration, 'chord_frame_ms': self.frame_ms,
+            'calibration': self.calibration, 'fallback_chord_frame_ms': self.frame_ms,
+            'chord_windows': 'source chord timing only; chord tones inferred from performed notes',
             'analyzer_sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-                               for name in ('build_key_tension_dataset.py', 'key_track.py', 'key_detect.py')},
+                               for name in ('tension_joker.py', 'build_key_tension_dataset.py',
+                                            'key_track.py', 'key_detect.py', 'key_benchmark.py')},
             'measurement': 'corpus-scale proxy; generated chroma-template chords and recomputed local keys',
         }
 
@@ -236,8 +251,13 @@ neither source chord tones nor source local-key/tension annotations are read.
         reader = builder.ChromaReader(notes)
         end = max(note.end for note in notes)
         spans = []
-        for start in range(notes[0].start, end, self.frame_ms):
-            stop = min(end, start + self.frame_ms)
+        windows = (performance.chord_spans_ms if performance.chord_spans_ms else
+                   [(start, min(end, start + self.frame_ms))
+                    for start in range(notes[0].start, end, self.frame_ms)])
+        for start, stop in windows:
+            start, stop = round(start), round(stop)
+            if start >= end:
+                break
             chroma = reader.chroma(start, stop)
             if chroma.sum() <= 0:
                 continue
@@ -259,3 +279,81 @@ neither source chord tones nor source local-key/tension annotations are read.
         return {'levels': np.asarray(levels)[frame_indices].tolist(),
                 'composite': composite[frame_indices].tolist(),
                 'frame_indicators': rows}
+
+
+def validate_tension_controls(model, performances: List[PianoPerformance], scorer: TensionScorer,
+                              cfg: dict, device) -> Dict[str, object]:
+    """Paired free-running targets and NULL; scoring never reads the corpus labels."""
+    import torch
+
+    primer, notes = cfg['tens_control_primer'], cfg['tens_control_notes']
+    seeds, settle = cfg['tens_control_seeds'], cfg['tens_control_settle']
+    if (not performances or seeds < 1 or not 1 <= primer <= model.max_seq_len
+            or not 0 <= settle < notes or notes < 4
+            or cfg['tens_control_temperature'] <= 0 or cfg['tens_control_guidance'] < 0):
+        raise ValueError('Invalid controllability validation settings')
+    levels, continuations = [], []
+    model.eval()
+    with torch.inference_mode():
+        for index, source in enumerate(performances):
+            if len(source.pitches) < primer + notes:
+                raise ValueError('Controllability excerpt has insufficient timing events')
+            # Batch the five levels and free, with identical sampling noise per seed.
+            pitches = torch.zeros((seeds, 6, primer + notes), dtype=torch.long, device=device)
+            pitches[:, :, :primer] = torch.tensor(source.pitches[:primer], device=device)
+            targets = torch.zeros_like(pitches)
+            targets[:, :, primer:] = torch.tensor([1, 2, 3, 4, 5, 0], device=device)[None, :, None]
+            pitches, targets = pitches.flatten(0, 1), targets.flatten(0, 1)
+            home = torch.full((seeds * 6,), source.home_key, dtype=torch.long, device=device)
+            generator = torch.Generator(device=device).manual_seed(cfg['tens_control_seed'] + index)
+            # Each generated pitch becomes the next input, so time steps are sequential.
+            for position in range(primer, primer + notes):
+                start = max(0, position - model.max_seq_len)
+                logits = model.next_pitch_logits(
+                    {'pitch': pitches[:, start:position + 1], 'home_key': home,
+                     'tension_target': targets[:, start:position + 1]}, cfg['tens_control_guidance'])
+                noise = torch.empty((seeds, 1, logits.size(-1)), device=device).exponential_(generator=generator)
+                sampled = (logits.reshape(seeds, 6, -1) / cfg['tens_control_temperature']
+                           - noise.log()).argmax(-1)
+                pitches[:, position] = sampled.flatten()
+            outputs = pitches.cpu().tolist()
+            measured = [scorer.score(source, output)['levels'][primer:] for output in outputs]
+            levels.append(torch.tensor(measured).reshape(seeds, 6, notes))
+            continuations.append(pitches[:, primer:].cpu().reshape(seeds, 6, notes))
+
+    realized = torch.cat(levels)
+    generated = torch.cat(continuations)
+    requested = torch.arange(NUM_TENSION_LEVELS)[None, :, None]
+    held = realized[:, :5, settle:]
+    means = held.float().mean(-1)
+    # Average tied ranks; compute per primer/seed so different home keys cannot confound ordering.
+    ranks = ((means[:, :, None] > means[:, None, :]).sum(-1)
+             + ((means[:, :, None] == means[:, None, :]).sum(-1) - 1) / 2)
+    centered = ranks - ranks.mean(-1, keepdim=True)
+    denominator = (centered.square().sum(-1) * 10).sqrt()
+    rho = ((centered * torch.arange(-2, 3)).sum(-1) / denominator.clamp_min(1e-12)).mean().item()
+    within = ((held - requested).abs() <= 1).float().mean().item()
+    repeats = (generated[:, :, 1:] == generated[:, :, :-1]).float().mean(-1)
+    grams = generated.unfold(-1, 4, 1)
+    repeated_grams = torch.tensor([1 - len(torch.unique(row, dim=0)) / row.size(0)
+                                   for row in grams.flatten(0, 1)]).reshape(-1, 6)
+    close = (realized[:, :5] - requested).abs() <= 1
+    settled = close.unfold(-1, 3, 1).all(-1)[:, :, :settle + 1].any(-1)
+    confusion = torch.bincount((requested.expand_as(held) * 5 + held).flatten(), minlength=25).reshape(5, 5)
+    result = {
+        'control_score': max(0.0, rho) * within,
+        'control_spearman': rho,
+        'control_within_one': within,
+        'control_mae': (held - requested).abs().float().mean().item(),
+        'control_span': (means[:, 4] - means[:, 0]).mean().item(),
+        'control_settled_fraction': settled.float().mean().item(),
+        'control_repeat_rate': repeats[:, :5].mean().item(),
+        'control_free_repeat_rate': repeats[:, 5].mean().item(),
+        'control_repeated_4gram_rate': repeated_grams[:, :5].mean().item(),
+        'control_free_repeated_4gram_rate': repeated_grams[:, 5].mean().item(),
+        'control_confusion_matrix': confusion.tolist(),
+        'control_cases': means.size(0),
+        'control_acceptance_met': rho >= 0.6 and within >= 0.7,
+    }
+    result.update({f'control_mean_level_{level}': value for level, value in enumerate(means.mean(0).tolist())})
+    return result
