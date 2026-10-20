@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -)",
+      "Bash(python /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/8eb53874-1bb7-4d07-86dd-052d800010ed/scratchpad/sweep_pdf_filter.py)",
+      "Bash(python /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/8eb53874-1bb7-4d07-86dd-052d800010ed/scratchpad/sweep_chordal.py)",
+      "Bash(python -m py_compile tension_extractor.py train_style_tensions.py interaction_buttons_style_tensions.py interaction_tensions_tester.py models.py)",
+      "Bash(python /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/8eb53874-1bb7-4d07-86dd-052d800010ed/scratchpad/test_tension_stability.py)",
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile tension_extractor.py train_style_tensions.py interaction_buttons_style_tensions.py interaction_tensions_tester.py models.py visualizer.py)",
+      "Bash(python -m py_compile tension_extractor.py train_style_tensions.py interaction_buttons_style_tensions.py x_transformer.py models.py)",
+      "Bash(python -m py_compile interaction_buttons_style_tensions.py tension_extractor.py x_transformer.py)",
+      "Bash(python -m py_compile tension_extractor.py train_style_tensions.py interaction_buttons_style_tensions.py interaction_tensions_tester.py x_transformer.py models.py visualizer.py)",
+      "Bash(python -m py_compile x_transformer.py train_style_tensions.py models.py)",
+      "Bash(pdftotext -layout \"AIMC26 Real-Time Conditioning Strategies for Shared Agency in AI-Mediated Piano Improvisation.pdf\" /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/2d187593-1a58-49cf-9bb9-722fa5824ac8/scratchpad/aimc26.txt)",
+      "Bash(pdftotext -layout \"interface/Interface insights.pdf\" /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/2d187593-1a58-49cf-9bb9-722fa5824ac8/scratchpad/insights.txt)",
+      "Bash(pdftotext -layout \"interface/xinxetofon interface.pdf\" /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/2d187593-1a58-49cf-9bb9-722fa5824ac8/scratchpad/xinxetofon.txt)",
+      "Bash(python3 -)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Volumes/DADES/Deep/Symbolic/monster_genie/x_transformer.py'\\).read\\(\\)\\); print\\('parses OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Volumes/DADES/Deep/Symbolic/monster_genie/train_style_harm.py'\\).read\\(\\)\\); print\\('train_style_harm.py parses OK'\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import torch; print\\('torch', torch.__version__\\)\")",
+      "Bash(/Users/alexbarrachina/anaconda3/envs/tgenie/bin/python -c \"import torch; print\\('torch', torch.__version__\\)\")",
+      "Bash(/Users/alexbarrachina/anaconda3/envs/tgenie/bin/python /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/2be5a433-5567-4589-8bfa-01a7479d3b50/scratchpad/smoke_test_move.py)",
+      "Bash(/Users/alexbarrachina/anaconda3/envs/tgenie/bin/python -c ' *)",
+      "Bash(/Users/alexbarrachina/anaconda3/envs/tgenie/bin/python -m py_compile /Volumes/DADES/Deep/Symbolic/monster_genie/train_style_harm.py /Volumes/DADES/Deep/Symbolic/monster_genie/x_transformer.py /Volumes/DADES/Deep/Symbolic/monster_genie/models.py /Volumes/DADES/Deep/Symbolic/monster_genie/model_loader.py /Volumes/DADES/Deep/Symbolic/monster_genie/harmonic_step.py /Volumes/DADES/Deep/Symbolic/monster_genie/interaction_buttons_style_tonnetz.py)",
+      "Bash(/Users/alexbarrachina/anaconda3/envs/tgenie/bin/python -m py_compile /Volumes/DADES/Deep/Symbolic/monster_genie/interaction_buttons_style_move.py)",
+      "Bash(/Users/alexbarrachina/anaconda3/envs/tgenie/bin/python /private/tmp/claude-501/-Volumes-DADES-Deep-Symbolic-monster-genie/2be5a433-5567-4589-8bfa-01a7479d3b50/scratchpad/smoke_test_move_interaction.py)",
+      "Bash(python3 -m py_compile roman_movement.py midis2pickles.py params.py)",
+      "Bash(python3 roman_movement.py)",
+      "Bash(python3 -m py_compile roman_movement.py midis2pickles.py)",
+      "Bash(python3 midis2pickles.py)",
+      "Bash(grep -vE \"Pickle File|Loading|Creating|Task complete|Randomizing|Processing|^ *$|^=+$\")",
+      "Bash(python3 -m py_compile midis2pickles.py roman_movement.py)",
+      "Bash(sed -n '1,200p' /Users/alexbarrachina/anaconda3/envs/tgenie/lib/python3.9/site-packages/frechet_music_distance/models/feature_extractor.py)",
+      "Bash(jobs -l)",
+      "Read(//Users/alexbarrachina/anaconda3/envs/tgenie/lib/python3.9/site-packages/frechet_music_distance/gaussian_estimators/**)",
+      "Bash(ps -p 21779 -o pid,etime,%cpu,%mem,command)",
+      "Bash(kill 21779)",
+      "Bash(grep -rn \"class DatasetLoader\\\\|def load_dataset_async\\\\|def load_dataset\\\\b\\\\|glob\\\\|listdir\\\\|os.walk\\\\|sorted\" /Users/alexbarrachina/anaconda3/envs/tgenie/lib/python3.9/site-packages/frechet_music_distance/dataset_loaders/*.py)"
+    ]
+  }
+}

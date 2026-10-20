@@ -1,136 +1,109 @@
-"""Momentary channel-5 performer controls; no harmony analysis."""
+"""Select fixed chord suggestions with held keyboard/MIDI controls; no harmony analysis."""
 
-import json
 from collections import deque
-from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, NamedTuple, Optional, Tuple
 
 import torch
 from torch import Tensor
 
 
-@dataclass(frozen=True)
-class ChordMapping:
+class Chord(NamedTuple):
     name: str
-    pitch_classes: Tuple[int, ...]
-    anchor_pc: int
-    key: str
-    midi_note: int = -1
-    pedal_cc: int = -1
-
-
-# A C-major example bank, configurable independently of the model and primer.
-DEFAULT_CHORDS = (
-    ChordMapping('C', (0, 4, 7), 0, '1', 36, 20),
-    ChordMapping('F', (5, 9, 0), 5, '2', 37, 21),
-    ChordMapping('G7', (7, 11, 2, 5), 7, '3', 38, 22),
-    ChordMapping('Am', (9, 0, 4), 9, '4', 39, 23),
-    ChordMapping('D7', (2, 6, 9, 0), 2, '5', 40, 24),
-)
-
-
-def read_chord_mappings(path: Optional[str] = None) -> List[ChordMapping]:
-    """Optional JSON list with the same fields as ChordMapping; pitches are PCs 0..11."""
-    if path is None:
-        return list(DEFAULT_CHORDS)
-    with open(path) as source:
-        rows = json.load(source)
-    return [ChordMapping(name=row['name'], pitch_classes=tuple(row['pitch_classes']),
-                         anchor_pc=row['anchor_pc'], key=row.get('key', ''),
-                         midi_note=row.get('midi_note', -1), pedal_cc=row.get('pedal_cc', -1))
-            for row in rows]
+    root_pc: int
+    intervals: Tuple[int, ...]
 
 
 class ChordControls:
-    """Last-held control wins; all-release clears control history, never pitches."""
+    """The last pressed chord key wins; releasing all chord keys clears FiLM."""
 
-    def __init__(self, primer_length: int, context_length: int,
-                 mappings: Optional[List[ChordMapping]] = None) -> None:
+    def __init__(self, primer_length: int, context_length: int, chords: Dict[str, Chord],
+                 midi_chords: Optional[Dict[int, str]] = None) -> None:
         if context_length < 1:
             raise ValueError('context_length must be positive')
         self.context_length = context_length
-        self.mappings = list(DEFAULT_CHORDS) if mappings is None else mappings
-        self.keys: Dict[str, int] = {}
-        self.midi_notes: Dict[int, int] = {}
-        self.pedals: Dict[int, int] = {}
-        self.chroma = torch.zeros((len(self.mappings) + 1, 12), dtype=torch.bool)
-        self.anchors = torch.zeros(len(self.mappings) + 1, dtype=torch.long)
-        for index, chord in enumerate(self.mappings, 1):
-            if (not chord.pitch_classes or any(pc < 0 or pc > 11 for pc in chord.pitch_classes)
-                    or chord.anchor_pc not in chord.pitch_classes):
-                raise ValueError('Each chord requires pitch classes 0..11 and an anchor among its tones')
-            self.chroma[index, list(chord.pitch_classes)] = True
-            self.anchors[index] = chord.anchor_pc
-            if chord.key:
-                if chord.key in self.keys:
-                    raise ValueError('Chord keyboard mappings must be unique')
-                self.keys[chord.key] = index
-            for value, mapping in ((chord.midi_note, self.midi_notes), (chord.pedal_cc, self.pedals)):
-                if value != -1:
-                    if not 0 <= value <= 127 or value in mapping:
-                        raise ValueError('MIDI chord mappings must be unique values in 0..127')
-                    mapping[value] = index
-        self.held: Dict[str, int] = {}
-        self.history: Deque[int] = deque(maxlen=context_length)
+        self.chords = chords
+        self.midi_chords = dict(midi_chords or {})
+        if any(not 0 <= note <= 127 or key not in chords for note, key in self.midi_chords.items()):
+            raise ValueError('MIDI chord mappings require notes 0..127 and configured chord keys')
+        self.held: Dict[str, str] = {}
+        self.history: Deque[Tuple[Tensor, int, bool]] = deque(maxlen=context_length)
+        self.chord_name = ''
+        self.chord_notes: Tuple[int, ...] = ()
+        self.chroma = torch.zeros(12, dtype=torch.bool)
+        self.anchor_pc = 0
+        self.active = False
         self.reset(primer_length)
 
-    @property
-    def target(self) -> int:
-        return next(reversed(self.held.values()), 0)
-
     def reset(self, primer_length: int) -> None:
+        empty = (torch.zeros(12, dtype=torch.bool), 0, False)
+        self.history = deque([empty] * min(primer_length, self.context_length), maxlen=self.context_length)
+        self.release()
+
+    def release(self) -> None:
         self.held.clear()
-        self.history = deque([0] * min(primer_length, self.context_length), maxlen=self.context_length)
+        self.chord_name = ''
+        self.chord_notes = ()
+        self.chroma.zero_()
+        self.anchor_pc = 0
+        self.active = False
+        # Zeroing only the newest gate cannot erase earlier attention effects.
+        empty = (torch.zeros(12, dtype=torch.bool), 0, False)
+        self.history = deque([empty] * len(self.history), maxlen=self.context_length)
 
-    def press(self, source: str, chord: int) -> None:
-        # Auto-repeat and repeated pedal values must not change priority.
-        if source not in self.held:
-            self.held[source] = chord
-
-    def release(self, source: str) -> None:
-        self.held.pop(source, None)
-        if not self.held:
-            self.history = deque([0] * len(self.history), maxlen=self.context_length)
-
-    def handle_key(self, key: str, pressed: bool) -> bool:
-        chord = self.keys.get(key)
-        if chord is None:
+    def handle_key(self, key: str, pressed: bool, shift: bool = False) -> bool:
+        if key not in self.chords:
             return False
-        if pressed:
-            self.press('key:' + key, chord)
-        else:
-            self.release('key:' + key)
+        selected = 'shift+' + key if shift and 'shift+' + key in self.chords else key
+        # Remember the physical key so releasing Shift first still releases the chord.
+        self._handle_control('key:' + key, selected, pressed)
         return True
 
-    def handle_midi(self, status: int, number: int, value: int) -> bool:
+    def handle_midi(self, status: int, note: int, velocity: int) -> bool:
         kind, channel = status & 0xF0, status & 0x0F
-        if kind in (0x80, 0x90):
-            chord = self.midi_notes.get(number)
-            pressed = kind == 0x90 and value > 0
-            source = f'note:{channel}:{number}'
-        elif kind == 0xB0:
-            chord = self.pedals.get(number)
-            pressed = value >= 64
-            source = f'cc:{channel}:{number}'
-        else:
+        if kind not in (0x80, 0x90) or note not in self.midi_chords:
             return False
-        if chord is None:
-            return False
-        if pressed:
-            self.press(source, chord)
-        else:
-            self.release(source)
+        self._handle_control(f'midi:{channel}:{note}', self.midi_chords[note],
+                             kind == 0x90 and velocity > 0)
         return True
+
+    def release_keyboard(self) -> None:
+        self.held = {source: chord for source, chord in self.held.items() if not source.startswith('key:')}
+        self._select_held()
+
+    def _handle_control(self, source: str, selected: str, pressed: bool) -> None:
+        if pressed:
+            if source in self.held:
+                return
+            self.held[source] = selected
+        else:
+            self.held.pop(source, None)
+        self._select_held()
+
+    def _select_held(self) -> None:
+        if not self.held:
+            self.release()
+            return
+        selected = list(self.held.values())[-1]
+        chord = self.chords[selected]
+        self.chord_name = chord.name
+        self.chord_notes = tuple(60 + chord.root_pc + interval for interval in chord.intervals)
+        self.chroma.zero_()
+        self.chroma[[note % 12 for note in self.chord_notes]] = True
+        self.anchor_pc = chord.root_pc
+        self.active = True
 
     def next_tokens(self, device: torch.device) -> Dict[str, Tensor]:
-        ids = torch.tensor([list(self.history) + [self.target]], dtype=torch.long)
-        return {'chord_chroma': self.chroma[ids].to(device),
-                'chord_anchor_pc': self.anchors[ids].to(device),
-                'chord_active': (ids != 0).to(device)}
+        states = list(self.history) + [(self.chroma, self.anchor_pc, self.active)]
+        return {'chord_chroma': torch.stack([state[0] for state in states]).unsqueeze(0).to(device),
+                'chord_anchor_pc': torch.tensor([[state[1] for state in states]], device=device),
+                'chord_active': torch.tensor([[state[2] for state in states]], device=device)}
 
     def commit_note(self) -> None:
-        self.history.append(self.target)
+        self.history.append((self.chroma.clone(), self.anchor_pc, self.active))
 
     def status(self) -> str:
-        return ('Harmony: free' if self.target == 0
-                else f'Harmony suggestion: {self.mappings[self.target - 1].name} (held)')
+        names = ('C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B')
+        note_text = ' '.join(f'{names[note % 12]}{note // 12 - 1}' for note in self.chord_notes) or 'none'
+        if self.active:
+            return f'Harmony: {self.chord_name}\nChord notes: {note_text}'
+        return 'Harmony: free\nChord notes: none'

@@ -9981,6 +9981,9 @@ class Decoder_no_conditioning(nn.Module):
         #nn.init.kaiming_normal_(self.button_emb.weight)
         #nn.init.kaiming_normal_(self.input_proj.weight)
 
+    def pitch_embeddings(self, past_tokens: Dict[str, Tensor]) -> Tensor:
+        return self.pitch_emb(past_tokens['pitch'])
+
     def forward(
         self,
         past_tokens: Dict[str, Tensor],  # Contains past dtime, vel, pitch, dur, button
@@ -9998,7 +10001,7 @@ class Decoder_no_conditioning(nn.Module):
         """
         # One-hot encode pitch for concatenation
         #pitch_onehot = F.one_hot(past_tokens['pitch'], VOCAB_SIZE_PITCH).float()
-        x = self.pitch_emb(past_tokens['pitch'])
+        x = self.pitch_embeddings(past_tokens)
         #dtime = self.dtime_emb(past_tokens['dtime'])
         # Handle button, dtime, dur as continuous values
         #dtime= past_tokens['dtime'].float().unsqueeze(-1)
@@ -14188,6 +14191,7 @@ class Decoder_chord_joker(Decoder_no_conditioning):
 
     def __init__(self, *, chord_cond_dim: int = 128, chord_film_start_frac: float = 0.5,
                  chord_film_scale_limit: float = 0.5, chord_film_shift_limit: float = 0.5,
+                 chord_history_mask_enabled: bool = False,
                  **kwargs) -> None:
         super().__init__(**kwargs)
         if not 0.0 <= chord_film_start_frac < 1.0:
@@ -14205,7 +14209,23 @@ class Decoder_chord_joker(Decoder_no_conditioning):
                 mod_inds.append(index)
         self.harm_film = HarmonyFiLM(chord_cond_dim, self.emb_dim, mod_inds,
                                      chord_film_scale_limit, chord_film_shift_limit)
+        # Input-only parameter: the frozen pitch vocabulary/output head stay intact.
+        self.history_mask_embedding = (nn.Parameter(torch.zeros(self.emb_dim))
+                                       if chord_history_mask_enabled else None)
         self.can_cache_kv = False
+
+    def pitch_embeddings(self, past_tokens: Dict[str, Tensor]) -> Tensor:
+        x = super().pitch_embeddings(past_tokens)
+        history_mask = past_tokens.get('history_mask')
+        if self.training and history_mask is not None:
+            if self.history_mask_embedding is None:
+                raise ValueError('History masking requires a learned mask embedding')
+            if history_mask.shape != past_tokens['pitch'].shape or history_mask.dtype != torch.bool:
+                raise ValueError('history_mask must be boolean and match the input pitches')
+            # Replace pitches before the first attention layer, so their information
+            # cannot leak through intermediate states into later visible notes.
+            x = torch.where(history_mask.unsqueeze(-1), self.history_mask_embedding, x)
+        return x
 
     def train(self, mode: bool = True) -> 'Decoder_chord_joker':
         super().train(mode)
@@ -14231,23 +14251,28 @@ class Decoder_chord_joker(Decoder_no_conditioning):
 
 
 class D_Chord_Joker(D_Base):
-    """Chord controls describe target notes; performed pitches remain the full history."""
+    """Chord controls describe targets; optional history masks affect training inputs only."""
 
     def pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
         pitch = note_tokens['pitch']
         if pitch.ndim != 2 or not 2 <= pitch.size(1) <= self.max_seq_len + 1:
             raise ValueError('Expected 1..max_seq_len past pitches plus a target placeholder')
+        past_tokens = {'pitch': pitch[:, :-1]}
+        if self.training and 'history_mask' in note_tokens:
+            if note_tokens['history_mask'].shape != pitch.shape:
+                raise ValueError('history_mask must match pitch [batch, time]')
+            past_tokens['history_mask'] = note_tokens['history_mask'][:, :-1]
         chroma = note_tokens.get('chord_chroma')
         anchor = note_tokens.get('chord_anchor_pc')
         active = note_tokens.get('chord_active')
         if chroma is None and anchor is None and active is None:
-            return self.decoder({'pitch': pitch[:, :-1]})
+            return self.decoder(past_tokens)
         if chroma is None or anchor is None or active is None:
             raise ValueError('Supply all three chord inputs, or only pitch for free generation')
         if (anchor.shape != pitch.shape or active.shape != pitch.shape
                 or chroma.shape != (*pitch.shape, 12)):
             raise ValueError('Chord inputs must match pitch [batch, time], with chroma [batch, time, 12]')
-        return self.decoder({'pitch': pitch[:, :-1]}, chord_chroma=chroma[:, 1:],
+        return self.decoder(past_tokens, chord_chroma=chroma[:, 1:],
                             chord_anchor_pc=anchor[:, 1:], chord_active=active[:, 1:])
 
     def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
@@ -14257,6 +14282,10 @@ class D_Chord_Joker(D_Base):
         labels = note_tokens['pitch'][:, 1:]
         active = note_tokens['chord_active'][:, 1:].bool() & (labels != self.ignore_index)
         weights = active.float()
+        if 'chord_weight' in note_tokens:
+            # Optional per-note weights from the training sampler: notes right after a chord
+            # change count more. Loss and accuracy become weighted means; validation has none.
+            weights = weights * note_tokens['chord_weight'][:, 1:].float()
         count = weights.sum().clamp_min(1.0)
         ce = F.cross_entropy(logits.transpose(1, 2), labels, ignore_index=self.ignore_index,
                              reduction='none')
@@ -14278,6 +14307,9 @@ class D_Chord_Joker(D_Base):
         releases = (~active.bool()).long().cumsum(dim=1)
         current_episode = active.bool() & (releases == releases[:, -1:])
         controls = dict(note_tokens)
+        # Generation always uses actual pitches, even if a caller passes a
+        # training batch while the module is still in train mode.
+        controls.pop('history_mask', None)
         controls['chord_active'] = current_episode
         return self.pitch_logits(controls)[:, -1]
 

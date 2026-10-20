@@ -2951,6 +2951,41 @@ MODELS_PARAMETERS['D_Chord_Joker_little_v1'] = {
     'save_every': 20,
 }
 
+# Step 2 comparison: identical base/adapter initialization, separate checkpoints.
+# All validation and performance still use full available pitch history.
+MODELS_PARAMETERS['D_Chord_Joker_full_history_v1'] = {
+    **MODELS_PARAMETERS['D_Chord_Joker_little_v1'],
+    'description': 'Full-history control for the mixed-history chord adapter experiment.',
+    'ckpt_file_name': './save_models/D_Chord_Joker_full_history_latest.pth',
+    'chord_training_seed': 42,
+    'chord_history_mode': 'full',
+    'chord_history_mask_enabled': True,
+    'chord_short_history_lengths': (64, 128, 256),
+    'chord_mask_span': (8, 32),
+}
+MODELS_PARAMETERS['D_Chord_Joker_mixed_history_v1'] = {
+    **MODELS_PARAMETERS['D_Chord_Joker_full_history_v1'],
+    'description': 'Chord adapter trained with 50% full, 25% shortened, 25% masked history.',
+    'ckpt_file_name': './save_models/D_Chord_Joker_mixed_history_latest.pth',
+    'chord_history_mode': 'mixed',
+}
+
+# Steps 2+3 of docs/D_Chord_Joker_steering_plan.md.
+# Step 2: train and validate only on pieces the frozen base never saw (filter_unseen_pickles.py),
+# so the chord is real information instead of something the base already knows by heart.
+# Step 3: 60 % of training windows press the chord at a real chord change, and notes right after
+# a change weigh up to 1 + 4 = 5x in the loss, fading over ~3 notes. Validation stays unweighted.
+MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'] = {
+    **MODELS_PARAMETERS['D_Chord_Joker_little_v1'],
+    'description': 'Chord adapter trained on base-unseen pieces with onset-centred windows and onset loss weights.',
+    'ckpt_file_name': './save_models/D_Chord_Joker_unseen_onset_latest_best.pth',
+    'dataset_train_path': './Training-Data/giantmidi_full_w_chords_unseen_train.pickle',
+    'dataset_val_path': './Training-Data/giantmidi_full_w_chords_unseen_test.pickle',
+    'chord_onset_prob': 0.6,
+    'chord_onset_weight': 4.0,
+    'chord_onset_tau': 3.0,
+}
+
 # Tension adapts the existing pitch prior without changing its frozen weights.
 MODELS_PARAMETERS['D_Tension_Joker_little_v1'] = {
     **MODELS_PARAMETERS['D_Base_Joker_little_v1'],

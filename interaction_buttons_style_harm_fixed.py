@@ -70,8 +70,8 @@ JOKER_MAX_INTERVAL_MS = 200.0  # max ms between consecutive notes to count as "f
 TEMPERATURE = 1 #0.0001
 
 ''' HARMONY INFERENCE PARAMS '''
-HARM_CFG_WEIGHT = 2.0# 1.0          # classifier-free guidance strength on harmony (1.0 = off)
-HARM_PC_BIAS = 3.0 #0.0             # soft pitch-class logit bias toward chord tones (0.0 = off)
+HARM_CFG_WEIGHT = 2.0              # classifier-free guidance strength on harmony (1.0 = off)
+HARM_PC_BIAS = 3.0                 # soft pitch-class logit bias toward chord tones (0.0 = off)
 HARM_MOVE_WEIGHT = 4.0         # movement-compatibility weight in constrained chord planning. Reduces/increases the number of possible chords.
 HARM_PLAN_HIST = 32            # pitch-history length fed to the chord planner
 HARM_DECAY_STEP = 1.0 / 15.0   # transition_phase decay per generated note (harmony release span ~30 notes); intensity stays binary 1.0 while active

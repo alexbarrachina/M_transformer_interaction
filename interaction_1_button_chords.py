@@ -1,13 +1,13 @@
-"""One-button performance with held chord suggestions.
+"""Joker performance with fixed chord suggestions for each primer.
 
-Defaults: space or MIDI note 48 generates; hold 1..5, MIDI notes 36..40,
-or CC pedals 20..24 for C, F, G7, Am, D7. Release all chord controls for free
-generation. R / MIDI 30 resets; S / MIDI 31 saves; Escape exits.
-
---controls accepts a JSON list of mappings, for example:
-[{"name":"C", "pitch_classes":[0,4,7], "anchor_pc":0,
-  "key":"1", "midi_note":36, "pedal_cc":20}]
-The bank is explicit and can match any primer; the model receives no key.
+Every MIDI key and Space generate joker notes. Hold number keys to condition
+on the primer's fixed chords: 1 tonic, 2 predominant, 4 subdominant,
+5 dominant, 6 submediant, 7 subtonic. Shift+2 selects V/V; Satie also has
+Shift+5 for a major dominant. The last pressed chord key wins; releasing
+all chord keys returns to free generation. Chords take effect immediately.
+The visualizer shows chord-note names and highlights the active pitch classes.
+R resets; S saves; Escape exits. The model receives no key.
+Optional --midi-chords mappings reserve selected MIDI notes for chord controls.
 """
 
 import argparse
@@ -19,10 +19,74 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from harmony.chord_joker import ChordControls, read_chord_mappings
+from harmony.chord_joker import Chord, ChordControls
 from midiUtils import dict_to_song, midi_to_dict, ms_SONG_to_MIDI_Converter
 from model_loader import load_model
 from models import get_model_hparams
+
+
+# Get sample seed MIDI path.
+sample_midi_path1 = './samples/Bach_Prelude_and_Fugue_in_C_major.mid'
+sample_midi_path2 = './samples/clairTester_to_end.midi'
+sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
+sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
+sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
+
+sample_midi_path_init = sample_midi_path3
+sample_midi_paths = [sample_midi_path1, sample_midi_path2, sample_midi_path3,
+                     sample_midi_path4, sample_midi_path5]
+
+# Core chords follow interaction_buttons_style_harm_fixed.py and docs/pieces.
+# Subtonic and secondary-dominant entries extend the performance palette;
+# bVII in major is borrowed, rather than a claim about the original score.
+FIXED_CHORDS: Dict[int, Dict[str, Chord]] = {
+    0: {  # Bach Prelude in C major
+        '1': Chord('C (I)', 0, (0, 4, 7)),
+        '2': Chord('Dm7 (ii7)', 2, (0, 3, 7, 10)),
+        '4': Chord('F (IV)', 5, (0, 4, 7)),
+        '5': Chord('G7 (V7)', 7, (0, 4, 7, 10)),
+        '6': Chord('Am (vi)', 9, (0, 3, 7)),
+        '7': Chord('Bb (bVII)', 10, (0, 4, 7)),
+        'shift+2': Chord('D7 (V/V)', 2, (0, 4, 7, 10)),
+    },
+    1: {  # Debussy Clair de lune in Db major
+        '1': Chord('Db (I)', 1, (0, 4, 7)),
+        '2': Chord('Ebm7 (ii7)', 3, (0, 3, 7, 10)),
+        '4': Chord('Gbmaj7 (IVmaj7)', 6, (0, 4, 7, 11)),
+        '5': Chord('Ab7 (V7)', 8, (0, 4, 7, 10)),
+        '6': Chord('Bbm (vi)', 10, (0, 3, 7)),
+        '7': Chord('Cb (bVII)', 11, (0, 4, 7)),
+        'shift+2': Chord('Eb7 (V/V)', 3, (0, 4, 7, 10)),
+    },
+    2: {  # Chopin Nocturne Op.9 No.1 in Bb minor (the docs cover No.2)
+        '1': Chord('Bbm (i)', 10, (0, 3, 7)),
+        '2': Chord('Cm7b5 (ii half-dim7)', 0, (0, 3, 6, 10)),
+        '4': Chord('Ebm (iv)', 3, (0, 3, 7)),
+        '5': Chord('F7 (V7)', 5, (0, 4, 7, 10)),
+        '6': Chord('Gb (VI)', 6, (0, 4, 7)),
+        '7': Chord('Ab (VII)', 8, (0, 4, 7)),
+        'shift+2': Chord('C7 (V/V)', 0, (0, 4, 7, 10)),
+    },
+    3: {  # Cyril Scott Lotus Land in Eb minor
+        '1': Chord('Ebm7 (i7)', 3, (0, 3, 7, 10)),
+        '2': Chord('Fm7b5 (ii half-dim7)', 5, (0, 3, 6, 10)),
+        '4': Chord('Abm7 (iv7)', 8, (0, 3, 7, 10)),
+        '5': Chord('Bb7 (V7)', 10, (0, 4, 7, 10)),
+        '6': Chord('Cbmaj7 (VImaj7)', 11, (0, 4, 7, 11)),
+        '7': Chord('Db (VII)', 1, (0, 4, 7)),
+        'shift+2': Chord('F7 (V/V)', 5, (0, 4, 7, 10)),
+    },
+    4: {  # Satie Gymnopedie No.1 in D major, retaining its modal v7
+        '1': Chord('Dmaj7 (Imaj7)', 2, (0, 4, 7, 11)),
+        '2': Chord('Em7 (ii7)', 4, (0, 3, 7, 10)),
+        '4': Chord('Gmaj7 (IVmaj7)', 7, (0, 4, 7, 11)),
+        '5': Chord('Am7 (v7)', 9, (0, 3, 7, 10)),
+        '6': Chord('Bm7 (vi7)', 11, (0, 3, 7, 10)),
+        '7': Chord('Cmaj7 (bVIImaj7)', 0, (0, 4, 7, 11)),
+        'shift+2': Chord('E7 (V/V)', 4, (0, 4, 7, 10)),
+        'shift+5': Chord('A7 (V7)', 9, (0, 4, 7, 10)),
+    },
+}
 
 
 def read_primer(path: str, length: int) -> Dict[str, List[int]]:
@@ -47,18 +111,23 @@ def read_primer(path: str, length: int) -> Dict[str, List[int]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--model', default='D_Chord_Joker_little_v1')
+    parser.add_argument('--model', default='D_Chord_Joker_unseen_onset_v1')
     parser.add_argument('--checkpoint', help='Trained chord-adapter checkpoint; defaults to the preset latest')
-    parser.add_argument('--primer', default=os.environ.get('PRIMER_MIDI', './samples/Bach_Prelude_and_Fugue_in_C_major.mid'))
+    parser.add_argument('--primer', default=os.environ.get('PRIMER_MIDI', sample_midi_path_init))
     parser.add_argument('--context-length', type=int, default=300)
-    parser.add_argument('--controls', help='JSON list of explicit chord mappings (see example above)')
-    parser.add_argument('--trigger-note', type=int, default=48)
     parser.add_argument('--midi-port', type=int, default=0)
+    parser.add_argument('--midi-chords', default='',
+                        help='Optional MIDI note:chord-key pairs, e.g. 60:1,62:2,67:5,74:shift+2')
     parser.add_argument('--soundfont', default='./piano.sf2')
     parser.add_argument('--output', default='./out/interactive_chords')
     parser.add_argument('--temperature', type=float, default=1.0)
     parser.add_argument('--no-preview', action='store_true')
     args = parser.parse_args()
+    primer_indices = {Path(path).resolve(): index for index, path in enumerate(sample_midi_paths)}
+    piece_index = primer_indices.get(Path(args.primer).resolve())
+    if piece_index is None:
+        parser.error('--primer must match a configured sample_midi_path with a FIXED_CHORDS entry')
+    chord_bank = FIXED_CHORDS[piece_index]
     cfg = get_model_hparams(args.model)
     if cfg.get('model_type') != 'D_Chord_Joker':
         parser.error('--model must be a D_Chord_Joker preset')
@@ -66,15 +135,22 @@ def main() -> None:
         cfg['ckpt_file_name'] = args.checkpoint
     if not Path(cfg['ckpt_file_name']).is_file():
         parser.error('No trained chord checkpoint found. Run train_chords.py first or pass --checkpoint.')
-    if (not 1 <= args.context_length <= cfg['seq_len'] or not 0 <= args.trigger_note <= 127
-            or args.trigger_note in (30, 31) or not 0 < args.temperature < float('inf')):
-        parser.error('Invalid context length, trigger note or temperature')
+    if not 1 <= args.context_length <= cfg['seq_len'] or not 0 < args.temperature < float('inf'):
+        parser.error('Invalid context length or temperature')
     primer = read_primer(args.primer, args.context_length)
     context_length = args.context_length
-    controls = ChordControls(len(primer['pitch']), context_length, read_chord_mappings(args.controls))
-    if (set(controls.midi_notes) & {args.trigger_note, 30, 31} or set(controls.pedals) & {17, 18}
-            or set(controls.keys) & {'space', 'r', 's', 'escape'}):
-        parser.error('Chord mappings overlap performance trigger, reset, save or exit controls')
+    try:
+        entries = [entry.split(':') for entry in args.midi_chords.split(',') if entry.strip()]
+        midi_chords = {int(note): key.strip() for note, key in entries}
+        if len(midi_chords) != len(entries):
+            raise ValueError('Each MIDI chord note must be mapped once')
+        controls = ChordControls(len(primer['pitch']), context_length, chord_bank, midi_chords)
+    except ValueError as error:
+        parser.error(str(error))
+    chord_legend = '  |  '.join(f'{key}: {chord.name}' for key, chord in chord_bank.items() if len(key) == 1)
+    chord_legend += '\n' + '  |  '.join(f'{key}: {chord.name}' for key, chord in chord_bank.items() if len(key) > 1)
+    if midi_chords:
+        chord_legend += '\nMIDI chords: ' + '  |  '.join(f'{note}: {chord_bank[key].name}' for note, key in midi_chords.items())
     device = torch.device('mps' if torch.backends.mps.is_available()
                           else 'cuda' if torch.cuda.is_available() else 'cpu')
     model = load_model(args.model, cfg=cfg, compile_mode='none').to(device).eval()
@@ -87,21 +163,29 @@ def main() -> None:
     synth = fluidsynth.Synth()
     midi = rtmidi.MidiIn()
     visualizer = Visualizer(button_slots=1,
-                            controls_legend=[('space / MIDI', 'play'), ('hold chord', 'guide'),
-                                             ('release', 'free'), ('R / S', 'reset / save')],
-                            status_text=controls.status())
+                            controls_legend=[('MIDI / space', 'joker'), ('hold numbers', 'chords'),
+                                             ('release numbers', 'free'), ('R / S', 'reset / save')],
+                            status_text=controls.status() + '\n' + chord_legend)
     midi_event = pygame.event.custom_type()
     output = {key: list(values) for key, values in primer.items()}
     primer_length = len(primer['pitch'])
     sounding: Dict[str, Tuple[int, float, int]] = {}
     last_onset = 0.0
 
+    def playNote(note: int, velocity: int = 100) -> None:
+        if velocity > 0:
+            synth.noteon(0, note, velocity)
+        else:
+            synth.noteoff(0, note)
+
     def note_off(source: str) -> None:
         held = sounding.pop(source, None)
         if held is not None:
             pitch, started, position = held
             output['dur'][position] = max(1, round((time.perf_counter() - started) * 1000 / 32))
-            synth.noteoff(0, pitch)
+            # Several MIDI keys can generate the same pitch; keep it sounding until the last release.
+            if not any(held_pitch == pitch for held_pitch, _, _ in sounding.values()):
+                playNote(pitch, 0)
             visualizer.get_note(pitch, 0)
             visualizer.get_joker(0)
 
@@ -123,7 +207,7 @@ def main() -> None:
         controls.commit_note()
         last_onset = now
         sounding[source] = (pitch, now, position)
-        synth.noteon(0, pitch, velocity)
+        playNote(pitch, velocity)
         visualizer.get_note(pitch, velocity, is_joker=True)
         visualizer.get_joker(velocity)
 
@@ -134,6 +218,7 @@ def main() -> None:
         output = {key: list(values) for key, values in primer.items()}
         last_onset = 0.0
         controls.reset(primer_length)
+        visualizer.set_chord_chroma(None, False)
         visualizer.primer(primer['pitch'], primer['dtime'], torch.zeros(primer_length, dtype=torch.long), primer['dur'])
 
     def save() -> None:
@@ -154,31 +239,6 @@ def main() -> None:
         # Keyboard and MIDI share one event queue; process generation on the main thread.
         pygame.event.post(pygame.event.Event(midi_event, message=event[0]))
 
-    def handle_midi(message: List[int]) -> None:
-        if len(message) != 3:
-            return
-        status, number, value = message
-        if controls.handle_midi(status, number, value):
-            return
-        kind = status & 0xF0
-        pressed = kind == 0x90 and value > 0
-        source = f'note:{status & 0x0F}:{number}'
-        if kind in (0x80, 0x90):
-            if number == 30 and pressed:
-                reset()
-            elif number == 31 and pressed:
-                save()
-            elif number == args.trigger_note:
-                if pressed:
-                    generate(source, value)
-                else:
-                    note_off(source)
-        elif kind == 0xB0 and value > 0:
-            if number == 17:
-                reset()
-            elif number == 18:
-                save()
-
     try:
         synth.start()
         soundfont = synth.sfload(args.soundfont)
@@ -194,26 +254,30 @@ def main() -> None:
             print(f'MIDI input: {ports[args.midi_port]}')
         else:
             print('No MIDI input found; keyboard controls remain available.')
-        print('Hold suggestions: ' + ', '.join(
-            f'{c.name} [key={c.key or "none"}, MIDI={c.midi_note}, CC={c.pedal_cc}]' for c in controls.mappings))
+        print('Unmapped MIDI keys / Space: joker. Hold chord controls for guidance; release all chord controls for free generation.')
+        print(chord_legend)
         reset()
         if not args.no_preview:
-            def preview_note(pitch: int, velocity: int = 100) -> None:
-                if velocity:
-                    synth.noteon(0, pitch, velocity)
-                else:
-                    synth.noteoff(0, pitch)
-            visualizer.play_primer(preview_note, last_n=40, playback_speed=1)
+            visualizer.play_primer(playNote, last_n=40, playback_speed=1)
         running = True
         while running:
             for event in pygame.event.get():
                 if event.type == midi_event:
-                    handle_midi(event.message)
+                    if len(event.message) == 3:
+                        status, number, velocity = event.message
+                        if controls.handle_midi(status, number, velocity):
+                            continue
+                        kind, channel = status & 0xF0, status & 0x0F
+                        source = f'midi:{channel}:{number}'
+                        if kind == 0x90 and velocity > 0:
+                            generate(source, velocity)
+                        elif kind == 0x80 or (kind == 0x90 and velocity == 0):
+                            note_off(source)
                 elif event.type == pygame.QUIT:
                     running = False
                 elif event.type in (pygame.KEYDOWN, pygame.KEYUP):
                     key, pressed = pygame.key.name(event.key), event.type == pygame.KEYDOWN
-                    if controls.handle_key(key, pressed):
+                    if controls.handle_key(key, pressed, shift=bool(event.mod & pygame.KMOD_SHIFT)):
                         continue
                     if key == 'space':
                         if pressed:
@@ -228,10 +292,10 @@ def main() -> None:
                         running = False
                 elif event.type == pygame.WINDOWFOCUSLOST:
                     # A key-up may go to another app after focus changes.
-                    for key in controls.keys:
-                        controls.handle_key(key, False)
                     note_off('keyboard')
-            visualizer.status_text = controls.status()
+                    controls.release_keyboard()
+            visualizer.status_text = controls.status() + '\n' + chord_legend
+            visualizer.set_chord_chroma(controls.chroma.float().tolist(), controls.active)
             visualizer.draw(handle_events=False)
             time.sleep(0.001)
     except KeyboardInterrupt:

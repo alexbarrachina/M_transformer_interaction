@@ -56,7 +56,7 @@ def warm_start_chord(model: D_Chord_Joker, checkpoint_path: str) -> None:
         raise FileNotFoundError(f'Base joker checkpoint missing: {checkpoint_path}')
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     state = checkpoint.get('model_state_dict', checkpoint)
-    adapter = ('decoder.chord_conditioner.', 'decoder.harm_film.')
+    adapter = ('decoder.chord_conditioner.', 'decoder.harm_film.', 'decoder.history_mask_embedding')
     expected = {name for name in model.state_dict() if not name.startswith(adapter)}
     missing, unexpected = expected - state.keys(), state.keys() - expected
     if missing or unexpected:
@@ -436,7 +436,8 @@ def load_model(model_name='default',
             chord_cond_dim=cfg.get('chord_cond_dim', 128),
             chord_film_start_frac=cfg.get('chord_film_start_frac', 0.5),
             chord_film_scale_limit=cfg.get('chord_film_scale_limit', 0.5),
-            chord_film_shift_limit=cfg.get('chord_film_shift_limit', 0.5)))
+            chord_film_shift_limit=cfg.get('chord_film_shift_limit', 0.5),
+            chord_history_mask_enabled=cfg.get('chord_history_mask_enabled', False)))
     elif cfg['model_type'] == 'D_Tension_Joker':
         mpt_model = D_Tension_Joker(cfg=cfg, decoder=Decoder_tension_joker(
             max_seq_len=cfg['seq_len'], dim=cfg['emb_dim'], depth=cfg['num_layers'],
