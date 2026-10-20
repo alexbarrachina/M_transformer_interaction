@@ -13,29 +13,38 @@ class Chord(NamedTuple):
     intervals: Tuple[int, ...]
 
 
+# The change control asks for a new chord without naming it; the model chooses the chord.
+CHANGE = Chord('change (model chooses)', 0, ())
+
+
 class ChordControls:
-    """The last pressed chord key wins; releasing all chord keys clears FiLM."""
+    """The last pressed chord key wins; releasing all chord keys clears FiLM.
+
+    The optional change key acts like a chord key, but sends chord_change instead of a chord.
+    """
 
     def __init__(self, primer_length: int, context_length: int, chords: Dict[str, Chord],
-                 midi_chords: Optional[Dict[int, str]] = None) -> None:
+                 midi_chords: Optional[Dict[int, str]] = None, change_key: Optional[str] = None) -> None:
         if context_length < 1:
             raise ValueError('context_length must be positive')
         self.context_length = context_length
         self.chords = chords
         self.midi_chords = dict(midi_chords or {})
+        self.change_key = change_key
         if any(not 0 <= note <= 127 or key not in chords for note, key in self.midi_chords.items()):
             raise ValueError('MIDI chord mappings require notes 0..127 and configured chord keys')
         self.held: Dict[str, str] = {}
-        self.history: Deque[Tuple[Tensor, int, bool]] = deque(maxlen=context_length)
+        self.history: Deque[Tuple[Tensor, int, bool, bool]] = deque(maxlen=context_length)
         self.chord_name = ''
         self.chord_notes: Tuple[int, ...] = ()
         self.chroma = torch.zeros(12, dtype=torch.bool)
         self.anchor_pc = 0
         self.active = False
+        self.change = False
         self.reset(primer_length)
 
     def reset(self, primer_length: int) -> None:
-        empty = (torch.zeros(12, dtype=torch.bool), 0, False)
+        empty = (torch.zeros(12, dtype=torch.bool), 0, False, False)
         self.history = deque([empty] * min(primer_length, self.context_length), maxlen=self.context_length)
         self.release()
 
@@ -46,11 +55,15 @@ class ChordControls:
         self.chroma.zero_()
         self.anchor_pc = 0
         self.active = False
+        self.change = False
         # Zeroing only the newest gate cannot erase earlier attention effects.
-        empty = (torch.zeros(12, dtype=torch.bool), 0, False)
+        empty = (torch.zeros(12, dtype=torch.bool), 0, False, False)
         self.history = deque([empty] * len(self.history), maxlen=self.context_length)
 
     def handle_key(self, key: str, pressed: bool, shift: bool = False) -> bool:
+        if key == self.change_key:
+            self._handle_control('key:' + key, CHANGE.name, pressed)
+            return True
         if key not in self.chords:
             return False
         selected = 'shift+' + key if shift and 'shift+' + key in self.chords else key
@@ -84,26 +97,30 @@ class ChordControls:
             self.release()
             return
         selected = list(self.held.values())[-1]
-        chord = self.chords[selected]
+        self.change = selected == CHANGE.name
+        chord = CHANGE if self.change else self.chords[selected]
         self.chord_name = chord.name
         self.chord_notes = tuple(60 + chord.root_pc + interval for interval in chord.intervals)
         self.chroma.zero_()
         self.chroma[[note % 12 for note in self.chord_notes]] = True
         self.anchor_pc = chord.root_pc
-        self.active = True
+        self.active = not self.change
 
     def next_tokens(self, device: torch.device) -> Dict[str, Tensor]:
-        states = list(self.history) + [(self.chroma, self.anchor_pc, self.active)]
-        return {'chord_chroma': torch.stack([state[0] for state in states]).unsqueeze(0).to(device),
-                'chord_anchor_pc': torch.tensor([[state[1] for state in states]], device=device),
-                'chord_active': torch.tensor([[state[2] for state in states]], device=device)}
+        states = list(self.history) + [(self.chroma, self.anchor_pc, self.active, self.change)]
+        tokens = {'chord_chroma': torch.stack([state[0] for state in states]).unsqueeze(0).to(device),
+                  'chord_anchor_pc': torch.tensor([[state[1] for state in states]], device=device),
+                  'chord_active': torch.tensor([[state[2] for state in states]], device=device)}
+        if self.change_key:
+            tokens['chord_change'] = torch.tensor([[state[3] for state in states]], device=device)
+        return tokens
 
     def commit_note(self) -> None:
-        self.history.append((self.chroma.clone(), self.anchor_pc, self.active))
+        self.history.append((self.chroma.clone(), self.anchor_pc, self.active, self.change))
 
     def status(self) -> str:
         names = ('C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B')
         note_text = ' '.join(f'{names[note % 12]}{note // 12 - 1}' for note in self.chord_notes) or 'none'
-        if self.active:
+        if self.active or self.change:
             return f'Harmony: {self.chord_name}\nChord notes: {note_text}'
         return 'Harmony: free\nChord notes: none'

@@ -2986,6 +2986,20 @@ MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'] = {
     'chord_onset_tau': 3.0,
 }
 
+# Second adapter over D_Chord_Joker_unseen_onset_v1: holding the change control asks for a new
+# chord without naming it (the model chooses). The trained chord adapter is loaded and frozen, so
+# chord controls keep their strength; only the change adapter learns. Every training window presses
+# at a structural change: both chords last >= 4 notes and the new one adds >= 2 pitch classes.
+MODELS_PARAMETERS['D_Chord_Joker_change_v1'] = {
+    **MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'],
+    'description': 'Frozen unseen-onset chord adapter plus a change adapter that never names the chord.',
+    'init_from_ckpt': MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/D_Chord_Joker_change_latest.pth',
+    'chord_change_enabled': True,
+    'chord_change_min_notes': 4,
+    'chord_change_min_new_tones': 2,
+}
+
 # Tension adapts the existing pitch prior without changing its frozen weights.
 MODELS_PARAMETERS['D_Tension_Joker_little_v1'] = {
     **MODELS_PARAMETERS['D_Base_Joker_little_v1'],

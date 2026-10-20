@@ -14187,11 +14187,15 @@ class ChordTargetConditioner(nn.Module):
 
 
 class Decoder_chord_joker(Decoder_no_conditioning):
-    """Frozen pitch prior with momentary, zero-initialized chord FiLM."""
+    """Frozen pitch prior with momentary, zero-initialized chord FiLM.
+
+    The optional change adapter is a second FiLM over the same layers: it is told that a
+    new chord starts at the press (and how many notes ago), never which chord.
+    """
 
     def __init__(self, *, chord_cond_dim: int = 128, chord_film_start_frac: float = 0.5,
                  chord_film_scale_limit: float = 0.5, chord_film_shift_limit: float = 0.5,
-                 chord_history_mask_enabled: bool = False,
+                 chord_history_mask_enabled: bool = False, chord_change_enabled: bool = False,
                  **kwargs) -> None:
         super().__init__(**kwargs)
         if not 0.0 <= chord_film_start_frac < 1.0:
@@ -14212,6 +14216,15 @@ class Decoder_chord_joker(Decoder_no_conditioning):
         # Input-only parameter: the frozen pitch vocabulary/output head stay intact.
         self.history_mask_embedding = (nn.Parameter(torch.zeros(self.emb_dim))
                                        if chord_history_mask_enabled else None)
+        # Change adapter: notes since the change press (0..7, 8+) replace chroma and anchor.
+        self.change_conditioner = nn.Embedding(9, chord_cond_dim) if chord_change_enabled else None
+        self.change_film = (HarmonyFiLM(chord_cond_dim, self.emb_dim, mod_inds,
+                                        chord_film_scale_limit, chord_film_shift_limit)
+                            if chord_change_enabled else None)
+        if chord_change_enabled:
+            # The trained chord adapter stays fixed, so chord controls keep their strength.
+            for parameter in (*self.chord_conditioner.parameters(), *self.harm_film.parameters()):
+                parameter.requires_grad_(False)
         self.can_cache_kv = False
 
     def pitch_embeddings(self, past_tokens: Dict[str, Tensor]) -> Tensor:
@@ -14238,7 +14251,8 @@ class Decoder_chord_joker(Decoder_no_conditioning):
     def forward(self, past_tokens: Dict[str, Tensor],
                 chord_chroma: Optional[Tensor] = None,
                 chord_anchor_pc: Optional[Tensor] = None,
-                chord_active: Optional[Tensor] = None) -> Tensor:
+                chord_active: Optional[Tensor] = None,
+                chord_change: Optional[Tensor] = None) -> Tensor:
         self.harm_film.last_penalty = self.pitch_emb.weight.new_zeros(())
         if chord_active is None:
             return super().forward(past_tokens)
@@ -14247,11 +14261,28 @@ class Decoder_chord_joker(Decoder_no_conditioning):
         gate = chord_active.unsqueeze(-1).to(self.pitch_emb.weight.dtype)
         condition = self.chord_conditioner(chord_chroma, chord_anchor_pc)
         table = self.harm_film(condition, gate)
+        if chord_change is not None:
+            if self.change_film is None:
+                raise ValueError('This preset has no chord-change adapter')
+            # Notes since the press: the change gate is off before it, so count from the last free note.
+            position = torch.arange(chord_change.size(1), device=chord_change.device)
+            since = position - torch.where(chord_change, -1, position).cummax(dim=1).values - 1
+            change_gate = chord_change.unsqueeze(-1).to(gate.dtype)
+            change_table = self.change_film(self.change_conditioner(since.clamp(0, 8)), change_gate)
+            # Chord and change controls never overlap: each position takes one modulation or none.
+            table = {index: (scale * gate + change_table[index][0] * change_gate,
+                             shift * gate + change_table[index][1] * change_gate)
+                     for index, (scale, shift) in table.items()}
+            gate = gate + change_gate
         return super().forward(past_tokens, film_table=table, film_intensity=gate)
 
 
 class D_Chord_Joker(D_Base):
-    """Chord controls describe targets; optional history masks affect training inputs only."""
+    """Chord controls describe targets; optional history masks affect training inputs only.
+
+    Optional chord_change [batch, time] marks notes under the change control (a new chord
+    the model chooses); there chord_active is False and chroma/anchor are ignored.
+    """
 
     def pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
         pitch = note_tokens['pitch']
@@ -14265,22 +14296,28 @@ class D_Chord_Joker(D_Base):
         chroma = note_tokens.get('chord_chroma')
         anchor = note_tokens.get('chord_anchor_pc')
         active = note_tokens.get('chord_active')
+        change = note_tokens.get('chord_change')
         if chroma is None and anchor is None and active is None:
             return self.decoder(past_tokens)
         if chroma is None or anchor is None or active is None:
             raise ValueError('Supply all three chord inputs, or only pitch for free generation')
         if (anchor.shape != pitch.shape or active.shape != pitch.shape
-                or chroma.shape != (*pitch.shape, 12)):
+                or chroma.shape != (*pitch.shape, 12)
+                or (change is not None and change.shape != pitch.shape)):
             raise ValueError('Chord inputs must match pitch [batch, time], with chroma [batch, time, 12]')
         return self.decoder(past_tokens, chord_chroma=chroma[:, 1:],
-                            chord_anchor_pc=anchor[:, 1:], chord_active=active[:, 1:])
+                            chord_anchor_pc=anchor[:, 1:], chord_active=active[:, 1:],
+                            chord_change=None if change is None else change[:, 1:])
 
     def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
         # Each training window contains one press interval. Only its target notes
         # train the adapter; the unconditioned prefix/suffix retain the frozen prior.
         logits = self.pitch_logits(note_tokens)
         labels = note_tokens['pitch'][:, 1:]
-        active = note_tokens['chord_active'][:, 1:].bool() & (labels != self.ignore_index)
+        held = note_tokens['chord_active'][:, 1:].bool()
+        if 'chord_change' in note_tokens:
+            held = held | note_tokens['chord_change'][:, 1:].bool()
+        active = held & (labels != self.ignore_index)
         weights = active.float()
         if 'chord_weight' in note_tokens:
             # Optional per-note weights from the training sampler: notes right after a chord
@@ -14291,6 +14328,8 @@ class D_Chord_Joker(D_Base):
                              reduction='none')
         reconstruction = (ce * weights).sum() / count
         penalty = self.decoder.harm_film.last_penalty if self.training else reconstruction.new_zeros(())
+        if self.training and 'chord_change' in note_tokens:
+            penalty = penalty + self.decoder.change_film.last_penalty
         losses = {'loss_recons': reconstruction, 'loss_film_reg': penalty,
                   'loss_total': reconstruction + float(self.cfg.get('loss_film_reg', 0.01)) * penalty}
         accuracy = ((logits.argmax(-1) == labels) * weights).sum() / count
@@ -14299,18 +14338,24 @@ class D_Chord_Joker(D_Base):
     @torch.inference_mode()
     def next_pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
         active = note_tokens.get('chord_active')
-        if active is None or not bool(active[:, -1].any()):
+        change = note_tokens.get('chord_change')
+        # Held control per note: 0 free, 1 chord, 2 change (the two never overlap).
+        kind = None if active is None else active.long() + (0 if change is None else 2 * change.long())
+        if kind is None or not bool(kind[:, -1].any()):
             # Recompute the entire actual pitch history without any harmony input.
             return self.pitch_logits({'pitch': note_tokens['pitch']})[:, -1]
-        # Forget controls before the last release, including in mixed active/free
-        # batches. This never erases the pitches produced during earlier guidance.
-        releases = (~active.bool()).long().cumsum(dim=1)
-        current_episode = active.bool() & (releases == releases[:, -1:])
+        # Forget controls before the last release or switch between chord and change,
+        # including in mixed active/free batches. This never erases the pitches
+        # produced during earlier guidance.
+        switches = F.pad((kind[:, 1:] != kind[:, :-1]).long(), (1, 0)).cumsum(dim=1)
+        current_episode = switches == switches[:, -1:]
         controls = dict(note_tokens)
         # Generation always uses actual pitches, even if a caller passes a
         # training batch while the module is still in train mode.
         controls.pop('history_mask', None)
-        controls['chord_active'] = current_episode
+        controls['chord_active'] = active.bool() & current_episode
+        if change is not None:
+            controls['chord_change'] = change.bool() & current_episode
         return self.pitch_logits(controls)[:, -1]
 
     @torch.inference_mode()

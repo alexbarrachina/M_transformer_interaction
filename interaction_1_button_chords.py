@@ -1,9 +1,11 @@
 """Joker performance with fixed chord suggestions for each primer.
 
-Every MIDI key and Space generate joker notes. Hold number keys to condition
+Every MIDI key and Return generate joker notes. Hold number keys to condition
 on the primer's fixed chords: 1 tonic, 2 predominant, 4 subdominant,
 5 dominant, 6 submediant, 7 subtonic. Shift+2 selects V/V; Satie also has
-Shift+5 for a major dominant. The last pressed chord key wins; releasing
+Shift+5 for a major dominant. Hold Space to change chord without naming it:
+the model chooses the new chord (presets with a change adapter; otherwise
+Space is a joker key). The last pressed chord key wins; releasing
 all chord keys returns to free generation. Chords take effect immediately.
 The visualizer shows chord-note names and highlights the active pitch classes.
 R resets; S saves; Escape exits. The model receives no key.
@@ -111,7 +113,7 @@ def read_primer(path: str, length: int) -> Dict[str, List[int]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--model', default='D_Chord_Joker_unseen_onset_v1')
+    parser.add_argument('--model', default='D_Chord_Joker_change_v1')
     parser.add_argument('--checkpoint', help='Trained chord-adapter checkpoint; defaults to the preset latest')
     parser.add_argument('--primer', default=os.environ.get('PRIMER_MIDI', sample_midi_path_init))
     parser.add_argument('--context-length', type=int, default=300)
@@ -144,7 +146,8 @@ def main() -> None:
         midi_chords = {int(note): key.strip() for note, key in entries}
         if len(midi_chords) != len(entries):
             raise ValueError('Each MIDI chord note must be mapped once')
-        controls = ChordControls(len(primer['pitch']), context_length, chord_bank, midi_chords)
+        controls = ChordControls(len(primer['pitch']), context_length, chord_bank, midi_chords,
+                                 change_key='space' if cfg.get('chord_change_enabled') else None)
     except ValueError as error:
         parser.error(str(error))
     chord_legend = '  |  '.join(f'{key}: {chord.name}' for key, chord in chord_bank.items() if len(key) == 1)
@@ -163,7 +166,8 @@ def main() -> None:
     synth = fluidsynth.Synth()
     midi = rtmidi.MidiIn()
     visualizer = Visualizer(button_slots=1,
-                            controls_legend=[('MIDI / space', 'joker'), ('hold numbers', 'chords'),
+                            controls_legend=[('MIDI / return', 'joker'), ('hold space', 'change chord'),
+                                             ('hold numbers', 'chords'),
                                              ('release numbers', 'free'), ('R / S', 'reset / save')],
                             status_text=controls.status() + '\n' + chord_legend)
     midi_event = pygame.event.custom_type()
@@ -254,7 +258,8 @@ def main() -> None:
             print(f'MIDI input: {ports[args.midi_port]}')
         else:
             print('No MIDI input found; keyboard controls remain available.')
-        print('Unmapped MIDI keys / Space: joker. Hold chord controls for guidance; release all chord controls for free generation.')
+        print('Unmapped MIDI keys / Return: joker. Hold chord controls (or Space to change chord) for guidance; '
+              'release all chord controls for free generation.')
         print(chord_legend)
         reset()
         if not args.no_preview:
@@ -279,7 +284,7 @@ def main() -> None:
                     key, pressed = pygame.key.name(event.key), event.type == pygame.KEYDOWN
                     if controls.handle_key(key, pressed, shift=bool(event.mod & pygame.KMOD_SHIFT)):
                         continue
-                    if key == 'space':
+                    if key in ('space', 'return'):  # Space only without a change adapter.
                         if pressed:
                             generate('keyboard', 100)
                         else:
