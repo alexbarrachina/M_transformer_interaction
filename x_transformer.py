@@ -14264,11 +14264,15 @@ class Decoder_chord_joker(Decoder_no_conditioning):
         if chord_change is not None:
             if self.change_film is None:
                 raise ValueError('This preset has no chord-change adapter')
-            # Notes since the press: the change gate is off before it, so count from the last free note.
-            position = torch.arange(chord_change.size(1), device=chord_change.device)
-            since = position - torch.where(chord_change, -1, position).cummax(dim=1).values - 1
+            # Notes since the press (0..7, 8+): count how many of the previous 8 notes are still
+            # held without a gap. Shifts only, since cummax is not implemented on MPS.
+            held = chord_change.long()
+            since = torch.zeros_like(held)
+            for _ in range(8):
+                held = held * F.pad(held[:, :-1], (1, 0))
+                since = since + held
             change_gate = chord_change.unsqueeze(-1).to(gate.dtype)
-            change_table = self.change_film(self.change_conditioner(since.clamp(0, 8)), change_gate)
+            change_table = self.change_film(self.change_conditioner(since), change_gate)
             # Chord and change controls never overlap: each position takes one modulation or none.
             table = {index: (scale * gate + change_table[index][0] * change_gate,
                              shift * gate + change_table[index][1] * change_gate)
@@ -14366,6 +14370,193 @@ class D_Chord_Joker(D_Base):
             raise ValueError('gen_pitch_token expects one performance')
         logits = self.next_pitch_logits(note_tokens)
         return int(torch.multinomial(F.softmax(logits / temperature, dim=-1), 1).item())
+
+
+class Decoder_no_dtime_style_jokerParam_chords(Decoder_no_dtime_style_jokerParam):
+    """Frozen style joker decoder with the chord and optional change FiLM of Decoder_chord_joker.
+
+    Same adapters and gates as Decoder_chord_joker, on the self-attention ('a') and feed-forward
+    ('f') layers of the upper blocks; the style cross-attention ('c') is never modulated.
+    Without chord inputs this is exactly the base decoder, so free generation and its KV cache
+    are unchanged.
+    """
+
+    def __init__(self, *, chord_cond_dim: int = 128, chord_film_start_frac: float = 0.5,
+                 chord_film_scale_limit: float = 0.5, chord_film_shift_limit: float = 0.5,
+                 chord_change_enabled: bool = False, **kwargs) -> None:
+        super().__init__(**kwargs)
+        if not 0.0 <= chord_film_start_frac < 1.0:
+            raise ValueError('chord_film_start_frac must be in [0, 1)')
+        # Freezes joker_mode too: the style joker model stays as trained.
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        self.chord_conditioner = ChordTargetConditioner(chord_cond_dim)
+        start = int(sum(t == 'a' for t in self.attn_layers.layer_types) * chord_film_start_frac)
+        mod_inds: List[int] = []
+        block = -1
+        for index, layer_type in enumerate(self.attn_layers.layer_types):
+            if layer_type == 'a':
+                block += 1
+            if layer_type in ('a', 'f') and block >= start:
+                mod_inds.append(index)
+        self.harm_film = HarmonyFiLM(chord_cond_dim, self.emb_dim, mod_inds,
+                                     chord_film_scale_limit, chord_film_shift_limit)
+        # Change adapter: notes since the change press (0..7, 8+) replace chroma and anchor.
+        self.change_conditioner = nn.Embedding(9, chord_cond_dim) if chord_change_enabled else None
+        self.change_film = (HarmonyFiLM(chord_cond_dim, self.emb_dim, mod_inds,
+                                        chord_film_scale_limit, chord_film_shift_limit)
+                            if chord_change_enabled else None)
+        if chord_change_enabled:
+            # The trained chord adapter stays fixed, so chord controls keep their strength.
+            for parameter in (*self.chord_conditioner.parameters(), *self.harm_film.parameters()):
+                parameter.requires_grad_(False)
+
+    def train(self, mode: bool = True) -> 'Decoder_no_dtime_style_jokerParam_chords':
+        super().train(mode)
+        # Frozen weights alone do not disable dropout. Keep the original prior fixed.
+        self.pitch_emb.eval()
+        self.input_proj.eval()
+        self.emb_dropout.eval()
+        self.attn_layers.eval()
+        self.to_logits.eval()
+        return self
+
+    def forward(self, past_tokens: Dict[str, Tensor],
+                style_context: Optional[Tensor] = None,
+                style_context_mask: Optional[Tensor] = None,
+                chord_chroma: Optional[Tensor] = None,
+                chord_anchor_pc: Optional[Tensor] = None,
+                chord_active: Optional[Tensor] = None,
+                chord_change: Optional[Tensor] = None,
+                **kwargs):
+        self.harm_film.last_penalty = self.pitch_emb.weight.new_zeros(())
+        if chord_active is None:
+            return super().forward(past_tokens, style_context, style_context_mask, **kwargs)
+        if chord_chroma is None or chord_anchor_pc is None:
+            raise ValueError('Active chord inputs require chroma and anchor_pc')
+        # Gates and tables exactly as in Decoder_chord_joker.forward.
+        gate = chord_active.unsqueeze(-1).to(self.pitch_emb.weight.dtype)
+        condition = self.chord_conditioner(chord_chroma, chord_anchor_pc)
+        table = self.harm_film(condition, gate)
+        if chord_change is not None:
+            if self.change_film is None:
+                raise ValueError('This preset has no chord-change adapter')
+            # Notes since the press (0..7, 8+): count how many of the previous 8 notes are still
+            # held without a gap. Shifts only, since cummax is not implemented on MPS.
+            held = chord_change.long()
+            since = torch.zeros_like(held)
+            for _ in range(8):
+                held = held * F.pad(held[:, :-1], (1, 0))
+                since = since + held
+            change_gate = chord_change.unsqueeze(-1).to(gate.dtype)
+            change_table = self.change_film(self.change_conditioner(since), change_gate)
+            # Chord and change controls never overlap: each position takes one modulation or none.
+            table = {index: (scale * gate + change_table[index][0] * change_gate,
+                             shift * gate + change_table[index][1] * change_gate)
+                     for index, (scale, shift) in table.items()}
+            gate = gate + change_gate
+        return super().forward(past_tokens, style_context, style_context_mask,
+                               film_table=table, film_intensity=gate, **kwargs)
+
+
+class AE_style_jokerParam_chords(AE_style_jokerParam):
+    """Frozen AE_style_jokerParam with the chord and change FiLM adapters of D_Chord_Joker.
+
+    Chord inputs (chord_chroma [B, T+1, 12], chord_anchor_pc / chord_active / chord_change
+    [B, T+1]) are aligned with pitch and describe target notes, as in D_Chord_Joker. Buttons,
+    joker positions and style work as in AE_style_jokerParam. Only the stage's adapter learns:
+    the chord adapter, or the change adapter with the chord adapter frozen.
+    """
+
+    def __init__(self, encoder: nn.Module, decoder: Decoder_no_dtime_style_jokerParam_chords,
+                 style_encoder: nn.Module, cfg: Optional[Dict[str, Any]] = None):
+        super().__init__(encoder, decoder, style_encoder, cfg)
+        # The decoder freezes its own base weights.
+        self.encoder.requires_grad_(False)
+        self.style_encoder.requires_grad_(False)
+
+    def train(self, mode: bool = True) -> 'AE_style_jokerParam_chords':
+        super().train(mode)
+        self.encoder.eval()
+        self.style_encoder.eval()
+        return self
+
+    def pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+        """Logits [B, T, V] for pitch[:, 1:]. Without chord inputs this is the free style joker."""
+        style_mask = note_tokens.get('style_mask')
+        style_context = self.style_encoder(note_tokens['style_pitch'], mask=style_mask)
+        buttons = self.quantizer(self.encoder({'pitch': note_tokens['pitch'][:, 1:]}))
+        buttons, extra_decoder_context = self._augment_buttons(buttons, note_tokens)
+        decoder_context = {'pitch': note_tokens['pitch'][:, :-1], 'button': buttons,
+                           **extra_decoder_context}
+        chord = {key: note_tokens[key][:, 1:] for key in
+                 ('chord_chroma', 'chord_anchor_pc', 'chord_active', 'chord_change') if key in note_tokens}
+        return self.decoder(decoder_context, style_context=style_context,
+                            style_context_mask=style_mask, **chord)
+
+    def forward(self, note_tokens: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+        # D_Chord_Joker's loss needs only pitch_logits, so both chord jokers train the same way:
+        # pressed target notes only, optional onset weights and the FiLM magnitude penalty.
+        return D_Chord_Joker.forward(self, note_tokens)
+
+    @torch.inference_mode()
+    def gen_pitch_token(
+        self,
+        note_tokens: Dict[str, Tensor],
+        style_context: Tensor,
+        style_context_mask: Optional[Tensor] = None,
+        temperature: float = 1.0,
+        cache: Optional[LayerIntermediates] = None,
+        logit_bias: Optional[Tensor] = None,
+    ) -> Tuple[int, Optional[LayerIntermediates]]:
+        """AE_style_jokerParam.gen_pitch_token plus the held controls of D_Chord_Joker.
+
+        Optional chord inputs (chord_chroma [B, T+1, 12], chord_anchor_pc / chord_active /
+        chord_change [B, T+1]) are aligned with pitch and button. Without a control on the
+        target note this is the free style joker, cache included. With one, the window is
+        recomputed without a cache (None is returned for it) and the controls before the last
+        release or chord/change switch are forgotten (next_pitch_logits, as in D_Chord_Joker).
+        """
+        active = note_tokens.get('chord_active')
+        change = note_tokens.get('chord_change')
+        # Held control per note: 0 free, 1 chord, 2 change (the two never overlap).
+        kind = None if active is None else active.long() + (0 if change is None else 2 * change.long())
+        if kind is None or not bool(kind[:, -1].any()):
+            return super().gen_pitch_token(note_tokens, style_context, style_context_mask,
+                                           temperature, cache, logit_bias)
+        logits = self.next_pitch_logits(note_tokens, style_context, style_context_mask)
+        if logit_bias is not None:
+            logits = logits + logit_bias.float().to(logits.device)
+        probs = F.softmax(logits / temperature, dim=-1)
+        return torch.multinomial(probs, 1).item(), None
+
+    @torch.inference_mode()
+    def next_pitch_logits(self, note_tokens: Dict[str, Tensor], style_context: Tensor,
+                          style_context_mask: Optional[Tensor] = None) -> Tensor:
+        """Next-pitch logits [B, V] recomputed over the whole window, without a KV cache.
+
+        Same inputs as gen_pitch_token, also for batches that mix free and held rows (as
+        D_Chord_Joker.next_pitch_logits): controls before the last release or chord/change
+        switch are forgotten, and a row without a control on its target note is the free style joker.
+        """
+        active = note_tokens.get('chord_active')
+        change = note_tokens.get('chord_change')
+        kind = None if active is None else active.long() + (0 if change is None else 2 * change.long())
+        # Same decoder inputs as the uncached branch of AE_style_jokerParam.gen_pitch_token.
+        button_real, joker_mask = self._buttons_discrete_to_inputs(note_tokens['button'])
+        decoder_context = {'pitch': note_tokens['pitch'][:, :-1], 'button': button_real[:, 1:],
+                           'joker_mask': joker_mask[:, 1:]}
+        chord: Dict[str, Tensor] = {}
+        if kind is not None and bool(kind[:, -1].any()):
+            switches = F.pad((kind[:, 1:] != kind[:, :-1]).long(), (1, 0)).cumsum(dim=1)
+            current_episode = switches == switches[:, -1:]
+            chord = {'chord_chroma': note_tokens['chord_chroma'][:, 1:],
+                     'chord_anchor_pc': note_tokens['chord_anchor_pc'][:, 1:],
+                     'chord_active': (active.bool() & current_episode)[:, 1:]}
+            if change is not None:
+                chord['chord_change'] = (change.bool() & current_episode)[:, 1:]
+        return self.decoder(decoder_context, style_context=style_context,
+                            style_context_mask=style_context_mask, **chord)[:, -1]
 
 
 class ChordPlanner(nn.Module):

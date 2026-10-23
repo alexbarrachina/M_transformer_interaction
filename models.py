@@ -2947,7 +2947,12 @@ MODELS_PARAMETERS['D_Chord_Joker_little_v1'] = {
     'chord_validation_seed': 1729,
     'num_workers': 0,  # Sampling is cheap; spawned workers would copy the large NumPy corpus.
     'loss_film_reg': 0.01,
-    'learning_rate': 1e-4,
+    # train_chords.py: linear warmup to learning_rate, cosine decay to chord_min_lr, stop at chord_total_steps.
+    'learning_rate': 3e-4,
+    'chord_warmup_steps': 2_000,
+    'chord_min_lr': 1e-5,
+    'chord_total_steps': 300_000,  # About 480 epochs of 627 steps on the unseen split.
+    'chord_validate_every_epochs': 5,  # Keep save_every a multiple, so named checkpoints carry a full validation.
     'save_every': 20,
 }
 
@@ -2994,7 +2999,52 @@ MODELS_PARAMETERS['D_Chord_Joker_change_v1'] = {
     **MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'],
     'description': 'Frozen unseen-onset chord adapter plus a change adapter that never names the chord.',
     'init_from_ckpt': MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1']['ckpt_file_name'],
-    'ckpt_file_name': './save_models/D_Chord_Joker_change_latest.pth',
+    'ckpt_file_name': './save_models/D_Chord_Joker_change_latest_best.pth',
+    'chord_change_enabled': True,
+    'chord_change_min_notes': 4,
+    'chord_change_min_new_tones': 2,
+}
+
+# train_style_chords.py, stage 1: the chord adapter of D_Chord_Joker_unseen_onset_v1 over the
+# frozen style joker tester. Same chord settings, data, onset windows and LR schedule; the unseen
+# pieces are also unseen by this base (it trained on giantmidi_full_train too).
+MODELS_PARAMETERS['AE_style_jokerParam_chords'] = {
+    **MODELS_PARAMETERS['AE_style_jokerParam_tester_v2'],
+    'model_type': 'AE_style_jokerParam_chords',
+    'description': 'Frozen style joker tester with held chroma + anchor chord FiLM.',
+    'init_from_ckpt': MODELS_PARAMETERS['AE_style_jokerParam_tester_v2']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/AE_style_jokerParam_chords_best.pth',  # Best: ..._chords_best.pth
+    'dataset_train_path': './Training-Data/giantmidi_full_w_chords_unseen_train.pickle',
+    'dataset_val_path': './Training-Data/giantmidi_full_w_chords_unseen_test.pickle',
+    'chord_cond_dim': 128,
+    'chord_film_start_frac': 0.5,
+    'chord_film_scale_limit': 0.5,
+    'chord_film_shift_limit': 0.5,
+    'chord_whole_span_prob': 0.5,
+    'chord_validation_seed': 1729,
+    'chord_onset_prob': 0.6,
+    'chord_onset_weight': 4.0,
+    'chord_onset_tau': 3.0,
+    'num_workers': 0,  # Sampling is cheap; spawned workers would copy the large NumPy corpus.
+    'loss_film_reg': 0.01,
+    # Linear warmup to learning_rate, cosine decay to chord_min_lr, stop at chord_total_steps.
+    'learning_rate': 3e-4,
+    'chord_warmup_steps': 2_000,
+    'chord_min_lr': 1e-5,
+    # First run ended at 400k (about 657 epochs of 609 steps). Resumed to 500k: the cosine is
+    # stretched, so at 400k the lr rises from 1e-5 to about 3.8e-5 and decays to 1e-5 again.
+    'chord_total_steps': 500_000,
+    'chord_validate_every_epochs': 5,  # Keep save_every a multiple, so named checkpoints carry a full validation.
+    'save_every': 20,
+}
+
+# train_style_chords.py, stage 2: the change adapter of D_Chord_Joker_change_v1 over the best
+# stage-1 checkpoint, whose chord adapter stays frozen.
+MODELS_PARAMETERS['AE_style_jokerParam_change'] = {
+    **MODELS_PARAMETERS['AE_style_jokerParam_chords'],
+    'description': 'Frozen style joker chord model plus a change adapter that never names the chord.',
+    'init_from_ckpt': './save_models/AE_style_jokerParam_chords_best.pth',
+    'ckpt_file_name': './save_models/AE_style_jokerParam_change_best.pth',
     'chord_change_enabled': True,
     'chord_change_min_notes': 4,
     'chord_change_min_new_tones': 2,

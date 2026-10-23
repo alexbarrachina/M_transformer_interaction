@@ -265,7 +265,9 @@ def unseen_check(midis: List[Path], checkpoints: List[Path], base_train: Path) -
     return report
 
 
-def summarize(output: Path, args: argparse.Namespace) -> dict:
+def summarize(output: Path, args: argparse.Namespace, reference=pianist_reference) -> dict:
+    """reference(entries, args) scores the pianist's real notes; test/eval_style_chord_strength.py
+    passes its own, since its frozen base also needs buttons and style."""
     records = [json.loads(path.read_text()) for path in sorted(output.glob('*.json')) if path.name != 'summary.json']
     require(bool(records), f'No generation results in {output}')
     models = list(records[0]['onsets'][0]['models'])
@@ -337,7 +339,7 @@ def summarize(output: Path, args: argparse.Namespace) -> dict:
         summary['per_note'][condition] = block
     # Reference: how often the pianist's real next notes are tones of the real chord, and how
     # likely the frozen base finds them (generated notes are scored the same way).
-    summary['pianist_reference'] = pianist_reference(entries, args)
+    summary['pianist_reference'] = reference(entries, args)
     if not args.skip_unseen_check:
         summary['training_overlap'] = unseen_check([args.midi_dir / name for name in summary['files']],
                                                args.checkpoint, args.base_train)

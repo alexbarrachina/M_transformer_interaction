@@ -53,7 +53,8 @@ def warm_start_tension(model: D_Tension_Joker, checkpoint_path: str) -> None:
 def warm_start_chord(model: D_Chord_Joker, checkpoint_path: str) -> None:
     """Require the complete, matching pretrained pitch prior before adapter training.
 
-    A change adapter starts instead from a trained chord joker, keeping its chord adapter."""
+    A change adapter starts instead from a trained chord joker, keeping its chord adapter.
+    AE_style_jokerParam_chords uses the same adapter names, so train_style_chords.py shares this."""
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f'Base joker checkpoint missing: {checkpoint_path}')
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
@@ -778,6 +779,40 @@ def load_model(model_name='default',
                 attn_flash = True
             ),
         )
+    elif cfg['model_type'] == 'AE_style_jokerParam_chords':
+        # Frozen AE_style_jokerParam plus the chord (and optional change) FiLM of D_Chord_Joker.
+        mpt_model = AE_style_jokerParam_chords(
+            cfg = cfg,
+            decoder = Decoder_no_dtime_style_jokerParam_chords(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True,
+                chord_cond_dim = cfg.get('chord_cond_dim', 128),
+                chord_film_start_frac = cfg.get('chord_film_start_frac', 0.5),
+                chord_film_scale_limit = cfg.get('chord_film_scale_limit', 0.5),
+                chord_film_shift_limit = cfg.get('chord_film_shift_limit', 0.5),
+                chord_change_enabled = cfg.get('chord_change_enabled', False)
+            ),
+            encoder = Encoder_no_dtime(
+                max_seq_len = cfg['seq_len'],
+                dim = cfg['emb_dim'],
+                depth = cfg['num_layers'],
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+            style_encoder = StyleEncoder(
+                max_seq_len = cfg.get('style_seq_len', 256),
+                dim = cfg['emb_dim'],
+                depth = cfg.get('style_encoder_depth', 4),
+                heads = cfg['heads'],
+                rotary_pos_emb = True,
+                attn_flash = True
+            ),
+        )
     elif cfg['model_type'] == 'ae_buttons_p_residual':
         # Residual chord adapter: load base model with pretrained weights (no compile
         # to avoid _orig_mod. prefix mismatch), then wrap in residual adapter.
@@ -805,7 +840,8 @@ def load_model(model_name='default',
         # pitch-only base is handled separately by warm_start_timing in training.
         mpt_model.load_state_dict(
             state, strict=cfg.get('timing_enabled', False)
-            or cfg['model_type'] in ('D_Base_Joker', 'D_Tension_Joker', 'D_Chord_Joker'))
+            or cfg['model_type'] in ('D_Base_Joker', 'D_Tension_Joker', 'D_Chord_Joker',
+                                     'AE_style_jokerParam_chords'))
 
         if compile_mode != 'none':
             mpt_model = torch.compile(mpt_model, mode=compile_mode)

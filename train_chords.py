@@ -33,6 +33,7 @@ import tqdm
 import glob
 import json
 import logging
+import math
 import re
 from itertools import count
 from pathlib import Path
@@ -350,6 +351,16 @@ def save_checkpoint(path: str, checkpoint: dict) -> None:
     os.replace(temporary, destination)
 
 
+def scheduled_lr(cfg: dict, step: int) -> float:
+    """Linear warmup to learning_rate, then cosine decay to chord_min_lr at chord_total_steps."""
+    peak, low = cfg['learning_rate'], cfg['chord_min_lr']
+    warmup, total = cfg['chord_warmup_steps'], cfg['chord_total_steps']
+    if step < warmup:
+        return peak * (step + 1) / warmup
+    progress = min(1.0, (step - warmup) / max(1, total - warmup))
+    return low + 0.5 * (peak - low) * (1.0 + math.cos(math.pi * progress))
+
+
 @torch.inference_mode()
 def validate_chords(model: D_Chord_Joker, loader: DataLoader,
                     device: torch.device) -> Dict[str, float]:
@@ -366,7 +377,9 @@ def validate_chords(model: D_Chord_Joker, loader: DataLoader,
         shifted = dict(tokens)
         shifted['chord_chroma'] = tokens['chord_chroma'].roll(1, dims=-1)
         shifted['chord_anchor_pc'] = (tokens['chord_anchor_pc'] + 1) % 12
-        for index, variant in enumerate((tokens, {'pitch': tokens['pitch']}, shifted)):
+        # Free drops only the chord inputs (train_style_chords.py keeps style and buttons).
+        free = {key: value for key, value in tokens.items() if not key.startswith('chord_')}
+        for index, variant in enumerate((tokens, free, shifted)):
             logits = model.pitch_logits(variant)
             ce = F.cross_entropy(logits.transpose(1, 2), labels, reduction='none')
             sums[index] += (ce * weights).sum()
@@ -429,7 +442,7 @@ def _train(logger: logging.Logger) -> None:
         raise ValueError('train_chords.py requires a D_Chord_Joker preset')
     cfg['batch_size'] = int(os.environ.get('BATCH_SIZE', cfg['batch_size']))
     cfg['num_workers'] = int(os.environ.get('NUM_WORKERS', cfg['num_workers']))
-    max_steps = int(os.environ.get('MAX_STEPS', '0'))  # Additional updates; 0 is unlimited.
+    max_steps = int(os.environ.get('MAX_STEPS', '0'))  # Additional updates; 0 runs to chord_total_steps.
     if max_steps < 0 or cfg['batch_size'] < 1 or cfg['num_workers'] < 0:
         raise ValueError('Invalid batch size, worker count or MAX_STEPS')
     cfg['chord_training_seed'] = int(os.environ.get('SEED', cfg.get('chord_training_seed', 42)))
@@ -539,7 +552,8 @@ def _train(logger: logging.Logger) -> None:
     ''' TRAINING '''
     val_loss_temp = 0.0
     validation: Dict[str, float] = {}
-    stop_step = nsteps + max_steps if max_steps else 0
+    # Training ends where the cosine schedule ends; MAX_STEPS can stop it earlier.
+    stop_step = min(cfg['chord_total_steps'], nsteps + max_steps) if max_steps else cfg['chord_total_steps']
     ep = start_epoch
     epoch_complete = False
 
@@ -563,6 +577,9 @@ def _train(logger: logging.Logger) -> None:
                     history_counts += torch.bincount(batch.pop('history_kind'), minlength=3)
                     trace.mark('batch_received_transfer', ep, i)
                     optim.zero_grad()
+                    # The rate follows the step count, so a resumed run continues the same schedule.
+                    for group in optim.param_groups:
+                        group['lr'] = scheduled_lr(cfg, nsteps)
                     x = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
                     trace.mark('forward', ep, i)
                     with torch.amp.autocast(device_type=device_type, dtype=dtype, enabled=device_type == 'cuda'):
@@ -573,11 +590,11 @@ def _train(logger: logging.Logger) -> None:
                     if (i % cfg['print_stats_every'] == 0) or TESTING:
                         metrics = {name: value.item() for name, value in loss.items()}
                         metrics.update(epoch=ep, batch=i, step=nsteps, train_acc=acc.item(),
-                                       grad_scale=scaler.get_scale())
+                                       grad_scale=scaler.get_scale(), lr=optim.param_groups[0]['lr'])
                         logger.info('Training metrics: %s', json.dumps(metrics, sort_keys=True))
                         if cfg['use_logs']:
                             wandb.log({**{name: value.item() for name, value in loss.items()},
-                                       'train_acc': acc.item()}, step=nsteps)
+                                       'train_acc': acc.item(), 'lr': metrics['lr']}, step=nsteps)
                     trace.mark('optimizer', ep, i)
                     scaler.unscale_(optim)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['grad_clip'])
@@ -619,19 +636,24 @@ def _train(logger: logging.Logger) -> None:
             logger.info('Epoch ended: epoch=%d step=%d', ep, nsteps)
             # Reconstruction diagnostics reveal whether chord inputs affect predictions;
             # they are not a musical-quality or performer-controllability score.
-            validation = validate_chords(model, val_loader, device)
-            val_loss_temp = validation['nll_true']
-            improved = val_loss_temp < best_val_nll
-            best_val_nll = min(best_val_nll, val_loss_temp)
-            logger.info('Chord validation: %s', json.dumps(validation, sort_keys=True))
-            print('Chord validation:', validation)
+            # Full validation (three passes per window) runs every few epochs and at the end of training.
+            validated = ep % cfg['chord_validate_every_epochs'] == 0 or nsteps >= stop_step
+            improved = False
+            if validated:
+                validation = validate_chords(model, val_loader, device)
+                val_loss_temp = validation['nll_true']
+                improved = val_loss_temp < best_val_nll
+                best_val_nll = min(best_val_nll, val_loss_temp)
+                logger.info('Chord validation: %s', json.dumps(validation, sort_keys=True))
+                print('Chord validation:', validation)
             history_metrics = {f'history/{name}_fraction': float(value)
                                for name, value in zip(('full', 'shortened', 'masked'),
                                                       history_counts / history_counts.sum().clamp_min(1))}
             logger.info('Training history: %s', json.dumps(history_metrics, sort_keys=True))
             if cfg['use_logs']:
                 wandb.log({'epoch': ep, **history_metrics,
-                           **{f'validation/{key}': value for key, value in validation.items()}}, step=nsteps)
+                           **{f'validation/{key}': value for key, value in validation.items() if validated}},
+                          step=nsteps)
 
             trace.mark('checkpoint_save', ep)
             state = checkpoint()

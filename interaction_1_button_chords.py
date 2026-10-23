@@ -5,7 +5,7 @@ on the primer's fixed chords: 1 tonic, 2 predominant, 4 subdominant,
 5 dominant, 6 submediant, 7 subtonic. Shift+2 selects V/V; Satie also has
 Shift+5 for a major dominant. Hold Space to change chord without naming it:
 the model chooses the new chord (presets with a change adapter; otherwise
-Space is a joker key). The last pressed chord key wins; releasing
+Space does nothing). The last pressed chord key wins; releasing
 all chord keys returns to free generation. Chords take effect immediately.
 The visualizer shows chord-note names and highlights the active pitch classes.
 R resets; S saves; Escape exits. The model receives no key.
@@ -284,7 +284,7 @@ def main() -> None:
                     key, pressed = pygame.key.name(event.key), event.type == pygame.KEYDOWN
                     if controls.handle_key(key, pressed, shift=bool(event.mod & pygame.KMOD_SHIFT)):
                         continue
-                    if key in ('space', 'return'):  # Space only without a change adapter.
+                    if key == 'return':
                         if pressed:
                             generate('keyboard', 100)
                         else:
