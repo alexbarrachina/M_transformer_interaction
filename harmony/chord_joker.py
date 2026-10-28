@@ -24,15 +24,19 @@ class ChordControls:
     """
 
     def __init__(self, primer_length: int, context_length: int, chords: Dict[str, Chord],
-                 midi_chords: Optional[Dict[int, str]] = None, change_key: Optional[str] = None) -> None:
+                 midi_chords: Optional[Dict[int, str]] = None, change_key: Optional[str] = None,
+                 cc_chords: Optional[Dict[int, str]] = None) -> None:
         if context_length < 1:
             raise ValueError('context_length must be positive')
         self.context_length = context_length
         self.chords = chords
         self.midi_chords = dict(midi_chords or {})
+        self.cc_chords = dict(cc_chords or {})  # MIDI CC number -> chord key, toggled by each press (handle_cc)
         self.change_key = change_key
         if any(not 0 <= note <= 127 or key not in chords for note, key in self.midi_chords.items()):
             raise ValueError('MIDI chord mappings require notes 0..127 and configured chord keys')
+        if any(not 0 <= cc <= 127 or key not in chords for cc, key in self.cc_chords.items()):
+            raise ValueError('CC chord mappings require CC numbers 0..127 and configured chord keys')
         self.held: Dict[str, str] = {}
         self.history: Deque[Tuple[Tensor, int, bool, bool]] = deque(maxlen=context_length)
         self.chord_name = ''
@@ -77,6 +81,21 @@ class ChordControls:
             return False
         self._handle_control(f'midi:{channel}:{note}', self.midi_chords[note],
                              kind == 0x90 and velocity > 0)
+        return True
+
+    def handle_cc(self, status: int, controller: int, value: int) -> bool:
+        """CC chords are toggles: a press (value > 0) turns its chord on, or off if it was on, and
+        turns off any other CC chord. Releases (value 0) are ignored. As with keys, the last pressed control wins."""
+        kind, channel = status & 0xF0, status & 0x0F
+        if kind != 0xB0 or controller not in self.cc_chords:
+            return False
+        if value > 0:
+            source = f'cc:{channel}:{controller}'
+            was_on = source in self.held
+            self.held = {other: chord for other, chord in self.held.items() if not other.startswith('cc:')}
+            if not was_on:
+                self.held[source] = self.cc_chords[controller]
+            self._select_held()
         return True
 
     def release_keyboard(self) -> None:

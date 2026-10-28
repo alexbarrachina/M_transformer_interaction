@@ -12236,6 +12236,8 @@ class AE_style_jokerParam(AE_style):
             seq_start_pos=None,
         )
         logits = logits[:, -1]
+        # The model's own most probable pitch [B], before logit_bias restricts it (shown by the visualizer).
+        self.last_top_pitch = logits.argmax(dim=-1)
         if logit_bias is not None:
             logits = logits + logit_bias.float().to(logits.device)
         probs = F.softmax(logits / temperature, dim=-1)
@@ -14525,6 +14527,7 @@ class AE_style_jokerParam_chords(AE_style_jokerParam):
             return super().gen_pitch_token(note_tokens, style_context, style_context_mask,
                                            temperature, cache, logit_bias)
         logits = self.next_pitch_logits(note_tokens, style_context, style_context_mask)
+        self.last_top_pitch = logits.argmax(dim=-1)  # before logit_bias, as in the free path
         if logit_bias is not None:
             logits = logits + logit_bias.float().to(logits.device)
         probs = F.softmax(logits / temperature, dim=-1)

@@ -30,7 +30,10 @@ from typing import List, Tuple, Optional, Dict, Any, Union, Callable, Deque
 # Tonnetz geometry mirrors tonnetz.py, kept local here to avoid importing the
 # matplotlib animation module in every pygame visualizer user.
 _SQRT3 = math.sqrt(3.0)
-PITCH_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+# Model's most probable pitch, over the played note (horizontal roll): RGBA and upward shift in pixels.
+TOP_PITCH_COLOR = (255, 255, 255, 70)
+TOP_PITCH_RAISE = 4
+PITCH_NAMES =['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 TONNETZ_COORDS = [
     (0, 0), (-1, 2), (2, 0), (1, -1), (0, 1), (-1, 0),
     (2, -2), (1, 0), (0, -1), (-1, 1), (-2, 0), (1, 1),
@@ -101,6 +104,7 @@ class Visualizer:
         self.height = self.ref_height + 10 + self.pitch_height + 10 + self.joker_height + 10 + self.button_height + 20
         self.controls_legend = list(controls_legend or [])
         self.status_text = status_text
+        self.pedal: Optional[float] = None  # 0..1, drawn as a slider in the footer when set (reins pedal)
         self.legend_height = (38 if self.controls_legend else 0) + 28 * len(status_text.splitlines())
         self.content_height = self.height - self.legend_height
         self.fps = fps
@@ -319,7 +323,9 @@ class Visualizer:
     def _random_color(self) -> Tuple[int, int, int]:
         return (random.randint(60, 255), random.randint(60, 255), random.randint(60, 255))
 
-    def get_note(self, pitch: int, velocity: int, is_joker: bool = False) -> None:
+    def get_note(self, pitch: int, velocity: int, is_joker: bool = False,
+                 top_pitch: Optional[int] = None) -> None:
+        """top_pitch: the model's most probable pitch, drawn faintly a few pixels above the note."""
         now = time.time() - self.start_time
         if velocity > 0:
             note = {
@@ -329,6 +335,7 @@ class Visualizer:
                 'velocity': velocity,
                 'active': True,
                 'is_joker': bool(is_joker),
+                'top_pitch': top_pitch,
             }
             self.notes.append(note)
             self._pending_note_for_control = note
@@ -497,6 +504,8 @@ class Visualizer:
         pygame.draw.rect(self.screen, (200, 200, 200), pitch_rect, 2)
         pygame.draw.rect(self.screen, (200, 200, 200), button_rect, 2)
         all_pitches = [n['pitch'] for n in self.notes] if self.notes else [60]
+        # Keep the faint most-probable pitches inside the roll too.
+        all_pitches += [n['top_pitch'] for n in self.notes if n.get('top_pitch') is not None]
         min_pitch = min(all_pitches)
         max_pitch = max(all_pitches)
         # Predicted-chord rows are drawn under the notes so generated pitches
@@ -523,6 +532,8 @@ class Visualizer:
                 text = self._legend_font.render(line, True, (255, 230, 160))
                 self.screen.blit(text, (12, status_y))
                 status_y += 28
+        if self.pedal is not None:
+            self._draw_pedal_slider()
         center_y = self.content_height + 19
 
         entries = []
@@ -541,6 +552,24 @@ class Visualizer:
             self.screen.blit(key_text, key_text.get_rect(center=key_rect.center))
             self.screen.blit(action_text, (key_rect.right + 8, center_y - action_text.get_height() // 2))
             x += entry_width + gap
+
+    def _draw_pedal_slider(self) -> None:
+        """self.pedal as a 0..1 slider at the right of the footer's first status rows."""
+        value = max(0.0, min(1.0, float(self.pedal)))
+        color = (255, 230, 160)  # as the status text
+        track = pygame.Rect(self.width - 330, self.content_height + (40 if self.controls_legend else 4) + 6, 240, 8)
+        knob_x = track.x + int(track.width * value)
+        label = self._legend_font.render('Pedal', True, color)
+        self.screen.blit(label, (track.x - label.get_width() - 16, track.centery - label.get_height() // 2))
+        pygame.draw.rect(self.screen, (62, 68, 80), track, border_radius=4)
+        pygame.draw.rect(self.screen, color, pygame.Rect(track.x, track.y, knob_x - track.x, track.height),
+                         border_radius=4)
+        pygame.draw.circle(self.screen, (255, 255, 255), (knob_x, track.centery), 8)
+        value_text = self._legend_font.render(f'{value:.2f}', True, color)
+        self.screen.blit(value_text, (track.right + 16, track.centery - value_text.get_height() // 2))
+        for tick, x in (('0', track.left), ('1', track.right)):
+            tick_text = self._harmony_font_small.render(tick, True, (160, 165, 175))
+            self.screen.blit(tick_text, (x - tick_text.get_width() // 2, track.bottom + 8))
 
     def _draw_primer_status(self, rect: pygame.Rect) -> None:
         """Show primer progress unobtrusively inside the main pitch roll."""
@@ -758,6 +787,13 @@ class Visualizer:
             else:
                 y = int(y_offset + height - (item['pitch'] - min_val + 1) * y_scale)
                 rect = pygame.Rect(start_x, y, max(length, 2), int(max(y_scale, 2)))
+            if item.get('top_pitch') is not None:
+                # Semi-transparent bar on the most probable pitch's row, raised a few pixels and
+                # drawn under the note: when it is the played pitch, a faint strip shows above it.
+                top_y = int(y_offset + height - (item['top_pitch'] - min_val + 1) * y_scale) - TOP_PITCH_RAISE
+                top_bar = pygame.Surface(rect.size, pygame.SRCALPHA)
+                top_bar.fill(TOP_PITCH_COLOR)
+                self.screen.blit(top_bar, (rect.x, top_y))
             pygame.draw.rect(self.screen, color, rect)
             self._draw_event_number(item['pitch'], rect)
         self.screen.set_clip(old_clip)
