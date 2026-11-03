@@ -376,6 +376,10 @@ for f in tqdm(filez[:int(len(filez) * dataset_ratio)]):
           # notes with the same start time (i.e., chords) retain their relative order from the first sort (by pitch descending).
           events_matrix.sort(key=lambda x: x[4], reverse=True) # pitch
           events_matrix.sort(key=lambda x: x[1]) # time
+          # Chord tones go before the notes of their 10 ms onset, so the chord-label event written with the
+          # first tone precedes those notes too. Before, a note higher than the top chord tone was written
+          # first and got no chord (or the previous one). Among themselves, the notes keep the order above.
+          events_matrix.sort(key=lambda x: (time2quant(x[1]), x[3] != CHORDS_CHANNEL))
 
           # --- 3) Channel selection (see `useful_channels`). HARMONY_CHANNEL / CHORDS_CHANNEL are
           # always kept except in the NOT_HARMONY mode; for key+tension files HARMONY_CHANNEL is empty.

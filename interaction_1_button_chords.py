@@ -34,7 +34,7 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 
-sample_midi_path_init = sample_midi_path3
+sample_midi_path_init = sample_midi_path5
 sample_midi_paths = [sample_midi_path1, sample_midi_path2, sample_midi_path3,
                      sample_midi_path4, sample_midi_path5]
 
@@ -116,7 +116,7 @@ def main() -> None:
     parser.add_argument('--model', default='D_Chord_Joker_change_v1')
     parser.add_argument('--checkpoint', help='Trained chord-adapter checkpoint; defaults to the preset latest')
     parser.add_argument('--primer', default=os.environ.get('PRIMER_MIDI', sample_midi_path_init))
-    parser.add_argument('--context-length', type=int, default=300)
+    parser.add_argument('--context-length', type=int, default=200)
     parser.add_argument('--midi-port', type=int, default=0)
     parser.add_argument('--midi-chords', default='',
                         help='Optional MIDI note:chord-key pairs, e.g. 60:1,62:2,67:5,74:shift+2')

@@ -60,13 +60,15 @@ def read_piece(path: Path) -> Dict[str, np.ndarray]:
     """Performed pitches and the chord of each note, as midis2pickles.py + the sampler see them.
 
     Same channels (MIDI 1, 2, 11, 12 notes; MIDI 5 chord tones), same order (time, then pitch
-    descending), same 10 ms onsets and chord expiry (onset + duration of its longest tone).
+    descending, chord tones before the notes of their 10 ms onset), same 10 ms onsets and chord
+    expiry (onset + duration of its longest tone).
     """
     score = midi2ms_score(path.read_bytes())
     events = [list(event) for track in score[1:] for event in track
               if event[0] == 'note' and event[3] in NOTE_CHANNELS + (CHORDS_CHANNEL,)]
     events.sort(key=lambda event: event[4], reverse=True)
     events.sort(key=lambda event: event[1])
+    events.sort(key=lambda event: (int(event[1] / 10), event[3] != CHORDS_CHANNEL))
     pitch, group, chords = [], [], []  # group: index in chords of each note's chord, -1 = none
     current, chord_time, chord_end = -1, None, -1
     for _, start, duration, channel, note, _ in events:
