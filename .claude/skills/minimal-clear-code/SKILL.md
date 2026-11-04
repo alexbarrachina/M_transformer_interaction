@@ -13,7 +13,7 @@ Make the smallest clear change that fully solves the requested problem. Apply th
 - Use only the code necessary for the task. Favor readable expressions and descriptive names over compressed or clever code.
 - Keep existing comments, including explanations of previous ideas. If a changed behavior makes a comment inaccurate, update the explanation while preserving useful historical context; do not delete comments as cleanup.
 - Add concise comments where they help the user understand non-obvious intent, tensor shapes, or necessary tradeoffs. Avoid comments that merely repeat the code.
-- Do not create extra documentation, Markdown files, or test files unless explicitly requested. Use existing focused checks or a temporary in-memory check when verification is needed, without adding a testing framework or expanding the task.
+- Do not create extra documentation, Markdown files, or test files unless explicitly requested. Use existing focused checks or a temporary in-memory check when verification is needed, without adding a testing framework or expanding the task. Tests that measure model behaviour follow the simple-evidence-tests skill.
 
 ## GPU computation
 
