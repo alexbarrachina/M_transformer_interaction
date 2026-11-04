@@ -1,6 +1,6 @@
 ---
 name: minimal-clear-code
-description: Coding and communication preferences for the monster_genie project. Use for every request in this project — code changes, bug fixes, error explanations, PyTorch/GPU code, and answers to questions — to keep changes minimal and readable, tensor code batched, and replies focused, with corrections of any terminology or convention errors.
+description: Coding preferences for the monster_genie project. Use for every code change in this project — new code, bug fixes, PyTorch/GPU code — to keep changes minimal and readable and tensor code batched.
 ---
 
 # Minimal Clear Code
@@ -20,10 +20,3 @@ Make the smallest clear change that fully solves the requested problem. Apply th
 - Use tensor operations instead of Python loops over tensor elements or batches. Prefer broadcasting, indexing, masking, reductions, and batched operations that preserve the intended result.
 - Preserve device, dtype, shape, and gradient behavior. Avoid unnecessary CPU transfers, scalar extraction, synchronization, and large temporary tensors.
 - If dependencies between iterations prevent a correct tensor formulation, explain that specific limitation before choosing an alternative. Do not claim a speed or memory improvement without evidence.
-
-## Focused communication and corrections
-
-- For a specific error, explain its concrete cause and the smallest fix. Avoid repeated explanations, broad tutorials, and speculative future steps.
-- Explain the changed logic briefly enough that the user can understand it, including non-obvious tensor dimensions or types when relevant.
-- Point out every identifiable error in the user's terminology, conventions, or understanding, even when unrelated to the immediate task. Keep corrections concise, distinguish definite mistakes from uncertainty or preference, and do not invent errors.
-- Report the result and relevant verification accurately. Keep unrelated corrections brief so they do not obscure the requested solution.
