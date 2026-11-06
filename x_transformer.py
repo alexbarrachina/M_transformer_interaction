@@ -14290,6 +14290,9 @@ class D_Chord_Joker(D_Base):
     the model chooses); there chord_active is False and chroma/anchor are ignored.
     """
 
+    # Guidance raises notes only this many semitones around the last pitch, to avoid big jumps.
+    guidance_range = 8
+
     def pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
         pitch = note_tokens['pitch']
         if pitch.ndim != 2 or not 2 <= pitch.size(1) <= self.max_seq_len + 1:
@@ -14342,7 +14345,17 @@ class D_Chord_Joker(D_Base):
         return losses, accuracy
 
     @torch.inference_mode()
-    def next_pitch_logits(self, note_tokens: Dict[str, Tensor]) -> Tensor:
+    def next_pitch_logits(self, note_tokens: Dict[str, Tensor], guidance: float = 0.0,
+                          range_limit: float = 0.0) -> Tensor:
+        """Guidance pushes a held control further from free generation, without training:
+        logits = control + guidance * (control - free), so guidance = w - 1 in
+        free + w * (control - free), and 0 is the plain control. Free notes are never changed.
+        Since 2026-11-04 it only raises, and only the chord's notes within guidance_range semitones
+        of the last pitch (with the change control, which names no chord, any note in that range).
+        Every other note keeps its control logit, so its probability can only fall.
+        range_limit (0..1, also only under a held control) then scales the probability of notes
+        further than guidance_range by 1 - range_limit: 0 allows them as they are, 1 forbids them.
+        """
         active = note_tokens.get('chord_active')
         change = note_tokens.get('chord_change')
         # Held control per note: 0 free, 1 chord, 2 change (the two never overlap).
@@ -14362,15 +14375,37 @@ class D_Chord_Joker(D_Base):
         controls['chord_active'] = active.bool() & current_episode
         if change is not None:
             controls['chord_change'] = change.bool() & current_episode
-        return self.pitch_logits(controls)[:, -1]
+        if guidance == 0.0 and range_limit == 0.0:
+            return self.pitch_logits(controls)[:, -1]
+        free = dict(controls)
+        free['chord_active'] = torch.zeros_like(controls['chord_active'])
+        if change is not None:
+            free['chord_change'] = torch.zeros_like(controls['chord_change'])
+        # Two rows per performance in one batch: [2 * batch, vocabulary] split back in two.
+        paired = {key: torch.cat((controls[key], free[key])) for key in controls}
+        control_logits, free_logits = self.pitch_logits(paired)[:, -1].chunk(2)
+        pitches = torch.arange(control_logits.size(-1), device=control_logits.device)
+        last_pitch = controls['pitch'][:, -2:-1]  # [batch, 1]; pitch ends with the target placeholder
+        near = (pitches - last_pitch).abs() <= self.guidance_range  # [batch, vocabulary]
+        raised = controls['chord_chroma'][:, -1][:, pitches % 12]  # [batch, vocabulary]
+        if change is not None:
+            raised = raised | controls['chord_change'][:, -1:]
+        logits = control_logits + guidance * (control_logits - free_logits).clamp_min(0) * (near & raised)
+        # A mix of the distribution as it is and the same one without far notes, so the total
+        # probability of far notes is exactly 1 - range_limit of what it was, and near notes
+        # share the rest in their own proportions. Free rows of a mixed batch stay untouched.
+        only_near = logits.masked_fill(~near, float('-inf')).softmax(-1)
+        mixed = (1 - range_limit) * logits.softmax(-1) + range_limit * only_near
+        return torch.where(kind[:, -1:] > 0, mixed.log(), logits)
 
     @torch.inference_mode()
-    def gen_pitch_token(self, note_tokens: Dict[str, Tensor], temperature: float = 1.0) -> int:
+    def gen_pitch_token(self, note_tokens: Dict[str, Tensor], temperature: float = 1.0,
+                        guidance: float = 0.0, range_limit: float = 0.0) -> int:
         if temperature <= 0 or not math.isfinite(temperature):
             raise ValueError('temperature must be finite and positive')
         if note_tokens['pitch'].size(0) != 1:
             raise ValueError('gen_pitch_token expects one performance')
-        logits = self.next_pitch_logits(note_tokens)
+        logits = self.next_pitch_logits(note_tokens, guidance, range_limit)
         return int(torch.multinomial(F.softmax(logits / temperature, dim=-1), 1).item())
 
 

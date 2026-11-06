@@ -1,0 +1,364 @@
+################################################################
+Date: 2026-11-04 16:42  Commit: 4bd7d3f  Uncommitted changes: 6 files (guidance not yet committed)
+Question: does guidance make a held chord stronger, and at which weight do the generated notes stop being plausible?
+Chosen before running:
+  Main measure of strength: strength@8 of the piece's real chord (probability on the chord's notes over the first
+    8 generated notes, chord held, minus the same with no chord pressed).
+  Supported if: strength rises at every step w = 1, 1.5, 2, 3, and w = 3 minus w = 1 has a 95 % range above zero.
+  Refuted if: it stays flat or falls.
+  Plausibility limit: base NLL over the same 8 notes, compared with the pianist's real notes at the same moments.
+    A weight is still plausible if its generated notes are no less likely under the base than the pianist's.
+  Against the previous chord: compared with guidance against free at the same weight, on both measures.
+Model: save_models/D_Chord_Joker_change_latest_best.pth (default of interaction_1_button_chords.py)
+Data: samples/not_seen, 5 pieces, 4 chord changes per piece = 20 moments; 1 sampling seed shared by all conditions.
+Device: mps. Context 200 notes as in the interaction, 8 generated notes.
+=== Guidance against: free
+====================================================================================================
+Strength = CTM_cond - CTM_free (chord-tone probability mass, mean over the first N notes)
+Base NLL = how unlikely the frozen base finds the generated notes (lower = more likely)
+real@4       | w=1 D_Chord_Joker_change_lat free 0.514 cond 0.748 strength +0.235 base NLL free 2.079 cond 2.453
+real@4       | w=1.5 D_Chord_Joker_change_l free 0.514 cond 0.841 strength +0.327 base NLL free 2.079 cond 3.500
+real@4       | w=2 D_Chord_Joker_change_lat free 0.514 cond 0.892 strength +0.379 base NLL free 2.079 cond 3.820
+real@4       | w=3 D_Chord_Joker_change_lat free 0.514 cond 0.926 strength +0.412 base NLL free 2.079 cond 4.915
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.092 [+0.056, +0.138]  p = 5.0e-05  stronger at 85 % of 20 changes  base NLL +1.047 [+0.455, +1.740]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.144 [+0.097, +0.197]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +1.368 [+0.702, +2.159]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.178 [+0.118, +0.243]  p = 1.0e-04  stronger at 95 % of 20 changes  base NLL +2.462 [+1.599, +3.495]
+real@8       | w=1 D_Chord_Joker_change_lat free 0.494 cond 0.706 strength +0.213 base NLL free 2.005 cond 2.424
+real@8       | w=1.5 D_Chord_Joker_change_l free 0.494 cond 0.806 strength +0.312 base NLL free 2.005 cond 3.399
+real@8       | w=2 D_Chord_Joker_change_lat free 0.494 cond 0.850 strength +0.356 base NLL free 2.005 cond 3.578
+real@8       | w=3 D_Chord_Joker_change_lat free 0.494 cond 0.875 strength +0.381 base NLL free 2.005 cond 4.571
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.099 [+0.055, +0.150]  p = 2.0e-04  stronger at 90 % of 20 changes  base NLL +0.975 [+0.445, +1.587]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.143 [+0.089, +0.200]  p = 1.0e-04  stronger at 90 % of 20 changes  base NLL +1.154 [+0.587, +1.789]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.169 [+0.096, +0.240]  p = 3.5e-04  stronger at 90 % of 20 changes  base NLL +2.147 [+1.365, +3.071]
+dominant@4   | w=1 D_Chord_Joker_change_lat free 0.361 cond 0.546 strength +0.184 base NLL free 2.079 cond 3.002
+dominant@4   | w=1.5 D_Chord_Joker_change_l free 0.361 cond 0.769 strength +0.407 base NLL free 2.079 cond 4.081
+dominant@4   | w=2 D_Chord_Joker_change_lat free 0.361 cond 0.854 strength +0.493 base NLL free 2.079 cond 4.250
+dominant@4   | w=3 D_Chord_Joker_change_lat free 0.361 cond 0.922 strength +0.560 base NLL free 2.079 cond 5.538
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.223 [+0.164, +0.284]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.078 [+0.561, +1.680]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.309 [+0.245, +0.373]  p = 1.0e-04  stronger at 100 % of 20 changes  base NLL +1.247 [+0.536, +2.107]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.376 [+0.297, +0.451]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +2.536 [+1.327, +3.988]
+dominant@8   | w=1 D_Chord_Joker_change_lat free 0.352 cond 0.585 strength +0.232 base NLL free 2.005 cond 3.007
+dominant@8   | w=1.5 D_Chord_Joker_change_l free 0.352 cond 0.766 strength +0.413 base NLL free 2.005 cond 3.660
+dominant@8   | w=2 D_Chord_Joker_change_lat free 0.352 cond 0.813 strength +0.461 base NLL free 2.005 cond 3.877
+dominant@8   | w=3 D_Chord_Joker_change_lat free 0.352 cond 0.882 strength +0.530 base NLL free 2.005 cond 4.791
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.181 [+0.127, +0.238]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.653 [+0.255, +1.072]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.229 [+0.176, +0.282]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.870 [+0.307, +1.547]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.298 [+0.225, +0.368]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.784 [+1.025, +2.680]
+subdominant@4 | w=1 D_Chord_Joker_change_lat free 0.283 cond 0.546 strength +0.263 base NLL free 2.079 cond 2.760
+subdominant@4 | w=1.5 D_Chord_Joker_change_l free 0.283 cond 0.726 strength +0.443 base NLL free 2.079 cond 3.386
+subdominant@4 | w=2 D_Chord_Joker_change_lat free 0.283 cond 0.865 strength +0.582 base NLL free 2.079 cond 4.447
+subdominant@4 | w=3 D_Chord_Joker_change_lat free 0.283 cond 0.929 strength +0.646 base NLL free 2.079 cond 5.405
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.180 [+0.137, +0.234]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.626 [+0.277, +1.066]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.319 [+0.239, +0.414]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.687 [+0.992, +2.575]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.383 [+0.299, +0.481]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +2.645 [+1.826, +3.684]
+subdominant@8 | w=1 D_Chord_Joker_change_lat free 0.302 cond 0.572 strength +0.270 base NLL free 2.005 cond 2.687
+subdominant@8 | w=1.5 D_Chord_Joker_change_l free 0.302 cond 0.747 strength +0.445 base NLL free 2.005 cond 3.652
+subdominant@8 | w=2 D_Chord_Joker_change_lat free 0.302 cond 0.833 strength +0.530 base NLL free 2.005 cond 3.778
+subdominant@8 | w=3 D_Chord_Joker_change_lat free 0.302 cond 0.898 strength +0.596 base NLL free 2.005 cond 4.857
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.175 [+0.125, +0.236]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.965 [+0.533, +1.525]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.261 [+0.196, +0.336]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.091 [+0.552, +1.787]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.326 [+0.257, +0.404]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +2.169 [+1.548, +2.933]
+distant@4    | w=1 D_Chord_Joker_change_lat free 0.135 cond 0.333 strength +0.198 base NLL free 2.079 cond 3.386
+distant@4    | w=1.5 D_Chord_Joker_change_l free 0.135 cond 0.586 strength +0.451 base NLL free 2.079 cond 4.186
+distant@4    | w=2 D_Chord_Joker_change_lat free 0.135 cond 0.834 strength +0.699 base NLL free 2.079 cond 5.604
+distant@4    | w=3 D_Chord_Joker_change_lat free 0.135 cond 0.955 strength +0.820 base NLL free 2.079 cond 6.730
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.253 [+0.199, +0.309]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.801 [+0.260, +1.373]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.501 [+0.409, +0.593]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +2.218 [+1.270, +3.577]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.622 [+0.522, +0.710]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +3.344 [+1.865, +5.129]
+distant@8    | w=1 D_Chord_Joker_change_lat free 0.141 cond 0.401 strength +0.260 base NLL free 2.005 cond 3.066
+distant@8    | w=1.5 D_Chord_Joker_change_l free 0.141 cond 0.634 strength +0.494 base NLL free 2.005 cond 3.901
+distant@8    | w=2 D_Chord_Joker_change_lat free 0.141 cond 0.843 strength +0.703 base NLL free 2.005 cond 4.575
+distant@8    | w=3 D_Chord_Joker_change_lat free 0.141 cond 0.911 strength +0.770 base NLL free 2.005 cond 5.406
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.233 [+0.170, +0.299]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.835 [+0.367, +1.394]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.442 [+0.350, +0.535]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.509 [+0.885, +2.322]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.509 [+0.414, +0.601]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +2.340 [+1.436, +3.396]
+Pianist real continuation (chord-tone rate of the real chord, frozen-base NLL): {'@4': {'real_chord_tone_rate': 0.7875, 'base_nll': 2.7641313076019287}, '@8': {'real_chord_tone_rate': 0.69375, 'base_nll': 2.7184274196624756}}
+----------------------------------------------------------------------------------------------------
+Per generated note k: probability that note k is a tone of the requested chord
+real: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch  pianist
+  1  0.484    0.685 (+0.201)    0.798 (+0.314)    0.889 (+0.405)    0.951 (+0.466)  0.65
+  2  0.541    0.781 (+0.240)    0.864 (+0.323)    0.888 (+0.347)    0.939 (+0.397)  0.90
+  3  0.493    0.772 (+0.279)    0.851 (+0.358)    0.895 (+0.402)    0.925 (+0.432)  0.80
+  4  0.535    0.754 (+0.219)    0.849 (+0.313)    0.897 (+0.362)    0.890 (+0.354)  0.80
+  5  0.540    0.699 (+0.159)    0.773 (+0.233)    0.836 (+0.296)    0.880 (+0.340)  0.60
+  6  0.505    0.717 (+0.212)    0.811 (+0.306)    0.824 (+0.319)    0.806 (+0.301)  0.75
+  7  0.465    0.612 (+0.147)    0.774 (+0.309)    0.810 (+0.346)    0.804 (+0.340)  0.60
+  8  0.386    0.631 (+0.245)    0.727 (+0.341)    0.756 (+0.370)    0.805 (+0.419)  0.45
+dominant: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch
+  1  0.354    0.559 (+0.205)    0.683 (+0.329)    0.800 (+0.445)    0.925 (+0.571)
+  2  0.394    0.532 (+0.138)    0.811 (+0.418)    0.875 (+0.481)    0.950 (+0.556)
+  3  0.335    0.493 (+0.157)    0.785 (+0.449)    0.863 (+0.528)    0.936 (+0.600)
+  4  0.362    0.600 (+0.238)    0.795 (+0.433)    0.880 (+0.518)    0.877 (+0.514)
+  5  0.362    0.577 (+0.214)    0.765 (+0.402)    0.832 (+0.470)    0.859 (+0.496)
+  6  0.346    0.603 (+0.257)    0.748 (+0.402)    0.774 (+0.428)    0.855 (+0.509)
+  7  0.366    0.657 (+0.291)    0.795 (+0.429)    0.786 (+0.420)    0.842 (+0.476)
+  8  0.298    0.657 (+0.359)    0.743 (+0.445)    0.698 (+0.400)    0.815 (+0.517)
+subdominant: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch
+  1  0.340    0.538 (+0.198)    0.673 (+0.333)    0.806 (+0.466)    0.892 (+0.552)
+  2  0.248    0.559 (+0.312)    0.736 (+0.488)    0.885 (+0.638)    0.942 (+0.694)
+  3  0.268    0.541 (+0.273)    0.729 (+0.461)    0.888 (+0.620)    0.942 (+0.674)
+  4  0.277    0.546 (+0.268)    0.768 (+0.491)    0.881 (+0.603)    0.939 (+0.662)
+  5  0.339    0.578 (+0.239)    0.754 (+0.415)    0.823 (+0.485)    0.886 (+0.547)
+  6  0.355    0.599 (+0.244)    0.753 (+0.398)    0.802 (+0.447)    0.877 (+0.522)
+  7  0.264    0.591 (+0.327)    0.788 (+0.524)    0.811 (+0.547)    0.848 (+0.584)
+  8  0.329    0.624 (+0.295)    0.777 (+0.448)    0.767 (+0.438)    0.858 (+0.529)
+distant: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch
+  1  0.106    0.281 (+0.175)    0.500 (+0.394)    0.751 (+0.645)    0.931 (+0.824)
+  2  0.122    0.319 (+0.197)    0.579 (+0.457)    0.835 (+0.713)    0.988 (+0.866)
+  3  0.156    0.381 (+0.224)    0.624 (+0.467)    0.896 (+0.740)    0.974 (+0.818)
+  4  0.156    0.351 (+0.195)    0.642 (+0.486)    0.856 (+0.700)    0.927 (+0.771)
+  5  0.107    0.482 (+0.375)    0.706 (+0.599)    0.880 (+0.773)    0.944 (+0.837)
+  6  0.137    0.451 (+0.314)    0.685 (+0.548)    0.852 (+0.715)    0.859 (+0.722)
+  7  0.186    0.501 (+0.315)    0.671 (+0.484)    0.846 (+0.660)    0.853 (+0.666)
+  8  0.154    0.442 (+0.287)    0.668 (+0.514)    0.829 (+0.675)    0.808 (+0.654)
+Free runs identical across checkpoints: True
+====================================================================================================
+
+Running time: 72 s
+=== Guidance against: previous
+====================================================================================================
+Strength = CTM_cond - CTM_free (chord-tone probability mass, mean over the first N notes)
+Base NLL = how unlikely the frozen base finds the generated notes (lower = more likely)
+real@4       | w=1 D_Chord_Joker_change_lat free 0.514 cond 0.748 strength +0.235 base NLL free 2.079 cond 2.453
+real@4       | w=1.5 D_Chord_Joker_change_l free 0.514 cond 0.842 strength +0.329 base NLL free 2.079 cond 2.714
+real@4       | w=2 D_Chord_Joker_change_lat free 0.514 cond 0.912 strength +0.399 base NLL free 2.079 cond 2.850
+real@4       | w=3 D_Chord_Joker_change_lat free 0.514 cond 0.954 strength +0.440 base NLL free 2.079 cond 3.380
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.094 [+0.064, +0.130]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.261 [-0.048, +0.604]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.164 [+0.116, +0.217]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.397 [-0.030, +0.869]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.205 [+0.146, +0.268]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.928 [+0.370, +1.527]
+real@8       | w=1 D_Chord_Joker_change_lat free 0.494 cond 0.706 strength +0.213 base NLL free 2.005 cond 2.424
+real@8       | w=1.5 D_Chord_Joker_change_l free 0.494 cond 0.831 strength +0.337 base NLL free 2.005 cond 2.554
+real@8       | w=2 D_Chord_Joker_change_lat free 0.494 cond 0.890 strength +0.396 base NLL free 2.005 cond 2.771
+real@8       | w=3 D_Chord_Joker_change_lat free 0.494 cond 0.934 strength +0.440 base NLL free 2.005 cond 3.215
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.125 [+0.088, +0.169]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.130 [-0.216, +0.475]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.184 [+0.139, +0.235]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.347 [-0.022, +0.769]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.227 [+0.165, +0.292]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.791 [+0.309, +1.289]
+dominant@4   | w=1 D_Chord_Joker_change_lat free 0.361 cond 0.546 strength +0.184 base NLL free 2.079 cond 3.002
+dominant@4   | w=1.5 D_Chord_Joker_change_l free 0.361 cond 0.677 strength +0.315 base NLL free 2.079 cond 3.077
+dominant@4   | w=2 D_Chord_Joker_change_lat free 0.361 cond 0.729 strength +0.368 base NLL free 2.079 cond 3.192
+dominant@4   | w=3 D_Chord_Joker_change_lat free 0.361 cond 0.795 strength +0.434 base NLL free 2.079 cond 3.465
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.131 [+0.073, +0.197]  p = 1.0e-04  stronger at 90 % of 20 changes  base NLL +0.075 [-0.119, +0.288]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.183 [+0.109, +0.267]  p = 2.0e-04  stronger at 85 % of 20 changes  base NLL +0.189 [-0.058, +0.469]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.249 [+0.156, +0.341]  p = 1.5e-04  stronger at 85 % of 20 changes  base NLL +0.462 [-0.007, +1.073]
+dominant@8   | w=1 D_Chord_Joker_change_lat free 0.352 cond 0.585 strength +0.232 base NLL free 2.005 cond 3.007
+dominant@8   | w=1.5 D_Chord_Joker_change_l free 0.352 cond 0.705 strength +0.353 base NLL free 2.005 cond 2.814
+dominant@8   | w=2 D_Chord_Joker_change_lat free 0.352 cond 0.758 strength +0.406 base NLL free 2.005 cond 3.053
+dominant@8   | w=3 D_Chord_Joker_change_lat free 0.352 cond 0.802 strength +0.450 base NLL free 2.005 cond 3.105
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.120 [+0.063, +0.187]  p = 5.0e-05  stronger at 90 % of 20 changes  base NLL -0.193 [-0.371, -0.029]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.174 [+0.107, +0.248]  p = 5.0e-05  stronger at 90 % of 20 changes  base NLL +0.046 [-0.284, +0.381]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.218 [+0.135, +0.299]  p = 4.5e-04  stronger at 85 % of 20 changes  base NLL +0.098 [-0.251, +0.482]
+subdominant@4 | w=1 D_Chord_Joker_change_lat free 0.283 cond 0.546 strength +0.263 base NLL free 2.079 cond 2.760
+subdominant@4 | w=1.5 D_Chord_Joker_change_l free 0.283 cond 0.718 strength +0.435 base NLL free 2.079 cond 3.057
+subdominant@4 | w=2 D_Chord_Joker_change_lat free 0.283 cond 0.794 strength +0.511 base NLL free 2.079 cond 3.225
+subdominant@4 | w=3 D_Chord_Joker_change_lat free 0.283 cond 0.919 strength +0.636 base NLL free 2.079 cond 3.896
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.172 [+0.108, +0.245]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.298 [-0.008, +0.579]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.248 [+0.167, +0.338]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.466 [+0.111, +0.831]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.373 [+0.279, +0.478]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.136 [+0.548, +1.895]
+subdominant@8 | w=1 D_Chord_Joker_change_lat free 0.302 cond 0.572 strength +0.270 base NLL free 2.005 cond 2.687
+subdominant@8 | w=1.5 D_Chord_Joker_change_l free 0.302 cond 0.750 strength +0.448 base NLL free 2.005 cond 2.992
+subdominant@8 | w=2 D_Chord_Joker_change_lat free 0.302 cond 0.820 strength +0.518 base NLL free 2.005 cond 3.055
+subdominant@8 | w=3 D_Chord_Joker_change_lat free 0.302 cond 0.924 strength +0.621 base NLL free 2.005 cond 3.398
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.178 [+0.110, +0.256]  p = 1.0e-04  stronger at 95 % of 20 changes  base NLL +0.305 [+0.054, +0.587]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.248 [+0.174, +0.332]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.368 [+0.027, +0.768]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.352 [+0.280, +0.432]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.711 [+0.285, +1.262]
+distant@4    | w=1 D_Chord_Joker_change_lat free 0.135 cond 0.333 strength +0.198 base NLL free 2.079 cond 3.386
+distant@4    | w=1.5 D_Chord_Joker_change_l free 0.135 cond 0.553 strength +0.418 base NLL free 2.079 cond 3.435
+distant@4    | w=2 D_Chord_Joker_change_lat free 0.135 cond 0.762 strength +0.626 base NLL free 2.079 cond 4.428
+distant@4    | w=3 D_Chord_Joker_change_lat free 0.135 cond 0.920 strength +0.785 base NLL free 2.079 cond 4.799
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.220 [+0.173, +0.267]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.049 [-0.348, +0.442]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.429 [+0.353, +0.499]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.043 [+0.605, +1.521]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.587 [+0.504, +0.665]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.413 [+0.897, +1.922]
+distant@8    | w=1 D_Chord_Joker_change_lat free 0.141 cond 0.401 strength +0.260 base NLL free 2.005 cond 3.066
+distant@8    | w=1.5 D_Chord_Joker_change_l free 0.141 cond 0.612 strength +0.471 base NLL free 2.005 cond 3.261
+distant@8    | w=2 D_Chord_Joker_change_lat free 0.141 cond 0.797 strength +0.656 base NLL free 2.005 cond 3.606
+distant@8    | w=3 D_Chord_Joker_change_lat free 0.141 cond 0.916 strength +0.775 base NLL free 2.005 cond 3.907
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.211 [+0.154, +0.268]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.196 [-0.083, +0.473]
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.396 [+0.312, +0.480]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.541 [+0.200, +0.881]
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.515 [+0.419, +0.611]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +0.841 [+0.397, +1.301]
+Pianist real continuation (chord-tone rate of the real chord, frozen-base NLL): {'@4': {'real_chord_tone_rate': 0.7875, 'base_nll': 2.7641313076019287}, '@8': {'real_chord_tone_rate': 0.69375, 'base_nll': 2.7184274196624756}}
+----------------------------------------------------------------------------------------------------
+Per generated note k: probability that note k is a tone of the requested chord
+real: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch  pianist
+  1  0.484    0.685 (+0.201)    0.806 (+0.322)    0.899 (+0.415)    0.977 (+0.493)  0.65
+  2  0.541    0.781 (+0.240)    0.873 (+0.332)    0.929 (+0.388)    0.960 (+0.418)  0.90
+  3  0.493    0.772 (+0.279)    0.845 (+0.352)    0.915 (+0.422)    0.940 (+0.447)  0.80
+  4  0.535    0.754 (+0.219)    0.845 (+0.310)    0.906 (+0.371)    0.938 (+0.403)  0.80
+  5  0.540    0.699 (+0.159)    0.845 (+0.305)    0.889 (+0.349)    0.902 (+0.362)  0.60
+  6  0.505    0.717 (+0.212)    0.832 (+0.327)    0.852 (+0.347)    0.908 (+0.402)  0.75
+  7  0.465    0.612 (+0.147)    0.778 (+0.314)    0.832 (+0.367)    0.931 (+0.466)  0.60
+  8  0.386    0.631 (+0.245)    0.824 (+0.438)    0.898 (+0.512)    0.914 (+0.528)  0.45
+dominant: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch
+  1  0.354    0.559 (+0.205)    0.657 (+0.303)    0.723 (+0.369)    0.804 (+0.450)
+  2  0.394    0.532 (+0.138)    0.673 (+0.279)    0.715 (+0.321)    0.799 (+0.405)
+  3  0.335    0.493 (+0.157)    0.638 (+0.302)    0.700 (+0.365)    0.776 (+0.441)
+  4  0.362    0.600 (+0.238)    0.738 (+0.376)    0.778 (+0.416)    0.802 (+0.439)
+  5  0.362    0.577 (+0.214)    0.721 (+0.359)    0.757 (+0.395)    0.767 (+0.405)
+  6  0.346    0.603 (+0.257)    0.716 (+0.370)    0.754 (+0.409)    0.825 (+0.480)
+  7  0.366    0.657 (+0.291)    0.751 (+0.385)    0.828 (+0.462)    0.816 (+0.450)
+  8  0.298    0.657 (+0.359)    0.744 (+0.446)    0.809 (+0.511)    0.829 (+0.531)
+subdominant: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch
+  1  0.340    0.538 (+0.198)    0.666 (+0.326)    0.781 (+0.441)    0.910 (+0.570)
+  2  0.248    0.559 (+0.312)    0.726 (+0.478)    0.806 (+0.559)    0.920 (+0.672)
+  3  0.268    0.541 (+0.273)    0.738 (+0.470)    0.793 (+0.525)    0.912 (+0.645)
+  4  0.277    0.546 (+0.268)    0.743 (+0.465)    0.796 (+0.518)    0.934 (+0.656)
+  5  0.339    0.578 (+0.239)    0.792 (+0.453)    0.841 (+0.503)    0.912 (+0.573)
+  6  0.355    0.599 (+0.244)    0.781 (+0.426)    0.840 (+0.485)    0.908 (+0.553)
+  7  0.264    0.591 (+0.327)    0.745 (+0.481)    0.854 (+0.590)    0.944 (+0.680)
+  8  0.329    0.624 (+0.295)    0.813 (+0.484)    0.852 (+0.523)    0.951 (+0.622)
+distant: notes to half of the final strength: w=1 D_Chord_Joker_change_lat 1, w=1.5 D_Chord_Joker_change_l 1, w=2 D_Chord_Joker_change_lat 1, w=3 D_Chord_Joker_change_lat 1
+  k   free w=1 D_Chord_Joker_ch w=1.5 D_Chord_Joker_ w=2 D_Chord_Joker_ch w=3 D_Chord_Joker_ch
+  1  0.106    0.281 (+0.175)    0.475 (+0.368)    0.691 (+0.585)    0.922 (+0.816)
+  2  0.122    0.319 (+0.197)    0.561 (+0.439)    0.764 (+0.642)    0.917 (+0.795)
+  3  0.156    0.381 (+0.224)    0.591 (+0.435)    0.786 (+0.629)    0.925 (+0.769)
+  4  0.156    0.351 (+0.195)    0.585 (+0.429)    0.805 (+0.649)    0.914 (+0.758)
+  5  0.107    0.482 (+0.375)    0.650 (+0.543)    0.845 (+0.738)    0.901 (+0.794)
+  6  0.137    0.451 (+0.314)    0.666 (+0.530)    0.811 (+0.674)    0.916 (+0.779)
+  7  0.186    0.501 (+0.315)    0.701 (+0.515)    0.827 (+0.640)    0.910 (+0.724)
+  8  0.154    0.442 (+0.287)    0.667 (+0.513)    0.847 (+0.693)    0.923 (+0.769)
+Free runs identical across checkpoints: True
+====================================================================================================
+
+Running time: 72 s
+=== Overlap of the 5 test pieces with training data (share of each piece's 8-note sequences found in each pickle, from this script's unseen check)
+base_train {'Carbajo, Víctor, Little ': 0.011, 'Gurlitt, Cornelius, Nach': 0.012, 'Sgambati, Giovanni, Noct': 0.003, 'Taneyev, Sergey, Andanti': 0.009, 'Van Hoorick, Geert, Trom': 0.005}
+D_Chord_Joker_change_latest_best:train {'Carbajo, Víctor, Little ': 0.002, 'Gurlitt, Cornelius, Nach': 1.0, 'Sgambati, Giovanni, Noct': 1.0, 'Taneyev, Sergey, Andanti': 0.0, 'Van Hoorick, Geert, Trom': 1.0}
+D_Chord_Joker_change_latest_best:validation {'Carbajo, Víctor, Little ': 1.0, 'Gurlitt, Cornelius, Nach': 0.002, 'Sgambati, Giovanni, Noct': 0.0, 'Taneyev, Sergey, Andanti': 1.0, 'Van Hoorick, Geert, Trom': 0.0}
+Conclusion: the frozen base saw none of them. In the adapter's current split, 3 of the 5 pieces (12 of the 20 moments) are in its training data and 2 (8 moments) in its validation data, so these moments are not unseen by the adapter.
+=== Exploratory, from a temporary reading of the saved runs, not for citing: first 8 notes, by the adapter's split
+free     adapter training    real    w=1    moments 12 cond  65.9 % free  45.5 % gain over w=1  +0.0 pp [0. 0.] in 0/12  base NLL 2.59
+free     adapter training    real    w=1.5  moments 12 cond  79.7 % free  45.5 % gain over w=1 +13.8 pp [ 8.7 20.3] in 12/12  base NLL 3.14
+free     adapter training    real    w=2    moments 12 cond  85.1 % free  45.5 % gain over w=1 +19.2 pp [13.6 25.7] in 12/12  base NLL 3.34
+free     adapter training    real    w=3    moments 12 cond  89.1 % free  45.5 % gain over w=1 +23.2 pp [17.  30.5] in 12/12  base NLL 3.94
+free     adapter training    distant w=1    moments 12 cond  40.9 % free  11.1 % gain over w=1  +0.0 pp [0. 0.] in 0/12  base NLL 2.94
+free     adapter training    distant w=1.5  moments 12 cond  68.9 % free  11.1 % gain over w=1 +28.0 pp [19.9 36.8] in 12/12  base NLL 3.52
+free     adapter training    distant w=2    moments 12 cond  87.4 % free  11.1 % gain over w=1 +46.5 pp [33.8 59. ] in 12/12  base NLL 4.04
+free     adapter training    distant w=3    moments 12 cond  91.2 % free  11.1 % gain over w=1 +50.4 pp [36.8 63.9] in 12/12  base NLL 4.91
+free     adapter validation  real    w=1    moments  8 cond  77.7 % free  55.3 % gain over w=1  +0.0 pp [0. 0.] in 0/8  base NLL 2.17
+free     adapter validation  real    w=1.5  moments  8 cond  81.9 % free  55.3 % gain over w=1  +4.2 pp [-1.2 10.6] in 6/8  base NLL 3.79
+free     adapter validation  real    w=2    moments  8 cond  84.7 % free  55.3 % gain over w=1  +7.0 pp [ 0.  14.5] in 6/8  base NLL 3.94
+free     adapter validation  real    w=3    moments  8 cond  85.1 % free  55.3 % gain over w=1  +7.4 pp [-4.  19.1] in 6/8  base NLL 5.52
+free     adapter validation  distant w=1    moments  8 cond  39.0 % free  18.5 % gain over w=1  +0.0 pp [0. 0.] in 0/8  base NLL 3.25
+free     adapter validation  distant w=1.5  moments  8 cond  55.3 % free  18.5 % gain over w=1 +16.3 pp [ 8.5 24.2] in 7/8  base NLL 4.48
+free     adapter validation  distant w=2    moments  8 cond  79.7 % free  18.5 % gain over w=1 +40.7 pp [28.2 52.9] in 8/8  base NLL 5.38
+free     adapter validation  distant w=3    moments  8 cond  90.8 % free  18.5 % gain over w=1 +51.8 pp [39.8 62.8] in 8/8  base NLL 6.15
+previous adapter training    real    w=1    moments 12 cond  65.9 % free  45.5 % gain over w=1  +0.0 pp [0. 0.] in 0/12  base NLL 2.59
+previous adapter training    real    w=1.5  moments 12 cond  79.3 % free  45.5 % gain over w=1 +13.4 pp [ 8.6 19.4] in 12/12  base NLL 2.67
+previous adapter training    real    w=2    moments 12 cond  87.5 % free  45.5 % gain over w=1 +21.6 pp [15.6 28.6] in 12/12  base NLL 2.88
+previous adapter training    real    w=3    moments 12 cond  93.1 % free  45.5 % gain over w=1 +27.2 pp [19.9 35. ] in 12/12  base NLL 3.15
+previous adapter training    distant w=1    moments 12 cond  40.9 % free  11.1 % gain over w=1  +0.0 pp [0. 0.] in 0/12  base NLL 2.94
+previous adapter training    distant w=1.5  moments 12 cond  63.9 % free  11.1 % gain over w=1 +23.1 pp [15.8 30.4] in 12/12  base NLL 3.34
+previous adapter training    distant w=2    moments 12 cond  86.1 % free  11.1 % gain over w=1 +45.2 pp [33.8 55.8] in 12/12  base NLL 3.58
+previous adapter training    distant w=3    moments 12 cond  94.8 % free  11.1 % gain over w=1 +53.9 pp [40.7 66.5] in 12/12  base NLL 3.69
+previous adapter validation  real    w=1    moments  8 cond  77.7 % free  55.3 % gain over w=1  +0.0 pp [0. 0.] in 0/8  base NLL 2.17
+previous adapter validation  real    w=1.5  moments  8 cond  88.8 % free  55.3 % gain over w=1 +11.1 pp [ 6.5 17.7] in 8/8  base NLL 2.37
+previous adapter validation  real    w=2    moments  8 cond  91.3 % free  55.3 % gain over w=1 +13.6 pp [ 9.  19.8] in 8/8  base NLL 2.61
+previous adapter validation  real    w=3    moments  8 cond  93.8 % free  55.3 % gain over w=1 +16.0 pp [ 8.1 25.6] in 7/8  base NLL 3.32
+previous adapter validation  distant w=1    moments  8 cond  39.0 % free  18.5 % gain over w=1  +0.0 pp [0. 0.] in 0/8  base NLL 3.25
+previous adapter validation  distant w=1.5  moments  8 cond  57.1 % free  18.5 % gain over w=1 +18.1 pp [ 9.5 26.5] in 7/8  base NLL 3.15
+previous adapter validation  distant w=2    moments  8 cond  70.1 % free  18.5 % gain over w=1 +31.2 pp [20.9 42.2] in 8/8  base NLL 3.64
+previous adapter validation  distant w=3    moments  8 cond  86.8 % free  18.5 % gain over w=1 +47.9 pp [35.2 62. ] in 8/8  base NLL 4.23
+=== 2026-11-04: the option --guidance-against was removed from this script and from the interaction.
+Reason: while playing, the real previous chord is unknown. The last pressed key is not necessarily the sounding harmony, because the model can change chord by itself, while the "previous" run above used the piece's labelled chord.
+So the "Guidance against: previous" run above is a record of that best case and cannot be rerun from the current code. Only guidance against free generation remains.
+################################################################
+Date: 2026-11-04  Commit: 4bd7d3f  Uncommitted changes: guidance and its +-8 semitone window not yet committed
+Question: does raising only the chord's notes within 8 semitones of the last pitch give fewer big jumps than the earlier guidance, at the same weight?
+Chosen before running:
+  Main measure: share of the first 8 generated notes that land more than 8 semitones from the note before, with the piece's real chord held, w = 3, new guidance minus earlier guidance, paired per chord change.
+  Supported if: the 95 % range of that difference is below zero.
+  Refuted if: it reaches zero or is above it.
+  Cost: probability on the chord's notes and base NLL at the same weights; references are w = 1 (plain chord) and the pianist's real notes.
+Earlier guidance: the runs in out/chord_guidance_free, same moments and noise. They cannot be rerun from the current code, which replaced that formula.
+Model: save_models/D_Chord_Joker_change_latest_best.pth
+Data: samples/not_seen, 5 pieces, 4 chord changes per piece = 20 moments; 1 sampling seed shared by all conditions. 3 of the 5 pieces are in the adapter's training data.
+Device: mps. Context 200 notes as in the interaction, 8 generated notes. Running time of the sweep: 1 min 10 s.
+Output: out/chord_guidance_range. Guidance: only upward, only the chord's notes within 8 semitones of the last pitch.
+real@8       | w=1 D_Chord_Joker_change_lat free 0.494 cond 0.706 strength +0.213 base NLL free 2.005 cond 2.424
+real@8       | w=1.5 D_Chord_Joker_change_l free 0.494 cond 0.751 strength +0.258 base NLL free 2.005 cond 2.597
+real@8       | w=2 D_Chord_Joker_change_lat free 0.494 cond 0.807 strength +0.314 base NLL free 2.005 cond 2.858
+real@8       | w=3 D_Chord_Joker_change_lat free 0.494 cond 0.888 strength +0.394 base NLL free 2.005 cond 3.319
+dominant@8   | w=1 D_Chord_Joker_change_lat free 0.352 cond 0.585 strength +0.232 base NLL free 2.005 cond 3.007
+dominant@8   | w=1.5 D_Chord_Joker_change_l free 0.352 cond 0.620 strength +0.268 base NLL free 2.005 cond 3.045
+dominant@8   | w=2 D_Chord_Joker_change_lat free 0.352 cond 0.686 strength +0.334 base NLL free 2.005 cond 3.177
+dominant@8   | w=3 D_Chord_Joker_change_lat free 0.352 cond 0.812 strength +0.460 base NLL free 2.005 cond 3.950
+subdominant@8 | w=1 D_Chord_Joker_change_lat free 0.302 cond 0.572 strength +0.270 base NLL free 2.005 cond 2.687
+subdominant@8 | w=1.5 D_Chord_Joker_change_l free 0.302 cond 0.630 strength +0.328 base NLL free 2.005 cond 2.760
+subdominant@8 | w=2 D_Chord_Joker_change_lat free 0.302 cond 0.702 strength +0.399 base NLL free 2.005 cond 3.161
+subdominant@8 | w=3 D_Chord_Joker_change_lat free 0.302 cond 0.835 strength +0.532 base NLL free 2.005 cond 3.671
+distant@8    | w=1 D_Chord_Joker_change_lat free 0.141 cond 0.401 strength +0.260 base NLL free 2.005 cond 3.066
+distant@8    | w=1.5 D_Chord_Joker_change_l free 0.141 cond 0.481 strength +0.340 base NLL free 2.005 cond 3.146
+distant@8    | w=2 D_Chord_Joker_change_lat free 0.141 cond 0.610 strength +0.470 base NLL free 2.005 cond 3.648
+distant@8    | w=3 D_Chord_Joker_change_lat free 0.141 cond 0.812 strength +0.671 base NLL free 2.005 cond 3.941
+Pianist real continuation (chord-tone rate of the real chord, frozen-base NLL): {'@8': {'real_chord_tone_rate': 0.69375, 'base_nll': 2.7184274196624756}}
+--- Comparison with the earlier guidance, from a temporary script over the two saved sweeps, so exploratory: pp = percentage points; lower/equal/higher counts chord changes.
+Plain chord (w = 1) notes identical in both sweeps, so moments and noise match: True | moments 20 | pieces 5
+Pianist real notes: 61.3 % jump more than 8 semitones, mean jump 13.5 semitones
+No chord pressed:   56.2 %, mean jump 12.2, base NLL 2.00
+--- chord: real
+weight | earlier: jumps > 8, mean jump, chord notes, base NLL | new: same | new minus earlier, jumps > 8 (95 % range, p, changes lower/equal/higher)
+w=1   |  55.0 %  12.0  70.6 % 2.42 |  55.0 %  12.0  70.6 % 2.42 |  +0.0 pp [+0.0, +0.0] p=1.0000 0/20/0
+w=1.5 |  58.8 %  12.6  80.6 % 3.40 |  53.1 %  11.8  75.1 % 2.60 |  -5.6 pp [-15.0, +3.8] p=0.3091 8/6/6
+w=2   |  52.5 %  12.4  85.0 % 3.58 |  41.2 %  10.3  80.7 % 2.86 | -11.2 pp [-23.8, +0.0] p=0.1029 8/7/5
+w=3   |  53.8 %  13.4  87.5 % 4.57 |  27.5 %   8.2  88.8 % 3.32 | -26.2 pp [-36.9, -16.2] p=0.0001 16/2/2
+--- chord: distant
+weight | earlier: jumps > 8, mean jump, chord notes, base NLL | new: same | new minus earlier, jumps > 8 (95 % range, p, changes lower/equal/higher)
+w=1   |  59.4 %  12.4  40.1 % 3.07 |  59.4 %  12.4  40.1 % 3.07 |  +0.0 pp [+0.0, +0.0] p=1.0000 0/20/0
+w=1.5 |  58.8 %  12.7  63.4 % 3.90 |  56.2 %  12.2  48.1 % 3.15 |  -2.5 pp [-10.0, +4.4] p=0.6490 7/6/7
+w=2   |  58.1 %  14.5  84.3 % 4.57 |  44.4 %  10.2  61.0 % 3.65 | -13.8 pp [-25.0, -2.5] p=0.0521 12/3/5
+w=3   |  55.0 %  15.8  91.1 % 5.41 |  24.4 %   7.7  81.2 % 3.94 | -30.6 pp [-41.9, -19.4] p=0.0001 16/2/2
+new w=3 minus plain chord, real chord, jumps > 8: -27.5 pp [-36.9, -17.5] lower/equal/higher 17/1/2
+earlier w=3 minus new w=3, base NLL: +1.25 [+0.61, +2.12] new lower at 18 of 20
+new w=3 minus earlier w=3, chord-note probability: +1.3 pp [-1.4, +4.4]
+
+Result: supported in these pieces. At w = 3 with the real chord, 27.5 % of generated notes jump more than 8 semitones against 53.8 % before (16 of 20 changes lower), with the same probability on the chord's notes. But the pianist's real notes jump that far 61.3 % of the time, so at full pedal the model jumps much less than the pianist.
+################################################################
+Date: 2026-11-04  Commit: 4bd7d3f  Uncommitted changes: guidance and its range limit not yet committed
+Question: if the probability of notes further than 8 semitones from the last pitch is scaled by 1 - pedal, do far jumps fall step by step with the pedal, and what does that cost in plausibility?
+Chosen before running:
+  Main measure: share of the first 8 generated notes that land more than 8 semitones from the note before, with the piece's real chord held, at pedal 0, 1/4, 1/2 and 1 (w = 1, 1.5, 2, 3).
+  Supported if: the share falls at every pedal step, the 95 % range of half pedal minus released is below zero, and full pedal is exactly 0.
+  Refuted if: any step fails to fall, or that range reaches zero.
+  Cost: probability on the chord's notes and base NLL, against the pianist's real notes and the run just above (same moments and noise, no range limit).
+Model: save_models/D_Chord_Joker_change_latest_best.pth
+Data: samples/not_seen, 5 pieces, 4 chord changes per piece = 20 moments; 1 sampling seed shared by all conditions. 3 of the 5 pieces are in the adapter's training data.
+Device: mps. Context 200 notes as in the interaction, 8 generated notes. Output: out/chord_guidance_pedal_range.
+Running time of the sweep: 76 s.
+Far = share of generated notes more than 8 semitones from the note before
+real@8       | w=1 D_Chord_Joker_change_lat free 0.494 cond 0.706 strength +0.213 base NLL free 2.005 cond 2.424 far free 0.562 cond 0.550
+real@8       | w=1.5 D_Chord_Joker_change_l free 0.494 cond 0.773 strength +0.280 base NLL free 2.005 cond 3.071 far free 0.562 cond 0.388
+real@8       | w=2 D_Chord_Joker_change_lat free 0.494 cond 0.836 strength +0.342 base NLL free 2.005 cond 3.035 far free 0.562 cond 0.181
+real@8       | w=3 D_Chord_Joker_change_lat free 0.494 cond 0.929 strength +0.435 base NLL free 2.005 cond 3.833 far free 0.562 cond 0.000
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.067 [+0.031, +0.109]  p = 1.4e-03  stronger at 85 % of 20 changes  base NLL +0.647 [+0.275, +1.043]  far -0.163 [-0.244, -0.069] lower at 80 %
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.129 [+0.082, +0.184]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.611 [+0.173, +1.082]  far -0.369 [-0.456, -0.281] lower at 95 %
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.222 [+0.169, +0.279]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.409 [+0.753, +2.152]  far -0.550 [-0.637, -0.456] lower at 95 %
+dominant@8   | w=1 D_Chord_Joker_change_lat free 0.352 cond 0.585 strength +0.232 base NLL free 2.005 cond 3.007 far free 0.562 cond 0.537
+dominant@8   | w=1.5 D_Chord_Joker_change_l free 0.352 cond 0.653 strength +0.300 base NLL free 2.005 cond 3.095 far free 0.562 cond 0.344
+dominant@8   | w=2 D_Chord_Joker_change_lat free 0.352 cond 0.737 strength +0.385 base NLL free 2.005 cond 3.418 far free 0.562 cond 0.156
+dominant@8   | w=3 D_Chord_Joker_change_lat free 0.352 cond 0.870 strength +0.518 base NLL free 2.005 cond 4.234 far free 0.562 cond 0.000
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.068 [+0.032, +0.110]  p = 2.5e-04  stronger at 90 % of 20 changes  base NLL +0.088 [-0.255, +0.428]  far -0.194 [-0.306, -0.094] lower at 65 %
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.153 [+0.103, +0.207]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.410 [+0.100, +0.746]  far -0.381 [-0.475, -0.287] lower at 85 %
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.286 [+0.213, +0.360]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.227 [+0.487, +2.108]  far -0.537 [-0.613, -0.450] lower at 95 %
+subdominant@8 | w=1 D_Chord_Joker_change_lat free 0.302 cond 0.572 strength +0.270 base NLL free 2.005 cond 2.687 far free 0.562 cond 0.519
+subdominant@8 | w=1.5 D_Chord_Joker_change_l free 0.302 cond 0.642 strength +0.339 base NLL free 2.005 cond 3.130 far free 0.562 cond 0.325
+subdominant@8 | w=2 D_Chord_Joker_change_lat free 0.302 cond 0.770 strength +0.468 base NLL free 2.005 cond 3.486 far free 0.562 cond 0.169
+subdominant@8 | w=3 D_Chord_Joker_change_lat free 0.302 cond 0.897 strength +0.594 base NLL free 2.005 cond 4.208 far free 0.562 cond 0.000
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.070 [+0.038, +0.103]  p = 5.5e-04  stronger at 90 % of 20 changes  base NLL +0.443 [+0.078, +0.924]  far -0.194 [-0.281, -0.113] lower at 65 %
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.198 [+0.140, +0.269]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +0.798 [+0.429, +1.218]  far -0.350 [-0.463, -0.244] lower at 85 %
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.325 [+0.259, +0.396]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.521 [+0.964, +2.114]  far -0.519 [-0.625, -0.412] lower at 95 %
+distant@8    | w=1 D_Chord_Joker_change_lat free 0.141 cond 0.401 strength +0.260 base NLL free 2.005 cond 3.066 far free 0.562 cond 0.594
+distant@8    | w=1.5 D_Chord_Joker_change_l free 0.141 cond 0.531 strength +0.390 base NLL free 2.005 cond 3.457 far free 0.562 cond 0.362
+distant@8    | w=2 D_Chord_Joker_change_lat free 0.141 cond 0.663 strength +0.522 base NLL free 2.005 cond 4.102 far free 0.562 cond 0.181
+distant@8    | w=3 D_Chord_Joker_change_lat free 0.141 cond 0.874 strength +0.733 base NLL free 2.005 cond 4.505 far free 0.562 cond 0.000
+             | w=1.5 D_Chord_Joker_change_l minus first: strength +0.130 [+0.060, +0.201]  p = 2.1e-03  stronger at 85 % of 20 changes  base NLL +0.392 [+0.037, +0.783]  far -0.231 [-0.319, -0.150] lower at 75 %
+             | w=2 D_Chord_Joker_change_lat minus first: strength +0.262 [+0.195, +0.325]  p = 5.0e-05  stronger at 95 % of 20 changes  base NLL +1.036 [+0.558, +1.560]  far -0.412 [-0.506, -0.319] lower at 95 %
+             | w=3 D_Chord_Joker_change_lat minus first: strength +0.473 [+0.375, +0.564]  p = 5.0e-05  stronger at 100 % of 20 changes  base NLL +1.439 [+0.659, +2.412]  far -0.594 [-0.662, -0.519] lower at 100 %
+Pianist real continuation (chord-tone rate of the real chord, frozen-base NLL): {'@8': {'real_chord_tone_rate': 0.69375, 'base_nll': 2.7184274196624756, 'far_jump_rate': 0.6125}}
+Free runs identical across checkpoints: True
+Result: supported in these pieces. With the real chord, far jumps are 55.0 / 38.8 / 18.1 / 0.0 % at pedal 0, 1/4, 1/2, 1; half pedal minus released is -36.9 percentage points (95 % range -45.6 to -28.1), lower at 95 % of 20 changes. Probability on the chord's notes 70.6 / 77.3 / 83.6 / 92.9 %. Cost: base NLL 2.42 / 3.07 / 3.04 / 3.83 against 2.72 for the pianist's real notes and 2.42 / 2.60 / 2.86 / 3.32 in the run above without the range limit, so from a quarter of the pedal the notes are less likely under the base than the pianist's.

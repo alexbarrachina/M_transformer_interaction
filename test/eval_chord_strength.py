@@ -21,6 +21,18 @@ Protocol (paired: every checkpoint and condition shares the same history and sam
      change with a paired bootstrap CI and a paired sign-flip permutation test.
   4. Per generated note k (summary 'per_note'): the same probability for note k alone, to see
      how many notes the model needs to reach the requested harmony.
+  5. Guidance sweep (--guidance-weights 1 1.5 2 3): the same runs at each w, with
+     logits = free + w * (chord - free), where w = 1 is no guidance and w = 3 is guidance 2 in
+     D_Chord_Joker.next_pitch_logits, which applies it only upward and only to the chord's notes
+     within 8 semitones of the last pitch. The largest w stands for the pedal fully pressed, so
+     notes further than that keep 1 - pedal of their probability (w = 1: all of it, largest w: none).
+     Base NLL (how unlikely the frozen base finds the generated notes, lower = more likely) shows
+     what the extra strength costs, and the share of notes jumping further than those 8 semitones
+     shows what the limit does. The pianist's real notes give the reference.
+     Result (2026-11-04, preliminary: 20 moments, 5 pieces, 3 of them in the adapter's training data):
+     strength rises and far jumps fall at every pedal step (none at full pedal), but from w = 1.5
+     the notes are less likely under the base than the pianist's. See
+     test/results/eval_chord_strength_guidance.txt.
 
 Generation results are saved per MIDI file in --output, so several processes can share the
 work (one file each); --summarize-only then writes summary.json from all saved files.
@@ -121,7 +133,8 @@ def load_checkpoint(path: Path, device: torch.device) -> D_Base:
 
 @torch.inference_mode()
 def generate(model: D_Base, piece: Dict[str, np.ndarray], onset: int, chords: Dict[str, dict],
-             noise: torch.Tensor, context: int, temperature: float, device: torch.device) -> Dict[str, list]:
+             noise: torch.Tensor, context: int, temperature: float, device: torch.device,
+             guidance: float = 0.0, range_limit: float = 0.0) -> Dict[str, list]:
     """Rows = seeds x (free + CONDITIONS); all rows share the real primer."""
     seeds, notes = noise.shape[:2]
     rows = [(seed, name) for seed in range(seeds) for name in ('free',) + CONDITIONS]
@@ -145,7 +158,8 @@ def generate(model: D_Base, piece: Dict[str, np.ndarray], onset: int, chords: Di
         window = slice(position - context, position + 1)  # same sliding context as performance
         if isinstance(model, D_Chord_Joker):
             logits = model.next_pitch_logits({'pitch': pitch[:, window], 'chord_chroma': chroma[:, window],
-                                              'chord_anchor_pc': anchor[:, window], 'chord_active': active[:, window]})
+                                              'chord_anchor_pc': anchor[:, window], 'chord_active': active[:, window]},
+                                             guidance, range_limit)
         else:  # D_Base_Joker has no chord input: every row sees the context only
             logits = model.decoder({'pitch': pitch[:, window][:, :-1]})[:, -1]
         pc_mass.append(F.softmax(logits / temperature, dim=-1) @ to_pc)
@@ -156,8 +170,8 @@ def generate(model: D_Base, piece: Dict[str, np.ndarray], onset: int, chords: Di
     base = F.log_softmax(model.decoder({'pitch': pitch[:, :-1]}).float(), dim=-1)  # decoder alone = no chord
     base_logp = base[:, context - 1:].gather(-1, pitch[:, context:].unsqueeze(-1)).squeeze(-1)
     return {'rows': rows, 'pitches': pitch[:, context:].tolist(),
-            'pc_mass': torch.stack(pc_mass, dim=1).round(decimals=6).tolist(),
-            'base_logp': base_logp.round(decimals=5).tolist()}
+            'pc_mass': torch.stack(pc_mass, dim=1).cpu().round(decimals=6).tolist(),
+            'base_logp': base_logp.cpu().round(decimals=5).tolist()}
 
 
 def run_file(path: Path, file_index: int, models: Dict[str, D_Chord_Joker], args: argparse.Namespace,
@@ -168,6 +182,7 @@ def run_file(path: Path, file_index: int, models: Dict[str, D_Chord_Joker], args
     onsets = changes[np.linspace(0, len(changes) - 1, args.onsets).round().astype(int)]  # spread over the piece
     record = {'midi': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
               'performed_notes': len(piece['pitch']), 'usable_changes': len(changes), 'onsets': []}
+    full_pedal = max(args.guidance_weights) - 1  # guidance at full pedal, as --max-guidance in the interaction
     for onset_index, onset in enumerate(onsets.tolist()):
         chords = requested_chords(piece, onset)
         rng = torch.Generator().manual_seed(args.seed + 1000 * file_index + onset_index)
@@ -175,7 +190,10 @@ def run_file(path: Path, file_index: int, models: Dict[str, D_Chord_Joker], args
         entry = {'onset': onset, 'chords': chords, 'last_primer_pitch': int(piece['pitch'][onset - 1]),
                  'real_continuation': piece['pitch'][onset:onset + args.notes].tolist(), 'models': {}}
         for name, model in models.items():
-            entry['models'][name] = generate(model, piece, onset, chords, noise, args.context, args.temperature, device)
+            for weight in args.guidance_weights:
+                key = name if len(args.guidance_weights) == 1 else f'w={weight:g} {name}'
+                entry['models'][key] = generate(model, piece, onset, chords, noise, args.context, args.temperature,
+                                                device, weight - 1, (weight - 1) / full_pedal if full_pedal else 0.0)
         record['onsets'].append(entry)
         print(f'{path.name}: change {onset_index + 1}/{args.onsets} done', flush=True)
     return record
@@ -188,7 +206,8 @@ def per_change_metrics(entry: dict, model: str, condition: str, horizon: int) ->
     run = entry['models'][model]
     pcs = entry['chords'][condition]['pcs']
     values = {key: [] for key in ('ctm_cond', 'ctm_free', 'ctr_cond', 'ctr_free', 'coverage_cond',
-                                  'coverage_free', 'nll_cond', 'nll_free', 'leaps_cond', 'leaps_free')}
+                                  'coverage_free', 'nll_cond', 'nll_free', 'leaps_cond', 'leaps_free',
+                                  'far_cond', 'far_free')}
     for seed in {seed for seed, _ in run['rows']}:
         for kind, name in (('cond', condition), ('free', 'free')):
             row = run['rows'].index([seed, name])
@@ -199,6 +218,7 @@ def per_change_metrics(entry: dict, model: str, condition: str, horizon: int) ->
             values['nll_' + kind].append(-np.mean(run['base_logp'][row][:horizon]))
             jumps = np.abs(np.diff(np.r_[entry['last_primer_pitch'], pitches]))
             values['leaps_' + kind].append((jumps > 12).mean())
+            values['far_' + kind].append((jumps > D_Chord_Joker.guidance_range).mean())
     result = {key: float(np.mean(value)) for key, value in values.items()}
     result['strength'] = result['ctm_cond'] - result['ctm_free']
     return result
@@ -231,6 +251,7 @@ def pianist_reference(entries: list, args: argparse.Namespace) -> dict:
     """The pianist's real next notes at each tested change, scored like the generated ones."""
     model = load_checkpoint(args.checkpoint[0], torch.device('cpu'))  # no chord = the frozen base
     pieces, rates, nll = {}, {h: [] for h in args.horizons}, {h: [] for h in args.horizons}
+    far = {h: [] for h in args.horizons}
     for midi, entry in entries:
         piece = pieces.setdefault(midi, read_piece(args.midi_dir / midi))
         onset = entry['onset']
@@ -241,8 +262,10 @@ def pianist_reference(entries: list, args: argparse.Namespace) -> dict:
         for h in args.horizons:
             rates[h].append(np.isin(real[:h].numpy() % 12, entry['chords']['real']['pcs']).mean())
             nll[h].append(-logp[:h].mean())
-    return {f'@{h}': {'real_chord_tone_rate': float(np.mean(rates[h])), 'base_nll': float(np.mean(nll[h]))}
-            for h in args.horizons}
+            jumps = np.abs(np.diff(np.r_[entry['last_primer_pitch'], real[:h].numpy()]))
+            far[h].append((jumps > D_Chord_Joker.guidance_range).mean())
+    return {f'@{h}': {'real_chord_tone_rate': float(np.mean(rates[h])), 'base_nll': float(np.mean(nll[h])),
+                      'far_jump_rate': float(np.mean(far[h]))} for h in args.horizons}
 
 
 def unseen_check(midis: List[Path], checkpoints: List[Path], base_train: Path) -> dict:
@@ -312,6 +335,22 @@ def summarize(output: Path, args: argparse.Namespace, reference=pianist_referenc
                                        'p_permutation': permutation_p(difference, rng),
                                        'new_stronger_fraction': float((difference > 0).mean()),
                                        'by_file': by_file, 'changes': len(difference)}
+            if len(models) > 2:  # guidance sweep: every weight against the first (no guidance)
+                block['sweep'] = {}
+                for model in models[1:]:
+                    gain = (np.asarray([row['strength'] for row in metrics[model]])
+                            - np.asarray([row['strength'] for row in metrics[models[0]]]))
+                    cost = (np.asarray([row['nll_cond'] for row in metrics[model]])
+                            - np.asarray([row['nll_cond'] for row in metrics[models[0]]]))
+                    far = (np.asarray([row['far_cond'] for row in metrics[model]])
+                           - np.asarray([row['far_cond'] for row in metrics[models[0]]]))
+                    block['sweep'][model] = {'far_change': float(far.mean()), 'far_change_ci95': bootstrap_ci(far, rng),
+                                             'far_lower_fraction': float((far < 0).mean()),
+                                             'strength_gain': float(gain.mean()), 'strength_gain_ci95': bootstrap_ci(gain, rng),
+                                             'p_permutation': permutation_p(gain, rng),
+                                             'stronger_fraction': float((gain > 0).mean()),
+                                             'nll_cost': float(cost.mean()), 'nll_cost_ci95': bootstrap_ci(cost, rng),
+                                             'changes': len(gain)}
             summary['results'][f'{condition}@{horizon}'] = block
     # Per generated note k: how many notes the model needs to reach the requested harmony.
     summary['per_note'] = {}
@@ -350,15 +389,24 @@ def summarize(output: Path, args: argparse.Namespace, reference=pianist_referenc
 
 
 def print_summary(summary: dict) -> None:
-    models = [key for key in next(iter(summary['results'].values())) if key != 'comparison']
+    models = [key for key in next(iter(summary['results'].values())) if key not in ('comparison', 'sweep')]
     print('=' * 100)
     print('Strength = CTM_cond - CTM_free (chord-tone probability mass, mean over the first N notes)')
+    print('Base NLL = how unlikely the frozen base finds the generated notes (lower = more likely)')
+    print(f'Far = share of generated notes more than {D_Chord_Joker.guidance_range} semitones from the note before')
     for key, block in summary['results'].items():
-        line = f'{key:<12}'
         for model in models:
-            line += (f' | {model[:28]:<28} free {block[model]["ctm_free"]["mean"]:.3f} cond {block[model]["ctm_cond"]["mean"]:.3f}'
-                     f' strength {block[model]["strength"]["mean"]:+.3f}')
-        print(line)
+            print(f'{key:<12} | {model[:28]:<28} free {block[model]["ctm_free"]["mean"]:.3f} cond {block[model]["ctm_cond"]["mean"]:.3f}'
+                  f' strength {block[model]["strength"]["mean"]:+.3f}'
+                  f' base NLL free {block[model]["nll_free"]["mean"]:.3f} cond {block[model]["nll_cond"]["mean"]:.3f}'
+                  f' far free {block[model]["far_free"]["mean"]:.3f} cond {block[model]["far_cond"]["mean"]:.3f}')
+        for model, sweep in block.get('sweep', {}).items():
+            print(f'{"":<12} | {model[:28]:<28} minus first: strength {sweep["strength_gain"]:+.3f} '
+                  f'[{sweep["strength_gain_ci95"][0]:+.3f}, {sweep["strength_gain_ci95"][1]:+.3f}]  p = {sweep["p_permutation"]:.1e}'
+                  f'  stronger at {100 * sweep["stronger_fraction"]:.0f} % of {sweep["changes"]} changes'
+                  f'  base NLL {sweep["nll_cost"]:+.3f} [{sweep["nll_cost_ci95"][0]:+.3f}, {sweep["nll_cost_ci95"][1]:+.3f}]'
+                  f'  far {sweep["far_change"]:+.3f} [{sweep["far_change_ci95"][0]:+.3f}, {sweep["far_change_ci95"][1]:+.3f}]'
+                  f' lower at {100 * sweep["far_lower_fraction"]:.0f} %')
         if 'comparison' in block:
             comparison = block['comparison']
             # 'new' = second checkpoint, 'old' = first (e.g. chord joker vs base joker).
@@ -403,6 +451,8 @@ def main() -> None:
     parser.add_argument('--horizons', type=int, nargs='+', default=[4, 10], help='N for CTM@N')
     parser.add_argument('--context', type=int, default=300, help='Primer / sliding context, as in performance')
     parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--guidance-weights', type=float, nargs='+', default=[1.0],
+                        help='w in free + w * (chord - free), on the notes guidance raises; 1 = no guidance, the first is the reference of the sweep')
     parser.add_argument('--seed', type=int, default=1729)
     parser.add_argument('--device', choices=('cpu', 'mps', 'cuda'), default='cpu')
     parser.add_argument('--threads', type=int, default=1)

@@ -2951,7 +2951,9 @@ MODELS_PARAMETERS['D_Chord_Joker_little_v1'] = {
     'learning_rate': 3e-4,
     'chord_warmup_steps': 2_000,
     'chord_min_lr': 1e-5,
-    'chord_total_steps': 300_000,  # About 480 epochs of 627 steps on the unseen split.
+    # First runs ended at 300k (about 480 epochs of 627 steps on the unseen split). Resumed to 400k: the
+    # cosine is stretched, so at 300k the lr rises from 1e-5 to about 5.3e-5 and decays to 1e-5 again.
+    'chord_total_steps': 400_000,
     'chord_validate_every_epochs': 5,  # Keep save_every a multiple, so named checkpoints carry a full validation.
     'save_every': 20,
 }

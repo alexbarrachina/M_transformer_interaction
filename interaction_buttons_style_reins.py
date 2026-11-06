@@ -140,7 +140,7 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1_no_melody.midi'
 
-sample_midi_path_init = sample_midi_path2
+sample_midi_path_init = sample_midi_path5
 STYLE_IDX_INIT = 2
 
 # FIXED_CHORDS of interaction_1_button_chords.py follows this order (path5 is the same Satie piece).

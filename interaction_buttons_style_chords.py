@@ -254,6 +254,12 @@ visualizer = Visualizer(
     status_text=chord_controls.status() + '\n' + chord_legend
 )
 
+# Chord presses for reconstructing a performance: (perf_counter time, notes generated so far, chord name).
+# save_performance writes them relative to the first generated note, which is time 0 of the saved MIDI.
+chord_log: List[Tuple[float, int, str]] = []
+logged_chord_name = ''
+gen_start_time: Optional[float] = None
+
 '''MIDI IN CALLBACK'''
 midi_event_time: Optional[float] = None
 
@@ -359,13 +365,25 @@ def save_performance():
   detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,
                                                             timings_multiplier=1
                                                             )
+  save_chord_log()
   print("saved performance")
+
+def save_chord_log():
+  # One line per chord change; times are seconds since the first generated note (the saved MIDI's time 0),
+  # so a chord pressed before that note has a negative time. 'notes_before' = generated notes already played.
+  with open(output_midi_name + '_chords.txt', 'w') as f:
+    f.write("time_s\tnotes_before\tchord\n")
+    for t, notes_before, name in list(chord_log):
+      f.write(f"{t - gen_start_time:.3f}\t{notes_before}\t{name or 'free'}\n")
+    # Button of every generated note, aligned with the saved MIDI's notes (model.joker_button_idx = Joker note).
+    f.write("buttons\t" + ' '.join(map(str, b[CTX_LEN:CTX_LEN + i])) + "\n")
 
 def reset_context():
     global i
     global dict_output_tokens, dict_input_tokens
     global kv_cache
     global b
+    global logged_chord_name
 
     with buffer_lock:
         if live_timing is not None:
@@ -379,6 +397,8 @@ def reset_context():
         kv_cache = None
         # The window restarts at the seed: forget chord history and release held controls.
         chord_controls.reset(CTX_LEN)
+        chord_log.clear()
+        logged_chord_name = ''
         # Reset and extend dict_output_tokens to accommodate TOTAL_GEN_LEN + CTX_LEN tokens
         for key in dict_input_tokens.keys():
             extended_list = dict_input_tokens[key].copy()
@@ -525,6 +545,7 @@ def manageNote(note, velocity, event_time=None):
   global kv_cache
   global last_gen_time
   global active_style_idx
+  global gen_start_time
   
   if TRACES:
     print("key", note)
@@ -552,6 +573,8 @@ def manageNote(note, velocity, event_time=None):
         first_note = False
 
     timeLast = timeNew
+    if i == 0:
+        gen_start_time = time.perf_counter()
     dict_output_tokens['dtime'][i+CTX_LEN] = dtime
     # Keep tracking fast 2-key alternation while Return or J forces Joker notes.
     timestamp_ms = now * 1000
@@ -773,6 +796,9 @@ try:
       #visualizer.get_note(60, 100)
       #visualizer.get_button(0, 100)
       handle_pygame_events()
+      if chord_controls.chord_name != logged_chord_name:
+          logged_chord_name = chord_controls.chord_name
+          chord_log.append((time.perf_counter(), i, logged_chord_name))
       visualizer.status_text = chord_controls.status() + '\n' + chord_legend
       visualizer.set_chord_chroma(chord_controls.chroma.float().tolist(), chord_controls.active)
       visualizer.draw(handle_events=False)

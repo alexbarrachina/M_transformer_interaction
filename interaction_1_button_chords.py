@@ -7,6 +7,11 @@ Shift+5 for a major dominant. Hold Space to change chord without naming it:
 the model chooses the new chord (presets with a change adapter; otherwise
 Space does nothing). The last pressed chord key wins; releasing
 all chord keys returns to free generation. Chords take effect immediately.
+A continuous MIDI pedal adds guidance while a chord key or Space is held (released: none;
+fully pressed: --max-guidance): logits = control + guidance * (control - free), raising only
+the chord's notes within 8 semitones of the last pitch (with Space, any note in that range).
+The pedal also scales the probability of notes further than that by 1 - pedal: released
+allows them as they are, fully pressed forbids them.
 The visualizer shows chord-note names and highlights the active pitch classes.
 R resets; S saves; Escape exits. The model receives no key.
 Optional --midi-chords mappings reserve selected MIDI notes for chord controls.
@@ -34,9 +39,15 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 
-sample_midi_path_init = sample_midi_path5
+sample_midi_path_init = sample_midi_path3
 sample_midi_paths = [sample_midi_path1, sample_midi_path2, sample_midi_path3,
                      sample_midi_path4, sample_midi_path5]
+
+# Guidance pedal, read as the reins pedal in interaction_buttons_style_reins.py.
+GUIDANCE_PEDAL_CC = 6
+PEDAL_PORT_NAME = 'beat bars controller'  # the pedal is its own MIDI device, opened by (part of) its name
+PEDAL_RELEASED_BELOW = 10  # raw CC values below this are fully released (no guidance); the rest is rescaled to (0, 1]
+PEDAL_SNAP = 0.05  # pedal values this close to 1 snap to it, so "fully pressed" is exact
 
 # Core chords follow interaction_buttons_style_harm_fixed.py and docs/pieces.
 # Subtonic and secondary-dominant entries extend the performance palette;
@@ -116,7 +127,7 @@ def main() -> None:
     parser.add_argument('--model', default='D_Chord_Joker_change_v1')
     parser.add_argument('--checkpoint', help='Trained chord-adapter checkpoint; defaults to the preset latest')
     parser.add_argument('--primer', default=os.environ.get('PRIMER_MIDI', sample_midi_path_init))
-    parser.add_argument('--context-length', type=int, default=200)
+    parser.add_argument('--context-length', type=int, default=500)
     parser.add_argument('--midi-port', type=int, default=0)
     parser.add_argument('--midi-chords', default='',
                         help='Optional MIDI note:chord-key pairs, e.g. 60:1,62:2,67:5,74:shift+2')
@@ -124,6 +135,9 @@ def main() -> None:
     parser.add_argument('--output', default='./out/interactive_chords')
     parser.add_argument('--temperature', type=float, default=1.0)
     parser.add_argument('--no-preview', action='store_true')
+    parser.add_argument('--max-guidance', type=float, default=2.0,
+                        help='Guidance with the pedal fully pressed; 2 is w = 3 in free + w * (chord - free), '
+                             'applied only to the notes D_Chord_Joker.next_pitch_logits raises')
     args = parser.parse_args()
     primer_indices = {Path(path).resolve(): index for index, path in enumerate(sample_midi_paths)}
     piece_index = primer_indices.get(Path(args.primer).resolve())
@@ -165,6 +179,7 @@ def main() -> None:
 
     synth = fluidsynth.Synth()
     midi = rtmidi.MidiIn()
+    pedal_midi = rtmidi.MidiIn(midi.get_current_api())
     visualizer = Visualizer(button_slots=1,
                             controls_legend=[('MIDI / return', 'joker'), ('hold space', 'change chord'),
                                              ('hold numbers', 'chords'),
@@ -175,6 +190,7 @@ def main() -> None:
     primer_length = len(primer['pitch'])
     sounding: Dict[str, Tuple[int, float, int]] = {}
     last_onset = 0.0
+    pedal = 0.0  # 0..1, released by default: no guidance
 
     def playNote(note: int, velocity: int = 100) -> None:
         if velocity > 0:
@@ -200,7 +216,8 @@ def main() -> None:
         context = controls.next_tokens(device)
         context['pitch'] = torch.tensor([output['pitch'][-context_length:] + [0]],
                                         dtype=torch.long, device=device)
-        pitch = model.gen_pitch_token(context, temperature=args.temperature)
+        pitch = model.gen_pitch_token(context, temperature=args.temperature, guidance=pedal * args.max_guidance,
+                                      range_limit=pedal)
         now = time.perf_counter()
         position = len(output['pitch'])
         output['pitch'].append(pitch)
@@ -243,6 +260,18 @@ def main() -> None:
         # Keyboard and MIDI share one event queue; process generation on the main thread.
         pygame.event.post(pygame.event.Event(midi_event, message=event[0]))
 
+    def pedal_device_callback(event: Tuple[List[int], float], data: object = None) -> None:
+        # Only the pedal CC goes through, so nothing else from this device can play notes.
+        if event[0][0] & 0xF0 == 0xB0 and event[0][1] == GUIDANCE_PEDAL_CC:
+            midi_callback(event)
+
+    def set_pedal(value: int) -> None:
+        nonlocal pedal
+        # PEDAL_RELEASED_BELOW..127 -> just above 0..1
+        pedal = 0.0 if value < PEDAL_RELEASED_BELOW else (value - PEDAL_RELEASED_BELOW + 1) / (128 - PEDAL_RELEASED_BELOW)
+        if pedal > 1 - PEDAL_SNAP:
+            pedal = 1.0
+
     try:
         synth.start()
         soundfont = synth.sfload(args.soundfont)
@@ -258,6 +287,14 @@ def main() -> None:
             print(f'MIDI input: {ports[args.midi_port]}')
         else:
             print('No MIDI input found; keyboard controls remain available.')
+        # The pedal is a separate device: open it by name, since its port index changes.
+        pedal_ports = [index for index, port in enumerate(ports) if PEDAL_PORT_NAME in port]
+        if pedal_ports:
+            pedal_midi.open_port(pedal_ports[0])
+            pedal_midi.set_callback(pedal_device_callback)
+            print(f'Guidance pedal: {ports[pedal_ports[0]]}')
+        else:
+            print(f"Guidance pedal port '{PEDAL_PORT_NAME}' not found: CC {GUIDANCE_PEDAL_CC} on the MIDI input still works.")
         print('Unmapped MIDI keys / Return: joker. Hold chord controls (or Space to change chord) for guidance; '
               'release all chord controls for free generation.')
         print(chord_legend)
@@ -270,6 +307,9 @@ def main() -> None:
                 if event.type == midi_event:
                     if len(event.message) == 3:
                         status, number, velocity = event.message
+                        if status & 0xF0 == 0xB0 and number == GUIDANCE_PEDAL_CC:
+                            set_pedal(velocity)  # 'velocity' is the CC value here
+                            continue
                         if controls.handle_midi(status, number, velocity):
                             continue
                         kind, channel = status & 0xF0, status & 0x0F
@@ -300,6 +340,7 @@ def main() -> None:
                     note_off('keyboard')
                     controls.release_keyboard()
             visualizer.status_text = controls.status() + '\n' + chord_legend
+            visualizer.pedal = pedal
             visualizer.set_chord_chroma(controls.chroma.float().tolist(), controls.active)
             visualizer.draw(handle_events=False)
             time.sleep(0.001)
@@ -309,6 +350,7 @@ def main() -> None:
         for source in list(sounding):
             note_off(source)
         midi.close_port()
+        pedal_midi.close_port()
         synth.delete()
         visualizer.stop()
 
