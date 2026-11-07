@@ -1,0 +1,14 @@
+################################################################
+Written 2026-11-07, before training or testing the new adapters.
+Questions:
+  1. Does training only on clear passages (D_Chord_Joker_clear_v1) make the model give the real chord's notes more probability?
+  2. Does training on transposed continuations (D_Chord_Joker_transposed_v1) make the model follow chords the music does not expect?
+Reference: save_models/D_Chord_Joker_change_latest_best.pth, the chord adapter the app uses now. It trained on all labelled notes, always under their true chord.
+Only change: the training windows. Same frozen base, moments and sampling noise; no guidance.
+Main measure: probability on the requested chord's notes over the first 8 generated notes with the chord held, new adapter minus reference, paired per chord change.
+  Question 1 uses the piece's real chord. Supported if the 95 % range is above zero. Refuted if it reaches zero or is below it. The training data suggests about 86 %.
+  Question 2 uses the distant chord (major chord a tritone above the real root). Supported if the 95 % range is above zero and the real chord's probability falls by less than 5 percentage points on average. Refuted otherwise.
+Cost, for both: base NLL against the pianist's real notes at the same moments and against the reference, share of notes jumping over 8 semitones, and share of repeated notes (reference and pianist).
+Data: samples/adapter_validation, 4 pieces, 5 chord changes per piece = 20 moments; 1 sampling seed. All 4 are unseen by the base and in the adapters' validation split (97-100 % of their 8-note sequences), and under 1 % of their sequences are in the training split. Validation chose the best checkpoint, but never trained the adapters.
+Run:
+  python test/eval_chord_strength.py --checkpoint save_models/D_Chord_Joker_change_latest_best.pth save_models/D_Chord_Joker_clear_latest_best.pth save_models/D_Chord_Joker_transposed_latest_best.pth --midi-dir samples/adapter_validation --onsets 5 --seeds 1 --notes 8 --horizons 8 --context 200 --device mps --output out/chord_training_data

@@ -56,6 +56,7 @@ from x_transformer import D_Chord_Joker
 
 NSTEPS_INIT = 0
 RESUME = os.environ.get('RESUME', '1') != '0'
+CLEAR_MIN_NOTES = 4  # Shorter chords are mostly passing harmonies or label jitter.
 
 #==========================================================================
 
@@ -74,6 +75,14 @@ class ChordPitchSamplerDataset(Dataset):
     change, where both chords last at least change_min_notes notes and the new chord adds at
     least change_min_new_tones pitch classes. The window marks the press interval in chord_change
     and gives no chroma, anchor or chord_active: the model is told a new chord starts, not which.
+
+    Clear passages (clear_min_rate, off by default): only chords of at least CLEAR_MIN_NOTES notes
+    with at least this share of chord notes are targets, in training and validation. The history
+    keeps every note.
+
+    Transposed continuations (continuation_transpose_prob, training only, off by default): that
+    share of the windows moves the notes from the press on, and their chord, by the same interval.
+    The model sees real notes following a chord that the history did not expect.
     """
 
     def __init__(self, data: np.ndarray, seq_len: int, is_eval: bool = False,
@@ -82,7 +91,8 @@ class ChordPitchSamplerDataset(Dataset):
                  history_mode: str = 'full', short_lengths: Tuple[int, ...] = (64, 128, 256),
                  mask_span: Tuple[int, int] = (8, 32), include_source: bool = False,
                  onset_prob: float = 0.0, onset_weight: float = 0.0, onset_tau: float = 3.0,
-                 change_control: bool = False, change_min_notes: int = 4, change_min_new_tones: int = 2) -> None:
+                 change_control: bool = False, change_min_notes: int = 4, change_min_new_tones: int = 2,
+                 clear_min_rate: float = 0.0, continuation_transpose_prob: float = 0.0) -> None:
         super().__init__()
         if seq_len < 1 or data.size % 5:
             raise ValueError('Expected seq_len >= 1 and flat five-token pickle events')
@@ -92,6 +102,8 @@ class ChordPitchSamplerDataset(Dataset):
             raise ValueError('Invalid chord onset settings')
         if change_min_notes < 1 or not 1 <= change_min_new_tones <= 12:
             raise ValueError('Invalid chord change settings')
+        if not 0.0 <= clear_min_rate <= 1.0 or not 0.0 <= continuation_transpose_prob <= 1.0:
+            raise ValueError('Invalid clear-passage or transposed-continuation settings')
         if history_mode not in ('full', 'mixed'):
             raise ValueError('Chord history_mode must be full or mixed')
         if not short_lengths or min(short_lengths) < 1 or not 1 <= mask_span[0] <= mask_span[1]:
@@ -110,6 +122,7 @@ class ChordPitchSamplerDataset(Dataset):
         self.onset_weight = 0.0 if is_eval else onset_weight
         self.onset_tau = onset_tau
         self.change_control = change_control
+        self.continuation_transpose_prob = 0.0 if is_eval else continuation_transpose_prob
         events = data.reshape(-1, 5)
         boundary = (events == np.array([126, 126, 0, 0, 0])).all(axis=1)
         channel = events[:, 4]
@@ -149,6 +162,12 @@ class ChordPitchSamplerDataset(Dataset):
         positions = np.arange(len(self.pitches))
         eligible = ((self.groups > 0) & (lengths[self.note_piece] > seq_len)
                     & (positions > self.piece_edges[self.note_piece]))
+        if clear_min_rate:
+            # A group is one chord block, so these count its notes and how many are chord notes.
+            notes_per_chord = np.bincount(self.groups, minlength=count)
+            in_chord = self.chroma[self.groups, self.pitches % 12].astype(np.float64)
+            rate = np.bincount(self.groups, weights=in_chord, minlength=count) / np.maximum(notes_per_chord, 1)
+            eligible &= ((notes_per_chord >= CLEAR_MIN_NOTES) & (rate >= clear_min_rate))[self.groups]
         self.targets = np.flatnonzero(eligible)
         if not len(self.targets):
             raise ValueError('No marked channel-5 chord targets with enough within-piece pitch history')
@@ -220,12 +239,18 @@ class ChordPitchSamplerDataset(Dataset):
             # Press/release inside this known chord; no future chord is exposed.
             left = int(torch.randint(left, target - start + 1, (), generator=generator))
             right = int(torch.randint(target - start + 1, right + 1, (), generator=generator))
+        moved = 0
+        if self.continuation_transpose_prob and float(torch.rand(())) < self.continuation_transpose_prob:
+            moved = (int(torch.randint(1, 12, ())) + 6) % 12 - 6  # -6..5 without 0: each other root once
+            if int(pitch[left:].min()) + moved < 0 or int(pitch[left:].max()) + moved > 127:
+                moved = 0
+            pitch[left:] += moved  # left is the first note predicted under the press
         active = torch.zeros(self.seq_len + 1, dtype=torch.bool)
         active[left:right] = True
-        chord = torch.from_numpy(self.chroma[group].copy()).roll(shift)
+        chord = torch.from_numpy(self.chroma[group].copy()).roll(shift + moved)
         chroma = active.unsqueeze(-1) & chord.unsqueeze(0)
         anchor = torch.zeros(self.seq_len + 1, dtype=torch.long)
-        anchor[active] = (int(self.anchors[group]) + shift) % 12
+        anchor[active] = (int(self.anchors[group]) + shift + moved) % 12
         sample = {'pitch': pitch, 'chord_chroma': chroma, 'chord_anchor_pc': anchor,
                   'chord_active': active}
         if self.change_control:
@@ -238,6 +263,8 @@ class ChordPitchSamplerDataset(Dataset):
             # the last chord change (5x on the change, ~1.1x ten notes later with 4 and 3).
             # The model multiplies it by chord_active, so only pressed notes are trained.
             since = torch.from_numpy(self.since_change[start:stop].astype(np.float32))
+            if moved:  # The moved chord starts at the press, wherever the piece's own chord started.
+                since = (torch.arange(self.seq_len + 1) - left).clamp_min(0).float()
             sample['chord_weight'] = 1.0 + self.onset_weight * torch.exp(-since / self.onset_tau)
         history_kind = 0  # 0: full, 1: shortened, 2: masked; probabilities 50/25/25.
         if self.history_mode == 'mixed':
@@ -329,7 +356,8 @@ def load_checkpoint(model: D_Chord_Joker, optimizer: torch.optim.Optimizer,
                          ('chord_mask_span', (8, 32)), ('chord_training_seed', 42),
                          ('chord_onset_prob', 0.0), ('chord_onset_weight', 0.0), ('chord_onset_tau', 3.0),
                          ('chord_change_enabled', False), ('chord_change_min_notes', 4),
-                         ('chord_change_min_new_tones', 2)):
+                         ('chord_change_min_new_tones', 2), ('chord_clear_min_rate', 0.0),
+                         ('chord_continuation_transpose_prob', 0.0)):
         if checkpoint['cfg'].get(key, default) != model.cfg.get(key, default):
             raise ValueError(f'Chord resume configuration differs for {key}; start a separate run')
     model.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -489,7 +517,9 @@ def _train(logger: logging.Logger) -> None:
         onset_prob=cfg.get('chord_onset_prob', 0.0), onset_weight=cfg.get('chord_onset_weight', 0.0),
         onset_tau=cfg.get('chord_onset_tau', 3.0), change_control=cfg.get('chord_change_enabled', False),
         change_min_notes=cfg.get('chord_change_min_notes', 4),
-        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2))
+        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2),
+        clear_min_rate=cfg.get('chord_clear_min_rate', 0.0),
+        continuation_transpose_prob=cfg.get('chord_continuation_transpose_prob', 0.0))
     del data_train
     print(f'BATCH_SIZE: {cfg["batch_size"]}')
     print(f'NUM_WORKERS: {cfg["num_workers"]}')
@@ -511,7 +541,8 @@ def _train(logger: logging.Logger) -> None:
         whole_span_prob=cfg['chord_whole_span_prob'], validation_seed=cfg['chord_validation_seed'],
         max_samples=cfg.get('chord_max_val_samples', 0), change_control=cfg.get('chord_change_enabled', False),
         change_min_notes=cfg.get('chord_change_min_notes', 4),
-        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2))
+        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2),
+        clear_min_rate=cfg.get('chord_clear_min_rate', 0.0))
     del data_eval
     val_loader = DataLoader(val_dataset, batch_size=cfg['batch_size'], num_workers=0,
                             shuffle=False, pin_memory=pin_memory)

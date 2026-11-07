@@ -3007,6 +3007,25 @@ MODELS_PARAMETERS['D_Chord_Joker_change_v1'] = {
     'chord_change_min_new_tones': 2,
 }
 
+# Stronger chords through the training data, without touching the logits at generation. Each preset
+# differs from D_Chord_Joker_unseen_onset_v1 only in its training windows, and starts from a new adapter.
+# Clear passages: chords of at least 4 notes with at least 70 % chord notes. In the unseen train split
+# they are 55.6 % of the labelled notes, with 86.2 % chord notes against 71.0 % for all of them.
+MODELS_PARAMETERS['D_Chord_Joker_clear_v1'] = {
+    **MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'],
+    'description': 'Chord adapter trained only on chords that the notes clearly follow.',
+    'ckpt_file_name': './save_models/D_Chord_Joker_clear_latest.pth',
+    'chord_clear_min_rate': 0.7,
+}
+# Transposed continuations: half of the windows move the notes from the press on, and their chord, by
+# up to a tritone, because training otherwise always presses the chord that the notes really follow.
+MODELS_PARAMETERS['D_Chord_Joker_transposed_v1'] = {
+    **MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'],
+    'description': 'Chord adapter also trained on real notes following a chord the history did not expect.',
+    'ckpt_file_name': './save_models/D_Chord_Joker_transposed_latest.pth',
+    'chord_continuation_transpose_prob': 0.5,
+}
+
 # train_style_chords.py, stage 1: the chord adapter of D_Chord_Joker_unseen_onset_v1 over the
 # frozen style joker tester. Same chord settings, data, onset windows and LR schedule; the unseen
 # pieces are also unseen by this base (it trained on giantmidi_full_train too).

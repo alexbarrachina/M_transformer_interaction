@@ -60,7 +60,8 @@ from x_transformer import D_Base, D_Chord_Joker
 
 NOTE_CHANNELS = (MELODY_CHANNEL, MELODY_CHORDS_CHANNEL, ACCOMP_CHANNEL, EXTRA_ACCOMP_CHANNEL)
 CONDITIONS = ('real', 'dominant', 'subdominant', 'distant')
-ADAPTER = ('decoder.chord_conditioner.', 'decoder.harm_film.', 'decoder.history_mask_embedding')
+ADAPTER = ('decoder.chord_conditioner.', 'decoder.harm_film.', 'decoder.history_mask_embedding',
+           'decoder.change_conditioner.', 'decoder.change_film.')
 
 
 def require(condition: bool, message: str) -> None:
@@ -207,7 +208,7 @@ def per_change_metrics(entry: dict, model: str, condition: str, horizon: int) ->
     pcs = entry['chords'][condition]['pcs']
     values = {key: [] for key in ('ctm_cond', 'ctm_free', 'ctr_cond', 'ctr_free', 'coverage_cond',
                                   'coverage_free', 'nll_cond', 'nll_free', 'leaps_cond', 'leaps_free',
-                                  'far_cond', 'far_free')}
+                                  'far_cond', 'far_free', 'repeat_cond', 'repeat_free')}
     for seed in {seed for seed, _ in run['rows']}:
         for kind, name in (('cond', condition), ('free', 'free')):
             row = run['rows'].index([seed, name])
@@ -219,6 +220,7 @@ def per_change_metrics(entry: dict, model: str, condition: str, horizon: int) ->
             jumps = np.abs(np.diff(np.r_[entry['last_primer_pitch'], pitches]))
             values['leaps_' + kind].append((jumps > 12).mean())
             values['far_' + kind].append((jumps > D_Chord_Joker.guidance_range).mean())
+            values['repeat_' + kind].append((jumps == 0).mean())
     result = {key: float(np.mean(value)) for key, value in values.items()}
     result['strength'] = result['ctm_cond'] - result['ctm_free']
     return result
@@ -399,7 +401,8 @@ def print_summary(summary: dict) -> None:
             print(f'{key:<12} | {model[:28]:<28} free {block[model]["ctm_free"]["mean"]:.3f} cond {block[model]["ctm_cond"]["mean"]:.3f}'
                   f' strength {block[model]["strength"]["mean"]:+.3f}'
                   f' base NLL free {block[model]["nll_free"]["mean"]:.3f} cond {block[model]["nll_cond"]["mean"]:.3f}'
-                  f' far free {block[model]["far_free"]["mean"]:.3f} cond {block[model]["far_cond"]["mean"]:.3f}')
+                  f' far free {block[model]["far_free"]["mean"]:.3f} cond {block[model]["far_cond"]["mean"]:.3f}'
+                  f' repeated free {block[model]["repeat_free"]["mean"]:.3f} cond {block[model]["repeat_cond"]["mean"]:.3f}')
         for model, sweep in block.get('sweep', {}).items():
             print(f'{"":<12} | {model[:28]:<28} minus first: strength {sweep["strength_gain"]:+.3f} '
                   f'[{sweep["strength_gain_ci95"][0]:+.3f}, {sweep["strength_gain_ci95"][1]:+.3f}]  p = {sweep["p_permutation"]:.1e}'
