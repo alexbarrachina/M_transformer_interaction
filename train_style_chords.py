@@ -4,6 +4,7 @@
 # (AE_style_jokerParam_chords), one stage after the other:
 #   1. AE_style_jokerParam_chords: chord adapter over AE_style_jokerParam_tester_v2.
 #   2. AE_style_jokerParam_change: change adapter over AE_style_jokerParam_chords_best.pth.
+# AE_style_jokerParam_chords_clear is stage 1 trained only on clear passages (chord_clear_min_rate).
 # MODEL_NAME=<preset> runs a single stage. Both use the warmup + cosine LR schedule of train_chords.py.
 #
 # Pickle format: as in train_chords.py (giantmidi_full_w_chords_unseen_*). Each sample is a
@@ -229,7 +230,8 @@ def _train_stage(model_name, device, trace, logger) -> bool:
         onset_prob=cfg.get('chord_onset_prob', 0.0), onset_weight=cfg.get('chord_onset_weight', 0.0),
         onset_tau=cfg.get('chord_onset_tau', 3.0), change_control=cfg.get('chord_change_enabled', False),
         change_min_notes=cfg.get('chord_change_min_notes', 4),
-        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2))
+        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2),
+        clear_min_rate=cfg.get('chord_clear_min_rate', 0.0))
     del data_train
     print(f"BATCH_SIZE: {cfg['batch_size']}")
     print(f"NUM_WORKERS: {cfg['num_workers']}")
@@ -251,7 +253,8 @@ def _train_stage(model_name, device, trace, logger) -> bool:
         whole_span_prob=cfg['chord_whole_span_prob'], validation_seed=cfg['chord_validation_seed'],
         max_samples=cfg.get('chord_max_val_samples', 0), change_control=cfg.get('chord_change_enabled', False),
         change_min_notes=cfg.get('chord_change_min_notes', 4),
-        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2))
+        change_min_new_tones=cfg.get('chord_change_min_new_tones', 2),
+        clear_min_rate=cfg.get('chord_clear_min_rate', 0.0))
     del data_eval
     val_loader = DataLoader(val_dataset, batch_size=cfg['batch_size'], num_workers=0,
                             shuffle=False, pin_memory=pin_memory, collate_fn=collate_chord_windows)

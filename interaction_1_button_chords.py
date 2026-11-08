@@ -8,16 +8,16 @@ the model chooses the new chord (presets with a change adapter; otherwise
 Space does nothing). The last pressed chord key wins; releasing
 all chord keys returns to free generation. Chords take effect immediately.
 A continuous MIDI pedal adds guidance while a chord key or Space is held (released: none;
-fully pressed: --max-guidance): logits = control + guidance * (control - free), raising only
+fully pressed: MAX_GUIDANCE): logits = control + guidance * (control - free), raising only
 the chord's notes within 8 semitones of the last pitch (with Space, any note in that range).
 The pedal also scales the probability of notes further than that by 1 - pedal: released
 allows them as they are, fully pressed forbids them.
 The visualizer shows chord-note names and highlights the active pitch classes.
 R resets; S saves; Escape exits. The model receives no key.
-Optional --midi-chords mappings reserve selected MIDI notes for chord controls.
+Optional MIDI_CHORDS mappings reserve selected MIDI notes for chord controls.
+Settings are the variables at the top of the file, so it can be run from the editor.
 """
 
-import argparse
 import datetime
 import os
 import time
@@ -42,6 +42,26 @@ sample_midi_path5 = './samples/Satie_Gymnopedie_No1.mid'
 sample_midi_path_init = sample_midi_path3
 sample_midi_paths = [sample_midi_path1, sample_midi_path2, sample_midi_path3,
                      sample_midi_path4, sample_midi_path5]
+
+''' PARAMS '''
+# D_Chord_Joker_change_v1
+# D_Chord_Joker_clear_v1
+# D_Chord_Joker_transposed_v1
+MODEL_NAME = 'D_Chord_Joker_transposed_v1'
+CHECKPOINT_PATH = None  # trained chord-adapter checkpoint; None uses the preset latest
+PRIMER_MIDI = os.environ.get('PRIMER_MIDI', sample_midi_path_init)
+INIT_CTX_LEN = 128  # primer notes in the initial context
+TOTAL_CTX_LEN = 128  # the context grows with each played note up to this many notes, then keeps the last ones;
+# at most the preset's seq_len (512 for the chord presets, the windows they were trained on)
+MIDI_PORT = 0
+MIDI_CHORDS: Dict[int, str] = {}  # optional MIDI note -> chord key, e.g. {60: '1', 62: '2', 67: '5', 74: 'shift+2'}
+SOUNDFONT = './piano.sf2'
+output_midi_name = './out/interactive_chords'
+TEMPERATURE = 1.0
+PLAY_PRIMER = True  # play the last 40 primer notes before starting
+# Guidance with the pedal fully pressed; 2 is w = 3 in free + w * (chord - free),
+# applied only to the notes D_Chord_Joker.next_pitch_logits raises.
+MAX_GUIDANCE = 2.0
 
 # Guidance pedal, read as the reins pedal in interaction_buttons_style_reins.py.
 GUIDANCE_PEDAL_CC = 6
@@ -123,54 +143,30 @@ def read_primer(path: str, length: int) -> Dict[str, List[int]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--model', default='D_Chord_Joker_change_v1')
-    parser.add_argument('--checkpoint', help='Trained chord-adapter checkpoint; defaults to the preset latest')
-    parser.add_argument('--primer', default=os.environ.get('PRIMER_MIDI', sample_midi_path_init))
-    parser.add_argument('--context-length', type=int, default=500)
-    parser.add_argument('--midi-port', type=int, default=0)
-    parser.add_argument('--midi-chords', default='',
-                        help='Optional MIDI note:chord-key pairs, e.g. 60:1,62:2,67:5,74:shift+2')
-    parser.add_argument('--soundfont', default='./piano.sf2')
-    parser.add_argument('--output', default='./out/interactive_chords')
-    parser.add_argument('--temperature', type=float, default=1.0)
-    parser.add_argument('--no-preview', action='store_true')
-    parser.add_argument('--max-guidance', type=float, default=2.0,
-                        help='Guidance with the pedal fully pressed; 2 is w = 3 in free + w * (chord - free), '
-                             'applied only to the notes D_Chord_Joker.next_pitch_logits raises')
-    args = parser.parse_args()
     primer_indices = {Path(path).resolve(): index for index, path in enumerate(sample_midi_paths)}
-    piece_index = primer_indices.get(Path(args.primer).resolve())
+    piece_index = primer_indices.get(Path(PRIMER_MIDI).resolve())
     if piece_index is None:
-        parser.error('--primer must match a configured sample_midi_path with a FIXED_CHORDS entry')
+        raise SystemExit('PRIMER_MIDI must match a configured sample_midi_path with a FIXED_CHORDS entry')
     chord_bank = FIXED_CHORDS[piece_index]
-    cfg = get_model_hparams(args.model)
+    cfg = get_model_hparams(MODEL_NAME)
     if cfg.get('model_type') != 'D_Chord_Joker':
-        parser.error('--model must be a D_Chord_Joker preset')
-    if args.checkpoint:
-        cfg['ckpt_file_name'] = args.checkpoint
+        raise SystemExit('MODEL_NAME must be a D_Chord_Joker preset')
+    if CHECKPOINT_PATH:
+        cfg['ckpt_file_name'] = CHECKPOINT_PATH
     if not Path(cfg['ckpt_file_name']).is_file():
-        parser.error('No trained chord checkpoint found. Run train_chords.py first or pass --checkpoint.')
-    if not 1 <= args.context_length <= cfg['seq_len'] or not 0 < args.temperature < float('inf'):
-        parser.error('Invalid context length or temperature')
-    primer = read_primer(args.primer, args.context_length)
-    context_length = args.context_length
-    try:
-        entries = [entry.split(':') for entry in args.midi_chords.split(',') if entry.strip()]
-        midi_chords = {int(note): key.strip() for note, key in entries}
-        if len(midi_chords) != len(entries):
-            raise ValueError('Each MIDI chord note must be mapped once')
-        controls = ChordControls(len(primer['pitch']), context_length, chord_bank, midi_chords,
-                                 change_key='space' if cfg.get('chord_change_enabled') else None)
-    except ValueError as error:
-        parser.error(str(error))
+        raise SystemExit('No trained chord checkpoint found. Run train_chords.py first or set CHECKPOINT_PATH.')
+    if not 1 <= INIT_CTX_LEN <= TOTAL_CTX_LEN <= cfg['seq_len'] or not 0 < TEMPERATURE < float('inf'):
+        raise SystemExit(f"Invalid INIT_CTX_LEN, TOTAL_CTX_LEN (at most seq_len {cfg['seq_len']}) or TEMPERATURE")
+    primer = read_primer(PRIMER_MIDI, INIT_CTX_LEN)
+    controls = ChordControls(len(primer['pitch']), TOTAL_CTX_LEN, chord_bank, MIDI_CHORDS,
+                             change_key='space' if cfg.get('chord_change_enabled') else None)
     chord_legend = '  |  '.join(f'{key}: {chord.name}' for key, chord in chord_bank.items() if len(key) == 1)
     chord_legend += '\n' + '  |  '.join(f'{key}: {chord.name}' for key, chord in chord_bank.items() if len(key) > 1)
-    if midi_chords:
-        chord_legend += '\nMIDI chords: ' + '  |  '.join(f'{note}: {chord_bank[key].name}' for note, key in midi_chords.items())
+    if MIDI_CHORDS:
+        chord_legend += '\nMIDI chords: ' + '  |  '.join(f'{note}: {chord_bank[key].name}' for note, key in MIDI_CHORDS.items())
     device = torch.device('mps' if torch.backends.mps.is_available()
                           else 'cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model(args.model, cfg=cfg, compile_mode='none').to(device).eval()
+    model = load_model(MODEL_NAME, cfg=cfg, compile_mode='none').to(device).eval()
     # Hardware/UI imports stay out of headless dataset and control checks.
     import fluidsynth
     import pygame
@@ -214,9 +210,9 @@ def main() -> None:
         if source in sounding:
             return
         context = controls.next_tokens(device)
-        context['pitch'] = torch.tensor([output['pitch'][-context_length:] + [0]],
+        context['pitch'] = torch.tensor([output['pitch'][-TOTAL_CTX_LEN:] + [0]],
                                         dtype=torch.long, device=device)
-        pitch = model.gen_pitch_token(context, temperature=args.temperature, guidance=pedal * args.max_guidance,
+        pitch = model.gen_pitch_token(context, temperature=TEMPERATURE, guidance=pedal * MAX_GUIDANCE,
                                       range_limit=pedal)
         now = time.perf_counter()
         position = len(output['pitch'])
@@ -249,7 +245,7 @@ def main() -> None:
         # Update held-note durations without interrupting their playback.
         for _, started, position in sounding.values():
             output['dur'][position] = max(1, round((time.perf_counter() - started) * 1000 / 32))
-        destination = Path(args.output + '_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        destination = Path(output_midi_name + '_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
         destination.parent.mkdir(parents=True, exist_ok=True)
         continuation = {key: values[primer_length:] for key, values in output.items()}
         ms_SONG_to_MIDI_Converter(dict_to_song(continuation, force_vel=False),
@@ -274,17 +270,17 @@ def main() -> None:
 
     try:
         synth.start()
-        soundfont = synth.sfload(args.soundfont)
+        soundfont = synth.sfload(SOUNDFONT)
         if soundfont < 0:
-            raise ValueError(f'Cannot load soundfont: {args.soundfont}')
+            raise ValueError(f'Cannot load soundfont: {SOUNDFONT}')
         synth.program_select(0, soundfont, 0, 0)
         ports = midi.get_ports()
         if ports:
-            if not 0 <= args.midi_port < len(ports):
-                parser.error(f'--midi-port is out of range; available ports: {ports}')
-            midi.open_port(args.midi_port)
+            if not 0 <= MIDI_PORT < len(ports):
+                raise SystemExit(f'MIDI_PORT is out of range; available ports: {ports}')
+            midi.open_port(MIDI_PORT)
             midi.set_callback(midi_callback)
-            print(f'MIDI input: {ports[args.midi_port]}')
+            print(f'MIDI input: {ports[MIDI_PORT]}')
         else:
             print('No MIDI input found; keyboard controls remain available.')
         # The pedal is a separate device: open it by name, since its port index changes.
@@ -299,7 +295,7 @@ def main() -> None:
               'release all chord controls for free generation.')
         print(chord_legend)
         reset()
-        if not args.no_preview:
+        if PLAY_PRIMER:
             visualizer.play_primer(playNote, last_n=40, playback_speed=1)
         running = True
         while running:

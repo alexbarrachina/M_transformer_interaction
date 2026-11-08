@@ -3014,7 +3014,7 @@ MODELS_PARAMETERS['D_Chord_Joker_change_v1'] = {
 MODELS_PARAMETERS['D_Chord_Joker_clear_v1'] = {
     **MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'],
     'description': 'Chord adapter trained only on chords that the notes clearly follow.',
-    'ckpt_file_name': './save_models/D_Chord_Joker_clear_latest.pth',
+    'ckpt_file_name': './save_models/D_Chord_Joker_clear_latest_best.pth',
     'chord_clear_min_rate': 0.7,
 }
 # Transposed continuations: half of the windows move the notes from the press on, and their chord, by
@@ -3022,7 +3022,7 @@ MODELS_PARAMETERS['D_Chord_Joker_clear_v1'] = {
 MODELS_PARAMETERS['D_Chord_Joker_transposed_v1'] = {
     **MODELS_PARAMETERS['D_Chord_Joker_unseen_onset_v1'],
     'description': 'Chord adapter also trained on real notes following a chord the history did not expect.',
-    'ckpt_file_name': './save_models/D_Chord_Joker_transposed_latest.pth',
+    'ckpt_file_name': './save_models/D_Chord_Joker_transposed_latest_best.pth',
     'chord_continuation_transpose_prob': 0.5,
 }
 
@@ -3069,6 +3069,17 @@ MODELS_PARAMETERS['AE_style_jokerParam_change'] = {
     'chord_change_enabled': True,
     'chord_change_min_notes': 4,
     'chord_change_min_new_tones': 2,
+}
+
+# train_style_chords.py, stage 1 on clear passages only, as D_Chord_Joker_clear_v1 but with a lower bar:
+# 0.6 keeps 71 % of the press targets, 81.5 % of them chord notes (0.7: 55 % at 86 %; all: 71 %).
+# A new chord adapter starts from the frozen style joker. Run it alone with MODEL_NAME.
+MODELS_PARAMETERS['AE_style_jokerParam_chords_clear'] = {
+    **MODELS_PARAMETERS['AE_style_jokerParam_chords'],
+    'description': 'Style joker chord adapter trained only on chords that at least 60 % of their notes follow.',
+    'ckpt_file_name': './save_models/AE_style_jokerParam_chords_clear.pth',  # Best: ..._clear_best.pth
+    'chord_clear_min_rate': 0.6,
+    'chord_total_steps': 400_000,  # As the first stage-1 run; the 500k above came from resuming it.
 }
 
 # Tension adapts the existing pitch prior without changing its frozen weights.

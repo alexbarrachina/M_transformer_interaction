@@ -94,6 +94,7 @@ else:
 # 'AE_style_jokerParam_dtime_tester_v1', which has no chord adapter. Stage 2,
 # AE_style_jokerParam_change, adds the Space "change" adapter; until its checkpoint
 # exists, stage 1 runs and Space does nothing.
+# AE_style_jokerParam_change
 model_name = 'AE_style_jokerParam_change'
 #if not os.path.isfile(get_model_hparams(model_name)['ckpt_file_name']):
 #    model_name = 'AE_style_jokerParam_chords'
