@@ -34,6 +34,10 @@ Protocol (paired: every checkpoint and condition shares the same history and sam
      the notes are less likely under the base than the pianist's. See
      test/results/eval_chord_strength_guidance.txt.
 
+Result of the clear-passage adapter (2026-11-07, preliminary: 20 moments, 4 pieces outside its training data): supported.
+With the real chord it gives the chord's notes 84.2 % against 72.1 % for the app's adapter, without guidance. See
+test/results/eval_chord_strength_training_data.txt.
+
 Generation results are saved per MIDI file in --output, so several processes can share the
 work (one file each); --summarize-only then writes summary.json from all saved files.
 """
@@ -136,9 +140,9 @@ def load_checkpoint(path: Path, device: torch.device) -> D_Base:
 def generate(model: D_Base, piece: Dict[str, np.ndarray], onset: int, chords: Dict[str, dict],
              noise: torch.Tensor, context: int, temperature: float, device: torch.device,
              guidance: float = 0.0, range_limit: float = 0.0) -> Dict[str, list]:
-    """Rows = seeds x (free + CONDITIONS); all rows share the real primer."""
+    """Rows = seeds x (free + chords); all rows share the real primer."""
     seeds, notes = noise.shape[:2]
-    rows = [(seed, name) for seed in range(seeds) for name in ('free',) + CONDITIONS]
+    rows = [(seed, name) for seed in range(seeds) for name in ('free', *chords)]
     length = context + notes
     pitch = torch.zeros(len(rows), length, dtype=torch.long, device=device)
     pitch[:, :context] = torch.as_tensor(piece['pitch'][onset - context:onset], device=device)
