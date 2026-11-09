@@ -1,0 +1,47 @@
+################################################################
+Date: 2026-11-08 19:14  Commit: 3d488fa  Uncommitted files: 8
+Clear: AE_style_jokerParam_chords_clear_best.pth  Previous: AE_style_jokerParam_chords_best_best.pth  Device: mps
+Recording: interactive_buttons_style.mid (SHA-256 7c435fc76d634e6f...) and _chords.txt (2dea3bbdf0018d94...), 33 notes, 21 with a chord held, 19 of them on a button other than the previous note's. Chord log: [(12, 'Ebm (iv)'), (22, 'free'), (22, 'F7 (V7)'), (33, 'free')]. Primer Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid, context 128.
+Running time: 32 s
+
+Check: probability of the recorded note on its button, mean over notes, and share of notes that were the most likely one:
+  No chord pressed                   free notes  74.4 %, held notes  49.7 %, most likely 48% of held notes
+  Clear adapter, recorded chord      free notes  74.4 %, held notes  53.8 %, most likely 52% of held notes
+  Previous adapter, recorded chord   free notes  74.4 %, held notes  53.8 %, most likely 48% of held notes
+
+Per held note: probability that the pressed button repeats the previous note, and different most likely notes
+among the 19 buttons, per condition. * = the recorded note repeated the previous one on another button.
+Note Chord     Button Played  No chord repeat %     Clear repeat %  Previous repeat % No chord different    Clear different Previous different
+  13 Ebm            6    61                 0.0                0.0                0.0                 13                 16                 14
+  14 Ebm            8    63                 0.1                0.3                0.4                 15                 14                 15
+  15 Ebm            9    63*               99.5               99.5               99.6                 11                  9                 10
+  16 Ebm           10    76                 0.0                0.0                0.0                  9                  7                  8
+  17 Ebm            9    70                 0.0                0.1                0.2                 15                 16                 17
+  18 Ebm            8    67                 0.0                0.0                0.0                 15                 16                 15
+  19 Ebm            6    61                 0.0                0.0                0.0                 15                 16                 16
+  20 Ebm            8    63                22.4               30.8               42.1                 15                 14                 16
+  21 Ebm            9    63*              100.0              100.0              100.0                  7                  7                  9
+  22 Ebm           10    75                 0.0                0.0                0.0                  9                 11                 11
+  23 F7             6    60                 0.0                0.5                0.4                 16                 13                 13
+  24 F7             8    63                 8.0                6.7                6.1                 14                 13                 13
+  25 F7             9    63*               99.8               98.2               98.7                  8                  9                  9
+  26 F7            10    75                 0.0                0.0                0.0                 11                 10                  8
+  27 F7             9    69                 0.9                0.2                0.3                 15                 14                 15
+  28 F7             8    66                 0.0                0.0                0.0                 15                 13                 12
+  29 F7             6    63                 0.0                0.0                0.0                 15                 14                 14
+  30 F7             8    65                12.3               41.8               38.3                 15                 14                 13
+  31 F7             9    65*               96.6               94.5               93.5                 11                  9                  8
+  32 F7            10    76                 0.0                0.0                0.0                 10                  9                 10
+  33 F7            10    70                 0.0                0.0                0.0                 15                 16                 16
+
+No chord held in the recording (notes 1-12): 14.25 different notes of 19.
+Claim 1, probability that the pressed button repeats the previous note, %, over 19 notes: no chord 23.14, clear 24.87, previous 25.24. Clear moved as claimed at 13 notes, the other way at 6.
+Claim 2, different most likely notes of 19, over 21 notes: no chord 12.81, clear 12.38, previous 12.48. Clear moved as claimed at 13 notes, the other way at 7.
+Result: claim 1 supported, claim 2 supported.
+
+Note added 2026-11-08: the criteria above count any increase, so they pass on a 1.7-point average from two notes (20 and 30) where
+no repeat happened. At the 4 recorded repeats (notes 15, 21, 25, 31) the repeat probability is 99.5, 100.0, 99.8 and 96.6 % with no
+chord against 99.5, 100.0, 98.2 and 94.5 % with the clear adapter: the chord does not cause them. Exploratory (temporary script, no
+chord): button 9 right after button 8 would also have repeated the previous note at notes 6 and 11, before any chord (92.5 and
+55.5 %, 3 buttons on that note); at notes 21 and 25, 9 buttons (3-11) give the previous note 63.
+

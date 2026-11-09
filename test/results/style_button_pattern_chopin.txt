@@ -1,0 +1,27 @@
+################################################################
+Date: 2026-11-09 13:45  Commit: 3d488fa  Uncommitted files: 14
+Model: AE_style_jokerParam_chords_clear_best.pth  Device: mps
+Primer: first 128 notes of Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid, style its first 512 notes. 24 generated notes, pattern (6, 8, 9, 10, 9, 8), temperature 1, 40 seeds from 1729. Chords of the third player: [(0, 'Ebm (iv)'), (12, 'free'), (12, 'F7 (V7)')].
+Primer buttons that differ between the app encoding and the primer encoded alone: 97 of 128.
+Running time: 52 s
+
+Player                            Repeats at 8 -> 9 %  Repeats on a changed button %  Notes in the held chord %
+App primer, no chord                              8.1                            3.9                       34.8
+Primer encoded alone, no chord                   16.2                           16.2                       41.4
+App primer, recorded chords                       9.4                            4.1                       61.1
+Means over seeds. Notes in the held chord: share of generated notes in Ebm for the first 12 and F7 for the last 12, held or not.
+Reference, 60 validation pieces with no chord: 7.1 % repeats at 8 -> 9.
+
+Seeds by repeats at the 4 steps 8 -> 9 (0, 1, 2, 3, 4 of 4):
+  App primer, no chord              29   9   2   0   0
+  Primer encoded alone, no chord    17  21   1   1   0
+  App primer, recorded chords       29   7   4   0   0
+Repeats by step of the pattern, counts over 160 steps each (8->6 6->8 8->9 9->10 10->9 9->8):
+  App primer, no chord                 0     0    13     4     5    15
+  Primer encoded alone, no chord       6    25    26    26    53    20
+  App primer, recorded chords          7     2    15     2     5     8
+
+Claim 1, app primer with no chord: 8.1 % of 8 -> 9 steps repeat, 95 % range 3.8 to 12.5.
+Claim 2, app encoding minus primer encoded alone: -8.1 points, 95 % range -14.4 to -1.9, p = 2.9e-02, higher in 6 of 40 seeds, lower in 19.
+Result: claim 1 refuted, claim 2 refuted.
+

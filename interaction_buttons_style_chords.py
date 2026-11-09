@@ -95,7 +95,7 @@ else:
 # AE_style_jokerParam_change, adds the Space "change" adapter; until its checkpoint
 # exists, stage 1 runs and Space does nothing.
 # AE_style_jokerParam_change
-model_name = 'AE_style_jokerParam_change'
+model_name = 'AE_style_jokerParam_chords_clear'
 #if not os.path.isfile(get_model_hparams(model_name)['ckpt_file_name']):
 #    model_name = 'AE_style_jokerParam_chords'
 model_name = os.environ.get('MODEL_NAME', model_name)

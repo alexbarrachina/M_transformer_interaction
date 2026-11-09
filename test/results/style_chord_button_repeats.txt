@@ -1,0 +1,24 @@
+################################################################
+Date: 2026-11-08 18:47  Commit: 3d488fa  Uncommitted files: 6
+Previous: AE_style_jokerParam_chords_best_best.pth  Clear: AE_style_jokerParam_chords_clear_best.pth  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. Context 200 real notes, notes (1, 4, 8) of the hold, all 19 buttons, seed 1729.
+Running time: 274 s
+
+Columns: different most likely notes among the 19 buttons; buttons whose most likely note is a chord note, and has the
+previous note's pitch class; chance two neighbouring buttons play the same note when sampled; probability on the chord's notes.
+Means over pieces and hold notes.
+Condition                            Different notes of 19 Chord note % Previous pc % Neighbours same % Chord probability %
+No chord pressed                                     14.81         50.5          17.0              20.7                48.0
+Previous adapter, real chord held                    14.77         65.5          15.1              21.1                60.5
+Clear adapter, real chord held                       14.58         72.5          14.3              22.1                66.9
+
+Different notes of 19 at hold notes (1, 4, 8), 1 = the note where the chord is pressed (exploratory):
+  No chord pressed                     15.00 14.72 14.70
+  Previous adapter, real chord held    14.97 14.63 14.72
+  Clear adapter, real chord held       14.78 14.47 14.50
+
+Claim 1, clear adapter: chord held minus no chord: -0.22 different notes, 95 % range -0.50 to +0.06, p = 1.2e-01, fewer in 26 of 60 pieces, more in 23.
+Claim 2, chord held: clear minus previous adapter: -0.19 different notes, 95 % range -0.36 to -0.03, p = 3.2e-02, fewer in 27 of 60 pieces, more in 16.
+Previous adapter: chord held minus no chord: -0.03 different notes, 95 % range -0.27 to +0.20, p = 7.6e-01, fewer in 27 of 60 pieces, more in 23.
+Result: claim 1 refuted, claim 2 supported.
+

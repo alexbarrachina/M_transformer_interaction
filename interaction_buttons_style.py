@@ -323,7 +323,16 @@ def save_performance():
   detailed_stats = ms_SONG_to_MIDI_Converter(song_d, output_file_name = output_midi_name,
                                                             timings_multiplier=1
                                                             )
+  save_chord_log()
   print("saved performance")
+
+def save_chord_log():
+  # Same file as interaction_buttons_style_chords.py. This app has no chord keys, so the chord table
+  # (time_s, notes_before, chord) stays empty and only its header is kept, for the same reader.
+  with open(output_midi_name + '_chords.txt', 'w') as f:
+    f.write("time_s\tnotes_before\tchord\n")
+    # Button of every generated note, aligned with the saved MIDI's notes (model.joker_button_idx = Joker note).
+    f.write("buttons\t" + ' '.join(map(str, b[CTX_LEN:CTX_LEN + i])) + "\n")
 
 def reset_context():
     global i

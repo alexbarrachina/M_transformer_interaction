@@ -3077,7 +3077,7 @@ MODELS_PARAMETERS['AE_style_jokerParam_change'] = {
 MODELS_PARAMETERS['AE_style_jokerParam_chords_clear'] = {
     **MODELS_PARAMETERS['AE_style_jokerParam_chords'],
     'description': 'Style joker chord adapter trained only on chords that at least 60 % of their notes follow.',
-    'ckpt_file_name': './save_models/AE_style_jokerParam_chords_clear.pth',  # Best: ..._clear_best.pth
+    'ckpt_file_name': './save_models/AE_style_jokerParam_chords_clear_best.pth',  # Best: ..._clear_best.pth
     'chord_clear_min_rate': 0.6,
     'chord_total_steps': 400_000,  # As the first stage-1 run; the 500k above came from resuming it.
 }

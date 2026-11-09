@@ -1,0 +1,26 @@
+################################################################
+Date: 2026-11-08 20:00  Commit: 3d488fa  Uncommitted files: 12
+Model: AE_style_jokerParam_chords_clear_best.pth  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. Primer and window 128 notes, 24 generated notes, pattern (6, 8, 9, 10, 9, 8), temperature 1, seed 1729.
+Running time: 88 s
+
+Player                      Repeats on a changed button %  Repeats at 8 -> 9 %  All repeats %  Chord notes %
+Natural player, no chord                              4.2                  2.5            4.4           41.5
+Pattern, no chord                                     9.2                  7.1            9.2           38.2
+Pattern, real chord held                              8.8                  7.9            8.8           66.3
+Chord notes: share of generated notes in the piece's real chord, held or not.
+
+Claim 1, no chord: pattern minus natural player: +5.0 points, 95 % range +2.4 to +7.5, p = 5.0e-04, higher in 29 of 60 pieces, lower in 15.
+Claim 2, pattern: chord held minus no chord: -0.4 points, 95 % range -3.1 to +2.3, p = 7.3e-01, higher in 19 of 60 pieces, lower in 22.
+Result: claim 1 supported, claim 2 refuted.
+
+Note added 2026-11-08 (exploratory, temporary script, same generation): pieces by repeats at the 4 steps 8 -> 9: no chord 46 with 0,
+11 with 1, 3 with 2, none with 3 or 4 (chord held: 46, 9, 5, 0, 0); the recording had 4 of 4. Repeats concentrate where the pattern
+turns back: per cycle position over the 60 pieces, 10 -> 9 gave 44 (chord 45) and 9 -> 8 gave 31 (28) of the 240 steps, 8 -> 9 only
+17 (19). They cluster by piece: 23 pieces (chord 24) had no repeat in 24 notes, 8 pieces had 6 or more.
+
+Note added 2026-11-09: the pattern player's primer was encoded alone (128 notes), the natural player's together with the real
+continuation (152 notes), so claim 1 compares two changes at once. In test/style_button_pattern_chopin.py, encoding the Chopin
+primer alone instead of with the whole file changed 97 of its 128 buttons and raised repeats on a changed button from 3.9 to
+16.2 % of notes. Part of claim 1's +5.0 points may come from the encoding rather than the pattern.
+
