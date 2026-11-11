@@ -11800,6 +11800,13 @@ class AE_style(Module):
                 note_tokens['pitch'][:, 1:], e, max_steps=5
             ).mean()
 
+        loss_direction_perc = 0
+        if self.cfg.get('loss_direction_perc', 0) > 0:
+            loss_direction_perc = direction_loss(
+                note_tokens['pitch'][:, 1:], e,
+                self.cfg.get('num_buttons', 12), max_steps=5
+            ).mean()
+
         loss_interval_perc = 0
         if self.cfg.get('loss_interval_perc', 0) > 0:
             loss_interval_perc = interval_preservation_loss(
@@ -11814,7 +11821,13 @@ class AE_style(Module):
 
         loss_deviate = 0
         if self.cfg.get('loss_deviate', 0) > 0:
-            loss_deviate = deviate_loss(note_tokens['pitch'], e)
+            # e encodes pitch[:, 1:]. Until 2026-11-11 the call passed the whole pitch, so the mask
+            # was one note early and the note after a repeat was asked to keep the button.
+            loss_deviate = deviate_loss(note_tokens['pitch'][:, 1:], e[:, :-1])
+
+        loss_range = 0
+        if self.cfg.get('loss_range', 0) > 0:
+            loss_range = range_loss(e)
 
         loss_button_held = 0
         if self.cfg.get('loss_button_held', 0) > 0:
@@ -11888,6 +11901,7 @@ class AE_style(Module):
             loss_contour = self.cfg['loss_contour'] * (
                 self.cfg.get('loss_contour_perc', 0) * loss_contour_perc +
                 self.cfg.get('loss_multi_step_perc', 0) * loss_multi_step_perc +
+                self.cfg.get('loss_direction_perc', 0) * loss_direction_perc +
                 self.cfg.get('loss_interval_perc', 0) * loss_interval_perc +
                 self.cfg.get('loss_shape_perc', 0) * loss_shape_perc
             )
@@ -11895,6 +11909,8 @@ class AE_style(Module):
 
         if self.cfg.get('loss_margin', 0) > 0:
             loss_total += self.cfg['loss_margin'] * loss_margin
+        if self.cfg.get('loss_range', 0) > 0:
+            loss_total += self.cfg['loss_range'] * loss_range
         if self.cfg.get('loss_deviate', 0) > 0:
             loss_total += self.cfg['loss_deviate'] * loss_deviate
         if self.cfg.get('loss_button_held', 0) > 0:
@@ -11938,6 +11954,8 @@ class AE_style(Module):
             'loss_contour': loss_contour,
             'loss_contour_perc': loss_contour_perc,
             'loss_multi_step_perc': loss_multi_step_perc,
+            'loss_direction_perc': loss_direction_perc,
+            'loss_range': loss_range,
             'loss_interval_perc': loss_interval_perc,
             'loss_shape_perc': loss_shape_perc,
         }

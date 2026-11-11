@@ -963,6 +963,10 @@ def _train(logger):
                             wandb.log({"loss_contour_perc": cfg['loss_contour'] * cfg['loss_contour_perc'] * loss['loss_contour_perc'].item()}, step=nsteps)
                         if cfg.get('loss_multi_step_perc', 0) > 0 and 'loss_multi_step_perc' in loss:
                             wandb.log({"loss_multi_step": cfg['loss_contour'] * cfg['loss_multi_step_perc'] * loss['loss_multi_step_perc'].item()}, step=nsteps)
+                        if cfg.get('loss_direction_perc', 0) > 0 and 'loss_direction_perc' in loss:
+                            wandb.log({"loss_direction": cfg['loss_contour'] * cfg['loss_direction_perc'] * loss['loss_direction_perc'].item()}, step=nsteps)
+                        if cfg.get('loss_range', 0) > 0 and 'loss_range' in loss:
+                            wandb.log({"loss_range": cfg['loss_range'] * loss['loss_range'].item()}, step=nsteps)
                         if cfg.get('loss_interval_perc', 0) > 0 and 'loss_interval_perc' in loss:
                             wandb.log({"loss_interval": cfg['loss_contour'] * cfg['loss_interval_perc'] * loss['loss_interval_perc'].item()}, step=nsteps)
                         if cfg.get('loss_shape_perc', 0) > 0 and 'loss_shape_perc' in loss:

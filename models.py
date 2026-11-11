@@ -3195,6 +3195,37 @@ MODELS_PARAMETERS['AE_style_jokerParam_dtime_tester_v1'] = {
     # train_style.py still optimizes only loss_recons during timing adaptation.
 }
 
+# docs/Button_loss_repair_plan.md, stage 1: the present tester and its Joker fine-tune with repaired
+# button losses only. Same data (giantmidi_full_train), so the chord adapters' unseen pieces stay unseen.
+#  - loss_deviate: one button off on a repeated note costs 0.1 (8.0 * (2/18)**2); the call is aligned since 2026-11-11.
+#  - loss_direction_perc replaces loss_multi_step_perc: only a button moving against the pitch is penalised.
+#  - loss_range replaces loss_margin: the same out-of-range penalty, without the reward for spreading positions.
+REPAIRED_BUTTON_LOSSES = {
+    'loss_deviate': 8.0,
+    'loss_multi_step_perc': 0.,
+    'loss_direction_perc': 1.0,  # inside loss_contour 0.1
+    'loss_margin': 0.,
+    'loss_range': 0.1,
+}
+
+# Trained from scratch: MODEL_NAME=AE_style_tester_v3 python train_style.py
+MODELS_PARAMETERS['AE_style_tester_v3'] = {
+    **MODELS_PARAMETERS['AE_style_tester_v2'],
+    'description': 'AE_style_tester_v2 with repaired button losses, trained from scratch',
+    # Placeholder until training: set the chosen checkpoint here before the audition and the Joker fine-tune.
+    'ckpt_file_name': './save_models/AE_style_tester_v3_SET_AFTER_TRAINING.pth',
+    **REPAIRED_BUTTON_LOSSES,
+}
+
+# Joker fine-tune of the chosen AE_style_tester_v3 checkpoint, as AE_style_jokerParam_tester_v2 of AE_style_tester_v2.
+MODELS_PARAMETERS['AE_style_jokerParam_tester_v3'] = {
+    **MODELS_PARAMETERS['AE_style_jokerParam_tester_v2'],
+    'description': 'AE_style_jokerParam_tester_v2 with repaired button losses, fine-tuned from AE_style_tester_v3',
+    'init_from_ckpt': MODELS_PARAMETERS['AE_style_tester_v3']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/AE_style_jokerParam_tester_v3_SET_AFTER_TRAINING.pth',
+    **REPAIRED_BUTTON_LOSSES,
+}
+
 
 def detect_model_type(model):
 

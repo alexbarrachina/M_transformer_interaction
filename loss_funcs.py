@@ -32,6 +32,7 @@ def margin_loss(e):
 def deviate_loss(pitches, e):
     """
     Penalize button changes when consecutive pitches are the same
+    Expects pitches lined up with e and one note longer: pitches [B, T+1], e [B, T], e[:, i] = button of pitches[:, i].
     """
     # Identify held notes (where consecutive pitches are the same)
     notes_held = (pitches[:, 1:-1] == pitches[:, :-2]).float()
@@ -114,8 +115,24 @@ def multi_step_contour_loss(pitches, buttons, max_steps=5):
         # Weight by step size and add to total loss
         step_loss = step_weight * disagreement_penalty.mean()
         total_loss += step_loss
-        
+
     return total_loss
+
+def direction_loss(pitches, e, num_buttons, max_steps=5):
+    """Penalizes a button that moves against the pitch, for notes up to max_steps apart.
+    Asks for no distance. In buttons: 1.0 = one button the wrong way.
+    pitches and e are lined up, both [B, T]."""
+    bin_size = 2.0 / (num_buttons - 1)
+    total_loss = torch.zeros(1, device=pitches.device)
+    for step in range(1, min(max_steps + 1, pitches.shape[1])):      # 5 step sizes, as multi_step_contour_loss
+        pitch_direction = torch.sign(pitches[:, step:] - pitches[:, :-step])
+        button_diffs = (e[:, step:] - e[:, :-step]) / bin_size
+        total_loss += torch.square(torch.relu(-pitch_direction * button_diffs)).mean() / step
+    return total_loss
+
+def range_loss(e):
+    """The out-of-range penalty of margin_loss, without its reward for spreading positions."""
+    return torch.square(torch.relu(torch.abs(e) - 1)).mean()
 
 def interval_preservation_loss(pitches, buttons, max_steps=5):
     """
