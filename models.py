@@ -3212,8 +3212,8 @@ REPAIRED_BUTTON_LOSSES = {
 MODELS_PARAMETERS['AE_style_tester_v3'] = {
     **MODELS_PARAMETERS['AE_style_tester_v2'],
     'description': 'AE_style_tester_v2 with repaired button losses, trained from scratch',
-    # Placeholder until training: set the chosen checkpoint here before the audition and the Joker fine-tune.
-    'ckpt_file_name': './save_models/AE_style_tester_v3_SET_AFTER_TRAINING.pth',
+    # Chosen checkpoint for the audition and the Joker fine-tune (until 2026-11-12 a placeholder).
+    'ckpt_file_name': './save_models/AE_style_tester_v3_48_eps_343_steps_0.5716_loss_0.8485_val_loss_0.8574_acc.pth',
     **REPAIRED_BUTTON_LOSSES,
 }
 
