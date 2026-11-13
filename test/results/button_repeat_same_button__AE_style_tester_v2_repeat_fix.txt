@@ -1,0 +1,17 @@
+################################################################
+Date: 2026-11-12 21:43  Commit: 3c621bc  Uncommitted files: 18
+Present: AE_style_tester_v2 (AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth)
+New: AE_style_tester_v2_repeat_fix (AE_style_tester_v2_repeat_fix_78_eps_553_steps_0.7201_loss_0.7099_val_loss_0.8861_acc.pth)  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. Passages of 200 + 8 notes, seed 1729.
+Running time: 64 s
+
+Probability of the previous note at the 8 notes after the change, means over passages.
+Next press                            Present %    New %  New minus present  Passages
+On the previous note's button             10.40    58.88             +48.47        60
+One button higher                          4.80     5.21              +0.42        60
+
+Main, previous note's button, new minus present: +48.47 points, 95 % range +43.36 to +53.54, p = 5.0e-05, higher in 60 of 60 passages, lower in 0.
+Reference, one button higher, new minus present: +0.42 points, 95 % range -1.93 to +2.84.
+Exploratory, repeated notes in the passages that keep their button: present 48 of 202 (24 %), new 196 of 202 (97 %).
+Result: supported (supported if the range lies above zero).
+

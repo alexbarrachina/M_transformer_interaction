@@ -1,0 +1,21 @@
+################################################################
+Date: 2026-11-11 21:48  Commit: 5aba400  Uncommitted files: 5
+Present: AE_style_jokerParam_tester_v2 (AE_style_jokerParam_tester_v2_10_eps_4697_steps_1.1264_loss_0.9737_val_loss_0.8672_acc.pth)
+New: AE_style_jokerParam_tester_v2 (AE_style_jokerParam_tester_v2_10_eps_4697_steps_1.1264_loss_0.9737_val_loss_0.8672_acc.pth)  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. Passages of 200 + 8 notes, seed 1729. The 19-button sweep is at the first of the 8 notes.
+Running time: 83 s
+
+Means over passages. The first two rows are averaged over the 8 notes of each passage.
+Measure                                                   Present      New  New minus present
+Button known: probability of the real note, %               64.69    64.69              +0.00
+No button: probability of the real note, %                  22.92    22.92              +0.00
+Different most likely notes of the 19 buttons               15.00    15.00              +0.00
+Neighbouring buttons with the same most likely note, %      22.13    22.13              +0.00
+Neighbouring buttons with a lower most likely note, %        0.28     0.28              +0.00
+Most likely note of button 18 minus button 0, semitones     49.08    49.08              +0.00
+
+Main, button known, new minus present: +0.00 points, 95 % range +0.00 to +0.00, p = 1.0e+00, higher in 0 of 60 passages, lower in 0.
+Reference, no button, new minus present: +0.00 points, 95 % range +0.00 to +0.00.
+Check run, the same preset in both roles: largest difference over all measures and passages = 0 (must be 0).
+Result: supported (supported if the range lies above -5 points).
+

@@ -1,0 +1,18 @@
+################################################################
+Date: 2026-11-12 21:46  Commit: 3c621bc  Uncommitted files: 19
+Present: AE_style_tester_v2 (AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth)
+New: AE_style_tester_v2_repeat_fix (AE_style_tester_v2_repeat_fix_78_eps_553_steps_0.7201_loss_0.7099_val_loss_0.8861_acc.pth)  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. Passages of 200 + 8 notes, seed 1729. The 19-button sweep is at the first of the 8 notes.
+Running time: 75 s
+
+Means over passages. The first two rows are averaged over the 8 notes of each passage.
+Measure                                                   Present      New  New minus present
+Button known: probability of the real note, %               66.85    72.50              +5.65
+Different most likely notes of the 19 buttons               15.23    16.08              +0.85
+Neighbouring buttons with the same most likely note, %      20.74    16.20              -4.54
+Neighbouring buttons with a lower most likely note, %        0.56     0.74              +0.19
+Most likely note of button 18 minus button 0, semitones     46.52    32.72             -13.80
+
+Main, button known, new minus present: +5.65 points, 95 % range +2.34 to +8.88, p = 1.2e-03, higher in 40 of 60 passages, lower in 20.
+Result: supported (supported if the range lies above -5 points).
+

@@ -1,0 +1,24 @@
+################################################################
+Date: 2026-11-09 20:42  Commit: 455b7df  Uncommitted files: 2
+Models: AE_style_jokerParam_chords_clear_best.pth without chord; AE_style_tester (./save_models/AE_style_tester_30_eps_434_steps_0.5793_loss_0.8586_acc.pth)  Device: mps
+Real music: giantmidi_full_w_chords_unseen_test.pickle, 60 passages of 200 + 8 notes, seed 1729. Recordings replayed with the 128-note window and primer Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid.
+Running time: 37 s
+
+Real music, buttons from each model's encoder (its training buttons); means over passages, 95 % range over passages:
+  Style joker (clear checkpoint, no chord)   repeated notes that keep their button  16.5 % (range 9.5 to 24.5, 49 passages with repeats); one-step moves whose note repeats  2.9 %; decoder probability of the previous note at one-step moves  4.8 % (range 3.6 to 6.0)
+  AE_style_tester                            repeated notes that keep their button  22.3 % (range 14.3 to 31.0, 49 passages with repeats); one-step moves whose note repeats  5.0 %; decoder probability of the previous note at one-step moves  5.6 % (range 4.1 to 7.4)
+
+Recordings: notes; notes on a button one step from the previous note's; how many of them repeated the previous note;
+mean probability the replay gives the previous note there; typical probability of the recorded notes (check); SHA-256 of .mid and _chords.txt.
+Recording                                                Model                                      Notes  One-step  Repeated Previous note % Recorded note %
+buttons_style_chords_clear/1_interactive_buttons_style   Style joker (clear checkpoint, no chord)     192        79        13           16.2           36.3   43431c90b49d 7648e10e8afc
+buttons_style_chords_clear/2_interactive_buttons_style   Style joker (clear checkpoint, no chord)     198       137        22           13.9           47.3   1beb4d04e743 90e5a7ca65c2
+buttons_style_chords_clear/3_interactive_buttons_style   Style joker (clear checkpoint, no chord)      68        31         6           22.4           72.4   abcb64aa063e 0a1816af3683
+buttons_style_chords_clear/4_interactive_buttons_style   Style joker (clear checkpoint, no chord)     136        81        20           26.5           50.9   501be6ac80d8 738d48894124
+buttons_style_chords_clear/5_interactive_buttons_style   Style joker (clear checkpoint, no chord)     225       140         9            5.0           40.3   4dd030e7ca77 b75ee4c9192f
+out/interactive_buttons_style                            AE_style_tester                               91        62         7           11.6           48.2   dbcfab7f5f9b eed9ef74db2f
+
+Claim 1 (training buttons keep the button on under half of the repeated notes, both models): supported.
+Claim 2 (every recording above the real-music range of its model): refuted.
+Result: claim 1 supported, claim 2 refuted.
+

@@ -3,9 +3,9 @@ Question: Without the rule that pushed buttons to move with the pitch, does a bu
 Claim: the new style joker predicts the pianist's real next note from its button no worse than the present one.
 Supported if: the 95 % range of new minus present lies above -5 percentage points. Refuted if it lies below -5. Undecided if it contains -5.
 Models: present AE_style_jokerParam_tester_v2 (trained with the old button losses) and new AE_style_jokerParam_tester_v3
-(repaired button losses, docs/Button_loss_repair_plan.md), presets of models.py with their checkpoints. The new preset is the
+(repaired button losses, docs/2026-11-11_Button_loss_repair_plan.md), presets of models.py with their checkpoints. The new preset is the
 first argument; giving the present one checks the test, since every difference must then be exactly 0.
-Data: the same 60 pieces and moments of Training-Data/giantmidi_full_w_chords_unseen_test as test/style_button_repeat_cause.py,
+Data: the same 60 pieces and moments of Training-Data/giantmidi_full_w_chords_unseen_test as test/button_repeat_neighbour_labels.py,
 which leaves out pieces with over 10 % of their 8-note sequences in giantmidi_full_train (both models' training data) or in the
 chord adapters' training data. The chord adapters used this split for validation; neither style joker trained on it.
 Method: each passage is the pianist's 200 notes before a chord change and the 8 after it, with the piece's notes next to it as
@@ -20,12 +20,16 @@ Size and time: 60 passages, 2 button conditions and 19 buttons per model, 83 s o
 the rest for the 19-button sweep).
 Base style models (AE_style, no joker) can be compared too; they have no "no button" reference.
 Run: python test/button_control_strength.py [new preset, default AE_style_jokerParam_tester_v3] [present preset, default AE_style_jokerParam_tester_v2]
+Results: test/results/button_control_strength__<new preset>.txt, one file per evaluated model.
 Result (2026-11-11): check run only, with the present model in both roles: every difference is exactly 0. The present model gives
 the real note 64.7 % with its button and 22.9 % without one; its 19 buttons give 15.0 different notes. Not run yet with the new
-model. See test/results/button_control_strength.txt.
+model. See test/results/button_control_strength__AE_style_jokerParam_tester_v2.txt.
 Result (2026-11-12, base models AE_style_tester_v3 epoch 48 against AE_style_tester_v2 epoch 150): undecided, no measurable loss.
 The real note gets 66.3 % against 66.9 % (-0.5 points, 95 % range -5.2 to +4.2); the 19 buttons give the same number of different
 notes, but span 32 semitones instead of 47, and 2.6 % instead of 0.6 % of neighbouring buttons come in the wrong order.
+Result (2026-11-12, AE_style_tester_v2_repeat_fix epoch 78 against AE_style_tester_v2): supported. The real note gets 72.5 %
+against 66.9 % (+5.7 points, 95 % range +2.3 to +8.9, higher in 40 of 60 passages); 16.1 different notes against 15.2; span 33
+semitones against 47.
 """
 
 import datetime
@@ -43,8 +47,8 @@ sys.path.insert(0, str(ROOT))
 
 # The same moments as the many-chords test: its constants (200-note context, 8 notes, 60 pieces, seed) apply here too.
 from chord_strength_many_chords import CONTEXT, NOTES, PIECES, SEED, TEST_PICKLE, choose_moments, overlap_per_piece, read_events
-from eval_chord_strength import bootstrap_ci, permutation_p
-from eval_style_chord_strength import free_logits, mode_buttons, style_inputs
+from chord_strength_guidance import bootstrap_ci, permutation_p
+from chord_strength_style import free_logits, mode_buttons, style_inputs
 from model_loader import load_model
 from models import get_model_hparams
 from train_chords import ChordPitchSamplerDataset
@@ -53,7 +57,7 @@ NEW = sys.argv[1] if len(sys.argv) > 1 else 'AE_style_jokerParam_tester_v3'
 PRESENT = sys.argv[2] if len(sys.argv) > 2 else 'AE_style_jokerParam_tester_v2'
 DEVICE = 'mps'
 ROWS_PER_PASS = 60  # decoder rows per forward pass, to fit in the M1's memory
-RESULTS = ROOT / 'test/results/button_control_strength.txt'
+RESULTS = ROOT / f'test/results/button_control_strength__{NEW}.txt'  # one file per evaluated model
 
 
 def load_style_model(name: str, device: torch.device):
@@ -126,6 +130,7 @@ def model_values(model, data: ChordPitchSamplerDataset, moments: np.ndarray, dev
     values['neighbours_same'] = 100 * (top[:, 1:] == top[:, :-1]).mean(-1)
     values['neighbours_lower'] = 100 * (top[:, 1:] < top[:, :-1]).mean(-1)
     values['span'] = (top[:, -1] - top[:, 0]).astype(float)
+    values['top'] = top  # used by test/button_map_chromatic.py
     return values
 
 

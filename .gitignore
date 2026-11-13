@@ -13,3 +13,5 @@ tester/
 harm/
 docs/
 samples/
+# Audio renders of the test listening pages are large; the MIDI next to them is kept.
+test/results/**/*.wav

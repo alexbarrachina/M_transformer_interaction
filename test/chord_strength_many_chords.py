@@ -4,15 +4,16 @@ The new adapter is the first argument, by default the clear-passage one.
 Supported if: new minus current has a 95 % range above zero both for the piece's real chord and for the average of all 24 major and minor triads.
 Refuted if: either range reaches zero or is below it.
 Models: save_models/D_Chord_Joker_change_latest_best.pth (current, the app's adapter, trained on all labelled notes) and a new adapter: save_models/D_Chord_Joker_clear_latest_best.pth (clear, trained only on clear passages) or save_models/D_Chord_Joker_transposed_latest_best.pth (transposed, half of its windows move the notes after the press and their chord by up to a tritone). Same frozen base.
-For the transposed adapter, claim 2 of test/results/eval_chord_strength_training_data.txt, written before it was trained, also applies: supported if the major chord a tritone above the real root gains with a 95 % range above zero and the real chord loses less than 5 percentage points on average.
+For the transposed adapter, claim 2 of test/results/chord_strength_guidance__D_Chord_Joker_clear_latest_best.txt, written before it was trained, also applies: supported if the major chord a tritone above the real root gains with a 95 % range above zero and the real chord loses less than 5 percentage points on average.
 Data: Training-Data/giantmidi_full_w_chords_unseen_test, the adapters' validation split. Validation chose each adapter's best checkpoint but never trained it. Pieces with over 10 % of their 8-note sequences in the base's or the adapters' training data are left out.
 Method: one chord change at random in each piece. From the pianist's 200 notes before it, each model generates 8 notes with a chord held, once for the piece's real chord and once for each of the 24 triads, plus once with no chord pressed. All runs at a moment share their sampling noise. No guidance.
 Measure: probability given to the held chord's notes, averaged over the 8 generated notes, new minus current, in percentage points. One value per piece. Higher means a stronger effect.
 Cost: base NLL, how unlikely the frozen base without chord input finds the generated notes (lower is more likely), compared with the current adapter and with the pianist's real notes at the same moments.
-Exploratory: results by how many of the triad's notes are in the real chord, the chords of test/eval_chord_strength.py, and notes by position.
+Exploratory: results by how many of the triad's notes are in the real chord, the chords of test/chord_strength_guidance.py, and notes by position.
 Size and time: 60 pieces, 25 chords each, 303 s on the M1.
 Run: python test/chord_strength_many_chords.py [checkpoint of the new adapter]
-Result for clear (2026-11-07): supported in these 60 pieces. The real chord's notes get 78.7 % against 67.9 %, and all 24 triads on average 71.0 % against 47.0 %; the generated notes stay as likely as the pianist's with the real chord but become less likely with triads outside it. See test/results/chord_strength_many_chords.txt.
+Results: test/results/chord_strength_many_chords__<checkpoint name>.txt, one file per evaluated model.
+Result for clear (2026-11-07): supported in these 60 pieces. The real chord's notes get 78.7 % against 67.9 %, and all 24 triads on average 71.0 % against 47.0 %; the generated notes stay as likely as the pianist's with the real chord but become less likely with triads outside it. See test/results/chord_strength_many_chords__D_Chord_Joker_clear_latest_best.txt.
 Result for transposed (2026-11-08): refuted as a general strengthening, because the real chord gains only +2.0 points (range -1.1 to +5.2); its own claim 2 is supported, with the tritone chord +31.4 points (range +26.1 to +36.9) and no loss on the real chord. Its notes are less likely under the base than with clear: base NLL 3.01 against 2.70 with the real chord, 3.68 against 3.20 over all triads.
 """
 
@@ -29,7 +30,7 @@ from torch.nn import functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from eval_chord_strength import bootstrap_ci, generate, load_checkpoint, permutation_p, require
+from chord_strength_guidance import bootstrap_ci, generate, load_checkpoint, permutation_p, require
 from filter_unseen_pickles import pitch_ngrams
 from midiUtils import Any_Pickle_File_Reader
 from train_chords import ChordPitchSamplerDataset
@@ -47,8 +48,8 @@ CONTEXT = 200
 NOTES = 8
 SEED = 1729
 DEVICE = 'mps'
-RESULTS = ROOT / 'test/results/chord_strength_many_chords.txt'
-RAW_VALUES = ROOT / f'out/chord_strength_many_chords_{NEW.stem}.npz'  # to look at the results another way without rerunning
+RESULTS = ROOT / f'test/results/chord_strength_many_chords__{NEW.stem}.txt'  # one file per evaluated adapter
+RAW_VALUES = ROOT / f'test/results/chord_strength_many_chords__{NEW.stem}.npz'  # to look at the results another way without rerunning
 
 
 def read_events(path: Path) -> np.ndarray:

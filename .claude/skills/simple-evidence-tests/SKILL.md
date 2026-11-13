@@ -31,14 +31,15 @@ Tests run on the MacBook Pro M1. Training and long runs belong on the Debian RTX
 ## Honest evidence
 
 - Count uncertainty per moment or per piece, never per note, because neighbouring notes are not independent. Give the number of pieces too, since many moments from few pieces are still few pieces.
-- Reuse `bootstrap_ci` (95 % range of a mean) and `permutation_p` (paired test of whether a difference is zero) from `test/eval_chord_strength.py`. Also report how many moments moved in the expected direction, which needs no statistics to understand.
+- Reuse `bootstrap_ci` (95 % range of a mean) and `permutation_p` (paired test of whether a difference is zero) from `test/chord_strength_guidance.py`. Also report how many moments moved in the expected direction, which needs no statistics to understand.
 - Keep tests that refute the claim, and do not drop conditions because they look bad. A negative result is evidence too.
 - Keep the claim as small as the test: 40 moments from 5 pieces support "in these pieces". Say when a result is preliminary and what a citable version would need.
 - Numbers from temporary scripts are exploratory: say so and do not cite them. If one matters, write it as a test here and rerun it, because scratchpad scripts do not survive the session.
 
 ## Files
 
-- One test, one file: `test/<what_it_measures>.py`, readable from top to bottom, with its settings as constants at the top. Do not add a test framework. These rules are for new tests; older scripts in `test/` keep their form.
+- One test, one file: `test/<behaviour>_<what_it_measures>.py`, readable from top to bottom, with its settings as constants at the top. Do not add a test framework. These rules are for new tests; older scripts in `test/` keep their form.
+- The tests form a collection of behaviour evaluators reused across models, indexed in `test/README.md`. To evaluate a new model with them, or to decide whether a new test is needed and add it, follow the behaviour-tests skill.
 - Reuse existing code instead of copying it: `model_loader.py` for models and the evaluation helpers already in `test/`. Add `ROOT` to `sys.path`, as the other scripts in `test/` do.
 - Run in the `tgenie` conda environment, because the older torch in the base environment stalled on this code.
 - Start the file with a docstring like this one, in plain words, so that the test can be understood without reading the code:
@@ -48,17 +49,18 @@ Tests run on the MacBook Pro M1. Training and long runs belong on the Debian RTX
 Question: Does holding a chord longer weaken its effect on the next note?
 Supported if: the chord's notes gain less probability as the hold gets longer.
 Refuted if: the gain stays flat or grows.
-Model: save_models/AE_style_jokerParam_chords_best_v1.pth
+Model: the first argument, a style chord checkpoint; by default save_models/AE_style_jokerParam_chords_best_v1.pth
 Data: samples/not_seen, 5 pieces used for validation but never for training.
 Method: at 40 moments, press the chord of the piece at that moment and change only how many notes it has been held for. The played notes stay the same.
 Measure: probability given to the chord's notes for the next note, minus the same probability with no chord pressed, in percentage points. Higher means a stronger effect.
 Size and time: 40 moments, one forward pass per condition, about 25 s on the M1.
-Run: python test/chord_hold_strength.py
-Result (2026-11-04): supported. After 64 notes the effect is about half as strong with a known button and a third as strong without one. See test/results/chord_hold_strength.txt.
+Run: python test/chord_hold_strength.py [checkpoint]
+Results: test/results/chord_hold_strength__<checkpoint name>.txt, one file per evaluated model.
+Result (2026-11-04, AE_style_jokerParam_chords_best_v1): supported. After 64 notes the effect is about half as strong with a known button and a third as strong without one. See test/results/chord_hold_strength__AE_style_jokerParam_chords_best_v1.txt.
 """
 ```
 
-- Each run prints its result and appends the same text to `test/results/<test_name>.txt`, so earlier runs are kept. Include the date, the git commit and whether there were uncommitted changes, the checkpoint, the device, the settings, the running time and the result table. Do not put results in `out/`, which git ignores.
+- Each run prints its result and appends the same text to `test/results/<test_name>__<model>.txt`, so earlier runs are kept. Include the date, the git commit and whether there were uncommitted changes, the checkpoint, the device, the settings, the running time and the result table. Every other output, MIDI files included, goes in `test/results` too, named the same way. Do not put results in `out/`, which git ignores.
 - After a run, update the docstring's `Result` line with the date and a one-sentence conclusion.
 
 ## Reporting
