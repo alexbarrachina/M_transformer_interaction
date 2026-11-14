@@ -11864,10 +11864,13 @@ class AE_style(Module):
 
         loss_norm_pos = 0
         if self.cfg.get('loss_norm_pos', 0) > 0:
+            # norm_pos_window and norm_pos_tolerance (2026-11-14) make it the frame loss of AE_style_tester_frame_v1;
+            # without them it is the loss of earlier presets, on a 5-note window.
             loss_norm_pos = normalized_position_loss(
                 note_tokens['pitch'][:, 1:], e,
                 num_buttons=self.cfg.get('num_buttons', 12),
-                window_size=5,
+                window_size=self.cfg.get('norm_pos_window', 5),
+                tolerance=self.cfg.get('norm_pos_tolerance', None),
             )
 
         loss_pitch_button = 0

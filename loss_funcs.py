@@ -219,7 +219,7 @@ def melodic_shape_loss(pitches, buttons, window_size=5):
     window_loss = disagreement.mean(dim=(-1, -2))  # B x T
     return window_loss.mean()
 
-def normalized_position_loss(pitches, buttons, num_buttons, window_size=15):
+def normalized_position_loss(pitches, buttons, num_buttons, window_size=15, tolerance=None):
     """
     Calculates loss between normalized positions of pitches and buttons.
     
@@ -227,6 +227,13 @@ def normalized_position_loss(pitches, buttons, num_buttons, window_size=15):
         pitches: Tensor of shape [batch, seq_len] containing pitch values
         buttons: Tensor of shape [batch, seq_len] containing button values
         window_size: Size of window to calculate local min/max for pitches
+        tolerance: None keeps the loss described above. A number of buttons (2026-11-14, the frame loss of
+            AE_style_tester_frame_v1) measures the distance in buttons instead, free within `tolerance` buttons of the
+            target, squared up to one button beyond that and linear after, as tonic_loss. The encoder output is not
+            clamped, so outputs outside [-1, 1] are pulled back, and a window whose pitches are all equal targets the
+            middle button. Exploratory, on unseen test passages: with 33 notes this target keeps the pitch shape
+            better than AE_style_tester_v2 and uses about 18.6 of the 19 buttons in 32-note windows; with 15 notes it
+            puts 18 % of the notes on the end buttons.
     
     Returns:
         A differentiable loss tensor
@@ -251,10 +258,18 @@ def normalized_position_loss(pitches, buttons, num_buttons, window_size=15):
     range_size = (local_max - local_min).clamp(min=1e-6)
     norm_pitches = (pitches - local_min) / range_size
     
-    # Calculate quadratic difference between normalized positions
-    position_diff = torch.square(norm_pitches.clamp(0.0, 1.0) - norm_buttons)
-    
-    return position_diff.mean()
+    if tolerance is None:
+        # Calculate quadratic difference between normalized positions
+        position_diff = torch.square(norm_pitches.clamp(0.0, 1.0) - norm_buttons)
+
+        return position_diff.mean()
+
+    # Frame loss: offset of the unclamped encoder output from the note's place in its window, in buttons
+    target = torch.where(local_max > local_min, norm_pitches, torch.full_like(norm_pitches, 0.5))
+    offset = ((buttons + 1.0) * 0.5 - target) * (num_buttons - 1)
+    beyond = torch.relu(torch.abs(offset) - tolerance)
+    penalty = torch.where(beyond < 1, torch.square(beyond), 2 * beyond - 1)
+    return penalty.mean()
 
 
 

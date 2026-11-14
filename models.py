@@ -3275,6 +3275,28 @@ MODELS_PARAMETERS['AE_style_tester_tonic_v2'] = {
     'tonic_two_sided': True,
 }
 
+# 2026-11-14: buttons that copy the shape of the pitches. Each note's target is its place between the lowest and the
+# highest pitch of the 33 notes around it, spread over the 19 buttons (normalized_position_loss with a tolerance of half a
+# button). It is the only button loss: v2's multi-step contour loss asked a semitone step to move 9 buttons and a leap of
+# 9 semitones only 1, the spreading reward of the margin loss is not needed because the target fills the buttons, and
+# repeated notes in one window get the same target, so no repeated-note rule. Fine-tuned from v2's checkpoint on v2's own
+# data, so only the button losses change. Exploratory on unseen test passages: v2's encoder is a median 2.8 buttons
+# from this target, so the decoder has to relearn most buttons.
+# MODEL_NAME=AE_style_tester_frame_v1 python train_style.py
+MODELS_PARAMETERS['AE_style_tester_frame_v1'] = {
+    **MODELS_PARAMETERS['AE_style_tester_v2'],
+    'description': 'AE_style_tester_v2 fine-tuned with the frame loss as its only button loss',
+    'init_from_ckpt': MODELS_PARAMETERS['AE_style_tester_v2']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/AE_style_tester_frame_v1_SET_AFTER_TRAINING.pth',
+    'loss_contour': 0.,
+    'loss_multi_step_perc': 0.,
+    'loss_margin': 0.,
+    'loss_deviate': 0.,
+    'loss_norm_pos': 0.1,
+    'norm_pos_window': 33,  # notes around each note, itself included
+    'norm_pos_tolerance': 0.5,  # buttons
+}
+
 
 def detect_model_type(model):
 
