@@ -33,6 +33,8 @@ _SQRT3 = math.sqrt(3.0)
 # Model's most probable pitch, over the played note (horizontal roll): RGBA and upward shift in pixels.
 TOP_PITCH_COLOR = (255, 255, 255, 70)
 TOP_PITCH_RAISE = 4
+TONIC_LINE_COLOR = (255, 230, 160, 60)  # faint, the colour of the status text
+TONIC_OCTAVE_COLOR = (90, 90, 90, 60)   # the tonic's other octaves: dark gray, fainter still
 PITCH_NAMES =['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 TONNETZ_COORDS = [
     (0, 0), (-1, 2), (2, 0), (1, -1), (0, 1), (-1, 0),
@@ -105,6 +107,7 @@ class Visualizer:
         self.controls_legend = list(controls_legend or [])
         self.status_text = status_text
         self.pedal: Optional[float] = None  # 0..1, drawn as a slider in the footer when set (reins pedal)
+        self.tonic_pitch: Optional[int] = None  # MIDI pitch drawn as a faint row in the pitch roll when set (tonic shift)
         self.legend_height = (38 if self.controls_legend else 0) + 28 * len(status_text.splitlines())
         self.content_height = self.height - self.legend_height
         self.fps = fps
@@ -506,11 +509,14 @@ class Visualizer:
         all_pitches = [n['pitch'] for n in self.notes] if self.notes else [60]
         # Keep the faint most-probable pitches inside the roll too.
         all_pitches += [n['top_pitch'] for n in self.notes if n.get('top_pitch') is not None]
+        if self.tonic_pitch is not None:
+            all_pitches.append(self.tonic_pitch)  # and the tonic row
         min_pitch = min(all_pitches)
         max_pitch = max(all_pitches)
         # Predicted-chord rows are drawn under the notes so generated pitches
         # landing on chord tones remain visible on top of the blue bands.
         self._draw_chord_overlay(pitch_y, pitch_height, min_pitch, max_pitch, timeline_x, timeline_width)
+        self._draw_tonic_line(pitch_y, pitch_height, min_pitch, max_pitch, timeline_x, timeline_width)
         self._draw_roll(self.notes, pitch_y, pitch_height, min_pitch, max_pitch, is_button=False, x_offset=timeline_x, width=timeline_width)
         self._draw_roll(self.buttons, button_y, button_height, 0, self.button_slots - 1, is_button=True, x_offset=timeline_x, width=timeline_width)
         self._draw_joker_panel(button_y, button_height, timeline_x, timeline_width)
@@ -699,6 +705,23 @@ class Visualizer:
             if (pitch % 12) in self.chord_pcs:
                 y = int(y_offset + height - (pitch - min_pitch + 1) * y_scale)
                 self.screen.blit(band, (x_offset, y))
+
+    def _draw_tonic_line(self, y_offset: int, height: int, min_pitch: int, max_pitch: int,
+                         x_offset: int = 0, width: Optional[int] = None) -> None:
+        """A faint band on the row of self.tonic_pitch, and a fainter dark gray one on its other octaves inside
+        the roll's range, under the notes, in the rows of _draw_roll."""
+        if self.tonic_pitch is None:
+            return
+        if max_pitch == min_pitch:  # match _draw_roll's degenerate-range handling
+            min_pitch -= 1
+            max_pitch += 1
+        y_scale = height / float(max_pitch - min_pitch + 1)
+        size = (self.width if width is None else width, int(max(y_scale, 2)))
+        for pitch in range(min_pitch, max_pitch + 1):
+            if pitch % 12 == self.tonic_pitch % 12:
+                band = pygame.Surface(size, pygame.SRCALPHA)
+                band.fill(TONIC_LINE_COLOR if pitch == self.tonic_pitch else TONIC_OCTAVE_COLOR)
+                self.screen.blit(band, (x_offset, int(y_offset + height - (pitch - min_pitch + 1) * y_scale)))
 
     def _draw_joker_panel(self, y_offset: int, height: int, x_offset: int = 0, width: Optional[int] = None) -> None:
         draw_width = self.width if width is None else width
