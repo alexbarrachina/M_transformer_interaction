@@ -64,6 +64,7 @@ The four older tests read the MIDI files of `samples/not_seen` by default, and s
 | Test | Question | Models it takes | Main measure | Time on the M1 |
 |---|---|---|---|---|
 | `button_map_chromatic.py` | Is the map chromatic, and does the encoder crowd the notes onto the end buttons 0 and 18? | Presets, as above | Share of the 19 buttons whose most likely note is outside the passage's scale; share of the passage's notes the encoder puts on button 0 or 18 | 83 s |
+| `button_map_compression.py` | How faithfully does the encoder compress the pitches into buttons: does it keep the melodic contour, the notes' relative heights, and avoid piling notes on the end buttons? Also draws, for every MIDI file in `test/samples`, its pitches above the model's buttons (`.jpg`) | Presets, as above (encoder only) | Share of consecutive note pairs moving the same way in buttons as in pitch; distance between a note's height in pitch and in buttons within 32-note windows; share of notes on the first or last button. Reference: a linear map of the passage's pitch range onto the buttons | 17 s |
 
 `button_control_strength.py` also reports, as exploratory measures, how many different notes the 19 buttons give, how often neighbouring buttons come in the wrong order and the span in semitones from button 0 to button 18.
 
@@ -87,8 +88,8 @@ The four older tests read the MIDI files of `samples/not_seen` by default, and s
 
 | Model type | Tests |
 |---|---|
-| Base style model (`AE_style_*` preset: buttons and style, no joker) | `button_control_strength`, `button_repeat_same_button`, `button_moves_generation`, `button_map_chromatic`, `align_tonic_button_7` |
-| Style joker (`AE_style_jokerParam_*` preset) | The same five; `button_control_strength` adds the no-button reference |
+| Base style model (`AE_style_*` preset: buttons and style, no joker) | `button_control_strength`, `button_repeat_same_button`, `button_moves_generation`, `button_map_chromatic`, `button_map_compression`, `align_tonic_button_7` |
+| Style joker (`AE_style_jokerParam_*` preset) | The same six; `button_control_strength` adds the no-button reference |
 | Style chord adapter (`AE_style_jokerParam_chords` checkpoint) | `chord_button_repeats`, `chord_strength_style`, `button_repeat_neighbour_labels` (its frozen style joker) |
 | Style change adapter (`AE_style_jokerParam_change` checkpoint) | `chord_change_style` |
 | Chord adapter of the base joker (`D_Chord_Joker` checkpoint) | `chord_strength_many_chords`, `chord_strength_guidance`, `chord_change` (change checkpoints) |

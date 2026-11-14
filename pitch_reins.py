@@ -165,3 +165,17 @@ class Reins:
         return (f"Reins: {key_name(self.tonic_pc, self.minor)}, key 0 = {pitch_name(self.anchor)}"
                 f"  |  pedal {self.pedal:.2f}, "
                 + ("learned map" if self.pedal <= LEARNED_PEDAL else f"+-{window_width(self.pedal)} st"))
+
+
+def reference_pitches(pitches: Sequence[int], tonic_pc: int, minor: bool, button: int = 7) -> List[int]:
+    """The ideal pitch of one button at every note of pitches, with the pedal released: button 7 is the
+    tonic an octave above button 0. The first REGISTER_NOTES notes act as the primer, and before each later
+    note the layout may move by an octave, as in the Reins app. Trains the tonic onto button 7
+    (docs/2026-11-11_Button_loss_repair_plan.md, stage 2), so that training and performance follow one policy."""
+    reins = Reins(tonic_pc, minor, pitches[:REGISTER_NOTES])
+    reference = [ideal_pitch(button, reins.anchor, minor)] * min(REGISTER_NOTES, len(pitches))
+    for pitch in pitches[REGISTER_NOTES:]:
+        reins.update_anchor()  # the app calls it before each press
+        reference.append(ideal_pitch(button, reins.anchor, minor))
+        reins.after_note(pitch)
+    return reference

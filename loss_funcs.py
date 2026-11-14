@@ -134,6 +134,29 @@ def range_loss(e):
     """The out-of-range penalty of margin_loss, without its reward for spreading positions."""
     return torch.square(torch.relu(torch.abs(e) - 1)).mean()
 
+def tonic_loss(pitches, e, reference, num_buttons, button=7, two_sided=False):
+    """Pulls the notes of the reference pitch to one button, with no penalty once they round to it
+    (within half a button). In buttons: 1.0 = one button beyond that; squared up to one button, then
+    linear, because e has no bound and a few positions far outside [-1, 1] (AE_style_tester_v2 and v3 have
+    some above 30) would otherwise dominate. Mean over the reference notes, as deviate_loss over repeated notes.
+    two_sided (2026-11-14) also keeps the other notes off that button: a note below the reference pitch pays for
+    every button it lies above the button's lower edge, a note above it for every button below the upper edge, with
+    the same shape and the same cost per note as the reference notes (the sum is still divided by the number of
+    reference notes). It asks only for order, as the contour losses do. Without it, AE_style_tester_tonic_v1 put about
+    10 different pitches per passage on button 7, only 18 % of them the reference pitch (exploratory, unseen test pieces).
+    pitches, e and reference are lined up, all [B, T]; reference -1 matches no pitch."""
+    bin_size = 2.0 / (num_buttons - 1)
+    target = -1 + button * bin_size  # the centre of the button's bin in [-1, 1]
+    is_reference = (pitches == reference).float()
+    offset = (e - target) / bin_size  # in buttons from the centre of the button
+    beyond = torch.relu(torch.abs(offset) - 0.5) * is_reference
+    if two_sided:
+        is_below = (pitches < reference).float()  # no pitch is below reference -1 (no key)
+        is_above = ((pitches > reference) & (reference >= 0)).float()
+        beyond = beyond + is_below * torch.relu(offset + 0.5) + is_above * torch.relu(0.5 - offset)
+    penalty = torch.where(beyond < 1, torch.square(beyond), 2 * beyond - 1)
+    return penalty.sum() / is_reference.sum().clamp(min=1)
+
 def interval_preservation_loss(pitches, buttons, max_steps=5):
     """
     Encourages the relative magnitudes of intervals to be preserved

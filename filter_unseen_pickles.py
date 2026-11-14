@@ -11,6 +11,11 @@
 #
 # Output: giantmidi_full_w_chords_unseen_{train,test}.pickle, same format, whole pieces only.
 # Rerun it whenever the chord pickles are rebuilt (midis2pickles.py splits at random).
+# Since 2026-11-12 it also writes the complement, giantmidi_full_w_chords_seen_{train,test}.pickle: the pieces
+# the base trained on, with their chords and keys, for style fine-tunes that need the key labels but must add
+# no new pieces (docs/2026-11-11_Button_loss_repair_plan.md, stage 2).
+# python filter_unseen_pickles.py [unseen] [seen]: which pickles to write, both by default. Writing only the
+# seen ones keeps the date of the unseen pickles, which chord trainings check before resuming.
 #
 # Copyright 2025 Alex Barrachina
 #
@@ -28,6 +33,8 @@
 #===================================================================================================
 
 
+import sys
+
 import numpy as np
 
 from midiUtils import Any_Pickle_File_Reader, Any_Pickle_File_Writer
@@ -37,6 +44,7 @@ BASE_TRAIN_PATH = './Training-Data/giantmidi_full_train'  # what the frozen base
 CHORD_PATHS = {'train': './Training-Data/giantmidi_full_w_chords_train',
                'test': './Training-Data/giantmidi_full_w_chords_test'}
 OUTPUT_NAME = './Training-Data/giantmidi_full_w_chords_unseen'
+SEEN_NAME = './Training-Data/giantmidi_full_w_chords_seen'
 NGRAM = 8             # length of the pitch sequences that recognise a piece
 SEEN_FRACTION = 0.5   # seen = more than half of the piece's sequences are in the base data
 BOUNDARY = np.array([126, 126, 0, 0, 0])  # first event of every piece
@@ -61,6 +69,7 @@ def pitch_ngrams(events: np.ndarray):
 
 
 def main() -> None:
+    outputs = sys.argv[1:] or ['unseen', 'seen']
     base = np.asarray(Any_Pickle_File_Reader(BASE_TRAIN_PATH), dtype=np.int16).reshape(-1, 5)
     base_ngrams = np.unique(pitch_ngrams(base)[0])
     del base
@@ -76,8 +85,11 @@ def main() -> None:
         unseen = (total > 0) & (in_base <= SEEN_FRACTION * total)
         print('=' * 70)
         print(f'{split}: {unseen.sum()} unseen of {(total > 0).sum()} pieces')
+        seen = (total > 0) & ~unseen
         # Whole pieces (boundary, notes, chords, keys) are copied unchanged.
-        Any_Pickle_File_Writer(events[unseen[event_piece]].reshape(-1).tolist(), f'{OUTPUT_NAME}_{split}')
+        for output, name, keep in (('unseen', OUTPUT_NAME, unseen), ('seen', SEEN_NAME, seen)):
+            if output in outputs:
+                Any_Pickle_File_Writer(events[keep[event_piece]].reshape(-1).tolist(), f'{name}_{split}')
         print('=' * 70)
 
 

@@ -2,7 +2,10 @@
 # Monster Genie interaction_dtime_only.py Python module
 # Interaction, generating buttons from MIDI keyboard,
 # starting with a context extracted from a MIDI file
-# 
+#
+# Keys are read from the visualizer window (as in interaction_buttons_style_chords.py),
+# so it must have focus.
+#
 # Copyright 2025 Alex Barrachina
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,7 +34,7 @@ from rtmidi.midiutil import open_midiinput
 import rtmidi
 # pip install python-rtmidi
 from threading import Lock, Event
-from pynput import keyboard as pkeyboard
+import pygame
 
 from sympy import false, true
 import torch
@@ -79,8 +82,9 @@ else:
 
 ''' MODEL '''
 
-#model_name = 'AE_style_jokerParam_v1' #AE_style_v1
-model_name = os.environ.get('MODEL_NAME', 'AE_style_jokerParam_dtime_tester_v1')
+#model_name = 'AE_style_jokerParam_v1' #AE_style_v1 #AE_style_tester_tonic_v1
+# AE_style_jokerParam_dtime_tester_v1
+model_name = os.environ.get('MODEL_NAME', 'AE_style_v2')
 cfg = get_model_hparams(model_name)
 if os.environ.get('CHECKPOINT_PATH'):
     cfg['ckpt_file_name'] = os.environ['CHECKPOINT_PATH']
@@ -97,8 +101,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1_no_melody.midi'
 
-sample_midi_path_init = sample_midi_path5
-STYLE_IDX_INIT = 5
+sample_midi_path_init = sample_midi_path2
+STYLE_IDX_INIT = 2
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [
@@ -612,82 +616,89 @@ def manageNote(note, velocity, event_time=None):
       del noteOn_dict[note]
       #visualizer.update(noteOn_time)
 
-"""# KEYBOARD LISTENER — Space holds Joker, T toggles Joker, M captures memory """
-def _on_key_press(key: pkeyboard.Key) -> None:
+"""# KEYBOARD — Space holds Joker, T toggles Joker, M captures memory. Keys come from the
+   visualizer window as pygame key names (as in interaction_buttons_style_chords.py), read in
+   the main loop, instead of a global pynput listener. """
+def _on_key_press(c: str) -> None:
     global active_style_idx
     global kv_cache
     global style_context
     global style_context_mask
     global motif_style_ready
-    if key == pkeyboard.Key.space:
+    if c == 'space':
         space_joker_held.set()
         return
-    try:
-        c = key.char  # type: ignore[union-attr]
-        if c is not None and c.lower() == 'd' and live_timing is not None:
-            if not timing_key_held.is_set():
-                timing_key_held.set()
-                with buffer_lock:
-                    # Keep collecting features in both modes. Cached activations
-                    # encode the old mode, so rebuild from stored context next time.
-                    live_timing.enabled = not live_timing.enabled
-                    kv_cache = None
-                visualizer.controls_legend = make_controls_legend()
-                print(f"Timing {'ON' if live_timing.enabled else 'OFF'}")
-            return
-        if c is not None and c.lower() == 'm':
-            if not memory_key_held.is_set():
-                memory_key_held.set()
-                capture_highlight_motif()
-            return
-        if c is not None and c.lower() == 't':
-            if not toggle_key_held.is_set():
-                toggle_key_held.set()
-                if joker_toggle_active.is_set():
-                    joker_toggle_active.clear()
-                else:
-                    joker_toggle_active.set()
-                visualizer.controls_legend = make_controls_legend()
-                print(f"Joker mode {'ON' if joker_toggle_active.is_set() else 'OFF'}")
-            return
-        if c in ('1', '2', '3', '4', '5'):
-            active_style_idx = int(c) - 1
+    if c == 'd' and live_timing is not None:
+        if not timing_key_held.is_set():
+            timing_key_held.set()
+            with buffer_lock:
+                # Keep collecting features in both modes. Cached activations
+                # encode the old mode, so rebuild from stored context next time.
+                live_timing.enabled = not live_timing.enabled
+                kv_cache = None
+            visualizer.controls_legend = make_controls_legend()
+            print(f"Timing {'ON' if live_timing.enabled else 'OFF'}")
+        return
+    if c == 'm':
+        if not memory_key_held.is_set():
+            memory_key_held.set()
+            capture_highlight_motif()
+        return
+    if c == 't':
+        if not toggle_key_held.is_set():
+            toggle_key_held.set()
+            if joker_toggle_active.is_set():
+                joker_toggle_active.clear()
+            else:
+                joker_toggle_active.set()
+            visualizer.controls_legend = make_controls_legend()
+            print(f"Joker mode {'ON' if joker_toggle_active.is_set() else 'OFF'}")
+        return
+    if c in ('1', '2', '3', '4', '5'):
+        active_style_idx = int(c) - 1
+        style_context = style_contexts[active_style_idx]
+        style_context_mask = style_context_masks_list[active_style_idx]
+        kv_cache = None
+        print(f"Style {c} active: {style_prompt_midi_paths[active_style_idx]}")
+    if c == MOTIF_STYLE_KEY:
+        if motif_style_ready:
+            active_style_idx = MOTIF_STYLE_IDX
             style_context = style_contexts[active_style_idx]
             style_context_mask = style_context_masks_list[active_style_idx]
             kv_cache = None
-            print(f"Style {c} active: {style_prompt_midi_paths[active_style_idx]}")
-        if c == MOTIF_STYLE_KEY:
-            if motif_style_ready:
-                active_style_idx = MOTIF_STYLE_IDX
-                style_context = style_contexts[active_style_idx]
-                style_context_mask = style_context_masks_list[active_style_idx]
-                kv_cache = None
-                print("Highlight motif active")
-            else:
-                print("No highlight motif saved yet. Press M first.")
-        if c in ('r'):
-            print("resetting context")
-            reset_context()
-        if c in ('s'):
-            save_performance()
-            print("saved performance")
-    except AttributeError:
-        pass
+            print("Highlight motif active")
+        else:
+            print("No highlight motif saved yet. Press M first.")
+    # == rather than the previous `c in ('r')`, a substring test that is also true for
+    # the empty name pygame gives to unknown keys.
+    if c == 'r':
+        print("resetting context")
+        reset_context()
+    if c == 's':
+        save_performance()
+        print("saved performance")
 
-def _on_key_release(key: pkeyboard.Key) -> None:
-    if key == pkeyboard.Key.space:
+def _on_key_release(c: str) -> None:
+    if c == 'space':
         space_joker_held.clear()
-    else:
-        char = getattr(key, 'char', None)
-        if char is not None and char.lower() == 'm':
-            memory_key_held.clear()
-        elif char is not None and char.lower() == 't':
-            toggle_key_held.clear()
-        elif char is not None and char.lower() == 'd':
-            timing_key_held.clear()
+    elif c == 'm':
+        memory_key_held.clear()
+    elif c == 't':
+        toggle_key_held.clear()
+    elif c == 'd':
+        timing_key_held.clear()
 
-_key_listener = pkeyboard.Listener(on_press=_on_key_press, on_release=_on_key_release)
-_key_listener.start()
+def handle_pygame_events() -> None:
+    """Keyboard events from the visualizer window (main thread)."""
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            raise SystemExit
+        if event.type in (pygame.KEYDOWN, pygame.KEYUP):
+            c = pygame.key.name(event.key)
+            (_on_key_press if event.type == pygame.KEYDOWN else _on_key_release)(c)
+        elif event.type == pygame.WINDOWFOCUSLOST:
+            # A key-up may go to another app after focus changes.
+            space_joker_held.clear()
 
 """# MIDI IN """
 
@@ -728,6 +739,7 @@ try:
           reset_context()
       #visualizer.get_note(60, 100)
       #visualizer.get_button(0, 100)
-      visualizer.draw()
+      handle_pygame_events()
+      visualizer.draw(handle_events=False)
 except (EOFError, KeyboardInterrupt, SystemExit):
     print("Bye.")

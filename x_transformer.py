@@ -11823,11 +11823,37 @@ class AE_style(Module):
         if self.cfg.get('loss_deviate', 0) > 0:
             # e encodes pitch[:, 1:]. Until 2026-11-11 the call passed the whole pitch, so the mask
             # was one note early and the note after a repeat was asked to keep the button.
-            loss_deviate = deviate_loss(note_tokens['pitch'][:, 1:], e[:, :-1])
+            # Stage 1 of docs/2026-11-11_Button_loss_repair_plan.md aligned the call for every preset. On 2026-11-12
+            # stage 1 was reverted: the old call is the default again, and only its presets keep the
+            # aligned one (deviate_aligned), to explore its drawbacks later.
+            if self.cfg.get('deviate_aligned', False):
+                loss_deviate = deviate_loss(note_tokens['pitch'][:, 1:], e[:, :-1])
+            else:
+                loss_deviate = deviate_loss(note_tokens['pitch'], e)
 
         loss_range = 0
         if self.cfg.get('loss_range', 0) > 0:
             loss_range = range_loss(e)
+
+        loss_tonic = 0
+        tonic_metrics = {}
+        if self.cfg.get('loss_tonic', 0) > 0:
+            # docs/2026-11-11_Button_loss_repair_plan.md, stage 2: the reference pitch (the tonic of the passage's key in the
+            # Reins layout's octave, from the dataset) on button tonic_button. reference_pitch is aligned with pitch.
+            reference = note_tokens['reference_pitch'][:, 1:]
+            tonic_button = self.cfg.get('tonic_button', 7)
+            loss_tonic = tonic_loss(note_tokens['pitch'][:, 1:], e, reference,
+                                    self.cfg.get('num_buttons', 12), tonic_button,
+                                    two_sided=self.cfg.get('tonic_two_sided', False))
+            with torch.no_grad():
+                # Share of the reference notes that already round to that button, to watch in training.
+                is_reference = note_tokens['pitch'][:, 1:] == reference
+                on_button = self.quantizer.real_to_discrete(e.detach()) == tonic_button
+                tonic_metrics['tonic_on_button'] = (on_button & is_reference).sum() / is_reference.sum().clamp(min=1)
+                # Share of that button's notes (in windows with a key) that are the reference pitch: what the decoder
+                # can learn to play on it. About 18 % for AE_style_tester_tonic_v1 on the unseen test pieces.
+                on_button = on_button & (reference >= 0)
+                tonic_metrics['tonic_share_of_button'] = (on_button & is_reference).sum() / on_button.sum().clamp(min=1)
 
         loss_button_held = 0
         if self.cfg.get('loss_button_held', 0) > 0:
@@ -11911,6 +11937,8 @@ class AE_style(Module):
             loss_total += self.cfg['loss_margin'] * loss_margin
         if self.cfg.get('loss_range', 0) > 0:
             loss_total += self.cfg['loss_range'] * loss_range
+        if self.cfg.get('loss_tonic', 0) > 0:
+            loss_total += self.cfg['loss_tonic'] * loss_tonic
         if self.cfg.get('loss_deviate', 0) > 0:
             loss_total += self.cfg['loss_deviate'] * loss_deviate
         if self.cfg.get('loss_button_held', 0) > 0:
@@ -11956,6 +11984,8 @@ class AE_style(Module):
             'loss_multi_step_perc': loss_multi_step_perc,
             'loss_direction_perc': loss_direction_perc,
             'loss_range': loss_range,
+            'loss_tonic': loss_tonic,
+            **tonic_metrics,
             'loss_interval_perc': loss_interval_perc,
             'loss_shape_perc': loss_shape_perc,
         }

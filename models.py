@@ -3195,12 +3195,15 @@ MODELS_PARAMETERS['AE_style_jokerParam_dtime_tester_v1'] = {
     # train_style.py still optimizes only loss_recons during timing adaptation.
 }
 
-# docs/Button_loss_repair_plan.md, stage 1: the present tester and its Joker fine-tune with repaired
+# docs/2026-11-11_Button_loss_repair_plan.md, stage 1: the present tester and its Joker fine-tune with repaired
 # button losses only. Same data (giantmidi_full_train), so the chord adapters' unseen pieces stay unseen.
 #  - loss_deviate: one button off on a repeated note costs 0.1 (8.0 * (2/18)**2); the call is aligned since 2026-11-11.
 #  - loss_direction_perc replaces loss_multi_step_perc: only a button moving against the pitch is penalised.
 #  - loss_range replaces loss_margin: the same out-of-range penalty, without the reward for spreading positions.
+# Reverted on 2026-11-12 (more chromatic maps, pitches crowded on the extreme buttons): no other preset uses these
+# settings, and only these presets keep the aligned repeated-note call (deviate_aligned). Kept to explore them later.
 REPAIRED_BUTTON_LOSSES = {
+    'deviate_aligned': True,
     'loss_deviate': 8.0,
     'loss_multi_step_perc': 0.,
     'loss_direction_perc': 1.0,  # inside loss_contour 0.1
@@ -3224,6 +3227,52 @@ MODELS_PARAMETERS['AE_style_jokerParam_tester_v3'] = {
     'init_from_ckpt': MODELS_PARAMETERS['AE_style_tester_v3']['ckpt_file_name'],
     'ckpt_file_name': './save_models/AE_style_jokerParam_tester_v3_SET_AFTER_TRAINING.pth',
     **REPAIRED_BUTTON_LOSSES,
+}
+
+# One change at a time (2026-11-12): AE_style_tester_v3 put 38 % of the notes on buttons 0 and 18 and its map became
+# chromatic (test/button_map_chromatic.py). This keeps all of AE_style_tester_v2's losses (multi-step contour, margin
+# with its spreading reward) and changes only the repeated-note rule: aligned in AE_style.forward since 2026-11-11 and
+# raised from 0.1 to v3's 8.0. If it keeps v2's map, the contour and margin changes caused v3's chromatic map.
+# Fine-tuned from v2's checkpoint: MODEL_NAME=AE_style_tester_v2_repeat_fix python train_style.py
+MODELS_PARAMETERS['AE_style_tester_v2_repeat_fix'] = {
+    **MODELS_PARAMETERS['AE_style_tester_v2'],
+    'description': 'AE_style_tester_v2 fine-tuned with only the repaired repeated-note rule (loss_deviate 8.0)',
+    'init_from_ckpt': MODELS_PARAMETERS['AE_style_tester_v2']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/AE_style_tester_v2_repeat_fix_78_eps_553_steps_0.7201_loss_0.7099_val_loss_0.8861_acc.pth',
+    'loss_deviate': REPAIRED_BUTTON_LOSSES['loss_deviate'],
+}
+
+# docs/2026-11-11_Button_loss_repair_plan.md, stage 2: AE_style_tester_v2 fine-tuned so that the reference pitch lands on
+# button 7, with v2's own button losses (stage 1 reverted on 2026-11-12; until then this preset was
+# AE_style_tester_v4, a fine-tune of AE_style_tester_v3, never trained). The reference pitch is the tonic of the
+# passage's key in the octave of the Reins layout (its button 7, pitch_reins.reference_pitches); the key is the
+# RNBert local key covering most of the passage's notes.
+# Training: the chord-pickle pieces the base already trained on (filter_unseen_pickles.py), so no new pieces.
+# Validation: the chord adapters' training pieces, which no style model trained on; the tests use the other unseen split.
+# The name does not start with AE_style_tester_v2_, so resuming v2 never picks up its checkpoints.
+# MODEL_NAME=AE_style_tester_tonic_v1 python train_style.py
+MODELS_PARAMETERS['AE_style_tester_tonic_v1'] = {
+    **MODELS_PARAMETERS['AE_style_tester_v2'],
+    'description': 'AE_style_tester_v2 fine-tuned with the tonic of the passage on button 7',
+    'init_from_ckpt': MODELS_PARAMETERS['AE_style_tester_v2']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/AE_style_tester_tonic_v1_129_eps_1040_steps_1.2938_loss_0.8237_val_loss_0.8025_acc.pth',
+    'loss_tonic': 0.1,  # 0.1 per tonic note for one button beyond half a button from button 7 (squared), as loss_deviate
+    'tonic_button': 7,
+    'dataset_train_path': './Training-Data/giantmidi_full_w_chords_seen_train',
+    'dataset_val_path': './Training-Data/giantmidi_full_w_chords_unseen_train',
+}
+
+# 2026-11-14: tonic_v1 put the tonic on button 7 (53 % of the tonic notes) but squeezed its neighbours onto it too:
+# about 10 different pitches per passage on button 7, only 18 % of them the tonic, so pressing 7 gave the tonic no more
+# often than v2 (test/align_tonic_button_7.py) and the map lost contour (test/button_map_compression.py). The same
+# fine-tune with the two-sided tonic term: the other notes stay off button 7, those below the tonic under it and those
+# above over it. From v2 again, not from tonic_v1, so the squeezed map is not the starting point.
+# MODEL_NAME=AE_style_tester_tonic_v2 python train_style.py
+MODELS_PARAMETERS['AE_style_tester_tonic_v2'] = {
+    **MODELS_PARAMETERS['AE_style_tester_tonic_v1'],
+    'description': 'AE_style_tester_v2 fine-tuned with the tonic of the passage on button 7 and the other notes off it',
+    'ckpt_file_name': './save_models/AE_style_tester_tonic_v2_SET_AFTER_TRAINING.pth',
+    'tonic_two_sided': True,
 }
 
 

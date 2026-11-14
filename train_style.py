@@ -57,6 +57,7 @@ from models import get_model_hparams
 from params import *
 from x_transformer import *
 from timing import TIME_UNIT, HISTORY_SIZE, timing_features, augment_timing
+from pitch_reins import reference_pitches
 
 NSTEPS_INIT = 0
 RESUME = os.environ.get('RESUME', '1') != '0'
@@ -308,6 +309,25 @@ def encoder_outside_percentage(model, pitch):
     return (raw_values.abs() > 1).float().mean().mul(100).item()
 
 
+def performed_notes(events):
+    """Events [N, 5] that are performed notes. The chord pickles also hold chord tones (CHORDS_CHANNEL),
+    chord, key and home-key markers (channels above 15) and piece boundaries, which are not music."""
+    channel = events[:, 4]
+    boundary = (events == events.new_tensor([126, 126, 0, 0, 0])).all(dim=1)
+    return ~boundary & (channel < 16) & (channel != HARMONY_CHANNEL) & (channel != CHORDS_CHANNEL)
+
+
+def local_keys(events):
+    """Key in force at every event [N, 5]: pitch class + 12 * mode (1 = minor) of the last KEY_CHANNEL
+    marker of its piece, -1 before the first one or in pickles without keys. int8 [N]."""
+    is_key = events[:, 4] == KEY_CHANNEL
+    boundary = (events == events.new_tensor([126, 126, 0, 0, 0])).all(dim=1)
+    positions = torch.arange(len(events))
+    last_marker = torch.where(is_key | boundary, positions, 0).cummax(dim=0).values
+    keys = events[last_marker, 1] + 12 * events[last_marker, 2]
+    return torch.where(is_key[last_marker], keys, -1).to(torch.int8)
+
+
 #==========================================================================
 
 class StyleMusicSamplerDataset(Dataset):
@@ -320,6 +340,11 @@ class StyleMusicSamplerDataset(Dataset):
       - style window:  pitch-only sequence for StyleEncoder cross-attention
 
     Same transposition is applied to both windows to preserve key consistency.
+
+    With loss_tonic (docs/2026-11-11_Button_loss_repair_plan.md, stage 2) the data are chord pickles: only performed
+    notes count, and each target window also gets 'reference_pitch' [T+1], the pitch the encoder should put
+    on button tonic_button at every note (-1 when the window has no key). The key is the local key that
+    covers most of the window's notes, and the octave follows pitch_reins.reference_pitches.
     """
     def __init__(self, data, seq_len, style_seq_len, is_eval=False, cfg=None):
         super().__init__()
@@ -333,6 +358,7 @@ class StyleMusicSamplerDataset(Dataset):
         self.joker_param_model = self.cfg.get('model_type') == 'AE_style_jokerParam'
         self.timing_enabled = self.cfg.get('timing_enabled', False)
         self.deterministic_eval = self.joker_param_model and self.is_eval
+        self.tonic_reference = self.cfg.get('loss_tonic', 0) > 0
 
         # Pre-compute piece boundaries from [126,126,0,0,0] events
         self.piece_ranges = self._find_piece_boundaries()
@@ -363,6 +389,9 @@ class StyleMusicSamplerDataset(Dataset):
         self.all_events = self.data[:num_events * self.tokens_per_note].view(
             num_events, self.tokens_per_note
         ).long()
+        if self.tonic_reference:
+            self.event_keys = local_keys(self.all_events)
+            print(f"  Events with a key: {(self.event_keys >= 0).float().mean().item():.1%}")
 
         # Estimate dataset size: total note-events in valid pieces / seq_len
         self._total_samples = sum(
@@ -436,6 +465,11 @@ class StyleMusicSamplerDataset(Dataset):
         )
 
         target_data = self._process_target_window(target_events, transposition)
+        if self.tonic_reference:
+            first_event = start_event + target_start
+            keys = self.event_keys[first_event:first_event + len(target_events)]
+            target_data['reference_pitch'] = self._reference_pitch(
+                target_data['pitch'], keys[self._is_note(target_events)], transposition)
         if self.timing_enabled:
             target_data.update(self._target_timing(piece_events, target_start))
         style_data = self._process_style_window(style_events, transposition)
@@ -443,6 +477,23 @@ class StyleMusicSamplerDataset(Dataset):
         # Merge into a single dict
         target_data.update(style_data)
         return target_data
+
+    def _is_note(self, events):
+        """Note events of a window. Presets without loss_tonic keep the old rule: all but harmony events."""
+        if self.tonic_reference:
+            return performed_notes(events)
+        return events[:, 4] != HARMONY_CHANNEL
+
+    def _reference_pitch(self, pitches, note_keys, transposition):
+        """Reference pitch [T+1] for the window's pitches [T+1], from the keys of its notes before any repeat."""
+        note_keys = note_keys[:len(pitches)].long()
+        note_keys = note_keys[note_keys >= 0]
+        if len(note_keys) == 0:
+            return torch.full_like(pitches, -1)  # no key: no pitch is the reference, so no tonic loss
+        key = int(torch.bincount(note_keys, minlength=24).argmax())  # one key per passage, as in performance
+        tonic_pc = (key % 12 + transposition) % 12
+        return torch.tensor(reference_pitches(pitches.tolist(), tonic_pc, key >= 12,
+                                              self.cfg.get('tonic_button', 7)))
 
     def _target_timing(self, piece_events, start):
         """Include 17 preceding notes so all 16 preceding intervals are known."""
@@ -490,7 +541,7 @@ class StyleMusicSamplerDataset(Dataset):
 
         # --- Vectorized harmony regime + strength (same as train_harm.py) ---
         is_harmony = (events[:, 4] == HARMONY_CHANNEL)
-        is_note = ~is_harmony
+        is_note = self._is_note(events)  # ~is_harmony, unless the data are chord pickles (loss_tonic)
         note_indices = torch.where(is_note)[0]
 
         if len(note_indices) == 0:
@@ -613,8 +664,8 @@ class StyleMusicSamplerDataset(Dataset):
         Extract pitch-only sequence from a style reference window.
         Returns dict with 'style_pitch' [S] and 'style_mask' [S].
         """
-        # Filter to note events only (drop harmony events)
-        is_note = (events[:, 4] != HARMONY_CHANNEL)
+        # Filter to note events only (drop harmony events, and chord annotations with loss_tonic)
+        is_note = self._is_note(events)
         note_events = events[is_note]
 
         pitches = note_events[:, 2].clone()
@@ -714,15 +765,6 @@ def _train(logger):
     persistent_workers = cfg['num_workers'] > 0 and os.environ.get('PERSISTENT_WORKERS', '1') != '0'
     model = load_model(model_name=model_name, cfg=cfg, set_only=True)
     model.to(device)
-
-    #==========================================================================
-
-    ''' WANDB '''
-    wandb_run = None
-    if cfg['use_logs']:
-        import wandb
-        wandb.login()
-        wandb_run = wandb.init(project=project_name, name=model_name, config=cfg)
 
     #==========================================================================
 
@@ -861,6 +903,8 @@ def _train(logger):
             logger.info('Resuming from %s: epoch=%d step=%d', checkpoint_path, start_epoch, start_steps)
             nsteps = start_steps
             resumed_from_checkpoint = True
+            # The checkpoint was saved after its epoch finished, so continue with the next one.
+            start_epoch += 1
         else:
             start_epoch = 0
             start_steps = 0
@@ -870,6 +914,27 @@ def _train(logger):
         start_epoch = 0
         start_steps = 0
         warm_start_from_base()
+
+    #==========================================================================
+
+    ''' WANDB '''
+    # Initialised after loading the checkpoint, so a resumed training can
+    # continue the latest wandb run of this model and its charts.
+    wandb_run = None
+    if cfg['use_logs']:
+        import wandb
+        wandb.login()
+        resume_run_id = None
+        if resumed_from_checkpoint:
+            api = wandb.Api()
+            old_runs = api.runs(f'{api.default_entity}/{project_name}',
+                                filters={'display_name': model_name}, order='-created_at')
+            if len(old_runs) > 0:
+                resume_run_id = old_runs[0].id
+                print(f'Continuing wandb run {resume_run_id}')
+        wandb_run = wandb.init(project=project_name, name=model_name, config=cfg,
+                               id=resume_run_id, resume='allow' if resume_run_id else None,
+                               allow_val_change=resume_run_id is not None)
 
 
     ''' TRAINING '''
@@ -884,7 +949,7 @@ def _train(logger):
                             f"Validation runs every {cfg['validate_every']} batches.")
         print(schedule_message, flush=True)
         logger.info(schedule_message)
-    epochs = count(start_epoch) if is_timing_model else range(cfg['epochs'])
+    epochs = count(start_epoch) if is_timing_model else range(start_epoch, cfg['epochs'])
     for ep in epochs:
         print('Epoch #', ep)
         logger.info('Epoch started: epoch=%d step=%d', ep, nsteps)
@@ -923,6 +988,8 @@ def _train(logger):
                 if is_timing_model:
                     for key in ('timing_features', 'timing_mask'):
                         x[key] = batch[key].to(device, non_blocking=True)
+                if 'reference_pitch' in batch:
+                    x['reference_pitch'] = batch['reference_pitch'].to(device, non_blocking=True)
                 if is_joker_param_model:
                     x['joker_mask'] = make_joker_training_mask(
                         x['pitch'].shape[0], x['pitch'].shape[1] - 1, device
@@ -967,6 +1034,10 @@ def _train(logger):
                             wandb.log({"loss_direction": cfg['loss_contour'] * cfg['loss_direction_perc'] * loss['loss_direction_perc'].item()}, step=nsteps)
                         if cfg.get('loss_range', 0) > 0 and 'loss_range' in loss:
                             wandb.log({"loss_range": cfg['loss_range'] * loss['loss_range'].item()}, step=nsteps)
+                        if cfg.get('loss_tonic', 0) > 0 and 'loss_tonic' in loss:
+                            wandb.log({"loss_tonic": cfg['loss_tonic'] * loss['loss_tonic'].item(),
+                                       "tonic_on_button": loss['tonic_on_button'].item(),
+                                       "tonic_share_of_button": loss['tonic_share_of_button'].item()}, step=nsteps)
                         if cfg.get('loss_interval_perc', 0) > 0 and 'loss_interval_perc' in loss:
                             wandb.log({"loss_interval": cfg['loss_contour'] * cfg['loss_interval_perc'] * loss['loss_interval_perc'].item()}, step=nsteps)
                         if cfg.get('loss_shape_perc', 0) > 0 and 'loss_shape_perc' in loss:
@@ -1032,6 +1103,8 @@ def _train(logger):
                             if is_timing_model:
                                 for key in ('timing_features', 'timing_mask'):
                                     vx[key] = val_batch[key].to(device, non_blocking=True)
+                            if 'reference_pitch' in val_batch:
+                                vx['reference_pitch'] = val_batch['reference_pitch'].to(device, non_blocking=True)
                             val_loss, val_acc = model(vx)
                             val_loss_temp = val_loss['loss_total'].item()
                             logger.info('Validation metrics: epoch=%d batch=%d step=%d val_loss=%.6f val_acc=%.6f',
@@ -1053,6 +1126,9 @@ def _train(logger):
                         if cfg['use_logs']:
                             wandb.log({"val_loss": val_loss['loss_total'].item()}, step=nsteps)
                             wandb.log({"val_acc": val_acc.item()}, step=nsteps)
+                            if 'tonic_on_button' in val_loss:
+                                wandb.log({"val_tonic_on_button": val_loss['tonic_on_button'].item(),
+                                           "val_tonic_share_of_button": val_loss['tonic_share_of_button'].item()}, step=nsteps)
                             if val_joker_loss is not None:
                                 wandb.log({
                                     "val_joker_loss": val_joker_loss['loss_recons_joker'].item(),
