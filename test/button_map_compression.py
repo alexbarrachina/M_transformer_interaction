@@ -55,6 +55,13 @@ undecided. Same direction in 91.0 % of note pairs against 94.4 % (-3.4 points, 9
 passages), because 7.8 % of pitch moves keep the button against 4.0 %; heights off by 11.6 % against 9.3 %; end buttons 7.2 %
 against 7.0 %. The figures show notes near button 7 squeezed onto a few buttons. See
 test/results/button_map_compression__AE_style_tester_tonic_v1.txt.
+Result (2026-11-16, AE_style_tester_tonic_v2 epoch 342 against AE_style_tester_v2 epoch 150): all three claims refuted, a little
+worse than tonic_v1. Same direction in 90.3 % of note pairs against 94.4 % (-4.1 points, 95 % range -5.5 to -2.9, worse in 49 of
+60 passages), because 8.9 % of pitch moves keep the button against 4.0 %; heights off by 11.9 % against 9.3 %; 9.3 % against
+7.0 % of the notes on an end button (+2.4, range +1.5 to +3.2). In test10 (a C major scale) C, D, E and F share button 7. The
+epoch 337 checkpoint of the same run (preset AE_style_tester_tonic_v2_epoch337) gives the same verdicts with differences 0.2 to
+0.6 points smaller. See test/results/button_map_compression__AE_style_tester_tonic_v2.txt and
+test/results/button_map_compression__AE_style_tester_tonic_v2_epoch337.txt.
 """
 
 import sys

@@ -3271,8 +3271,14 @@ MODELS_PARAMETERS['AE_style_tester_tonic_v1'] = {
 MODELS_PARAMETERS['AE_style_tester_tonic_v2'] = {
     **MODELS_PARAMETERS['AE_style_tester_tonic_v1'],
     'description': 'AE_style_tester_v2 fine-tuned with the tonic of the passage on button 7 and the other notes off it',
-    'ckpt_file_name': './save_models/AE_style_tester_tonic_v2_SET_AFTER_TRAINING.pth',
+    'ckpt_file_name': './save_models/AE_style_tester_tonic_v2_342_eps_2744_steps_0.7866_loss_1.1435_val_loss_0.9041_acc.pth',
     'tonic_two_sided': True,
+}
+
+# The same run 5 epochs (40 steps) earlier, so that the tests, which take presets, can compare both saved checkpoints.
+MODELS_PARAMETERS['AE_style_tester_tonic_v2_epoch337'] = {
+    **MODELS_PARAMETERS['AE_style_tester_tonic_v2'],
+    'ckpt_file_name': './save_models/AE_style_tester_tonic_v2_337_eps_2704_steps_0.9262_loss_0.8976_val_loss_0.8457_acc.pth',
 }
 
 # 2026-11-14: buttons that copy the shape of the pitches. Each note's target is its place between the lowest and the

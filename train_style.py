@@ -38,6 +38,7 @@ import tqdm
 import glob
 import json
 import logging
+import math
 import re
 import hashlib
 import random as python_random
@@ -66,6 +67,16 @@ JOKER_GUIDED_FRACTION = 0.25
 JOKER_MIXED_FRACTION = 0.50
 JOKER_MIN_SPAN = 32
 JOKER_MAX_SPAN = 128
+
+# Checkpoints of the models without timing (the timing model keeps its own, checked in test/code_checks/test_timing.py).
+# After every epoch the training objective is measured on the same validation windows. One "last" file (full training
+# state, to resume) and one "best" file (weights with the lowest validation loss) are kept, both named with their epoch.
+# A new best must beat the old one by the standard error of its own validation loss (not of the run's first validation,
+# whose untrained model varies far more between windows). Training stops after STOP_PATIENCE_EPOCHS epochs without a
+# new best, or at the preset's 'epochs'.
+VALIDATION_WINDOWS = 256
+VALIDATION_SEED = 1729
+STOP_PATIENCE_EPOCHS = 20
 
 #==========================================================================
 
@@ -123,7 +134,8 @@ def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
     Load model and optimizer state from checkpoint.
     
     Returns:
-        tuple: (start_epoch, start_steps)
+        tuple: (start_epoch, start_steps, progress), progress being the best validation loss and its epoch, as saved
+        in a "last" file ({} for other checkpoints)
     """
     print(f"Loading checkpoint from {checkpoint_path}")
     
@@ -176,8 +188,9 @@ def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
             # requires_grad flags are not part of state_dict; restore the stage
             # explicitly so a checkpoint at the boundary resumes in adaptation.
             set_timing_stage(model, optimizer, start_steps)
-    
-    return start_epoch, start_steps
+
+    progress = {key: checkpoint[key] for key in ('best_val_loss', 'best_epoch') if key in checkpoint}
+    return start_epoch, start_steps, progress
 
 
 def warm_start_timing(model, checkpoint_path):
@@ -263,6 +276,61 @@ def save_timing_checkpoint(model, optimizer, epoch, step, scaler=None):
         'cuda_rng': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
     }, temporary)
     os.replace(temporary, path)
+
+
+def save_replacing(state, model_name, kind, epoch, steps, val_loss):
+    """Save ./save_models/<model>_<kind>_<epoch>_eps_<steps>_steps_<val_loss>_val_loss.pth and remove the older file
+    of that kind (last or best), so that one of each remains. The temporary name keeps the older file intact if the
+    write is interrupted."""
+    path = Path('./save_models') / f'{model_name}_{kind}_{epoch}_eps_{steps}_steps_{val_loss:.4f}_val_loss.pth'
+    temporary = path.with_suffix('.tmp')
+    torch.save(state, temporary)
+    os.replace(temporary, path)
+    for older in path.parent.glob(f'{model_name}_{kind}_*.pth'):
+        if older != path:
+            older.unlink()
+    return path
+
+
+def fixed_validation_batches(dataset, batch_size):
+    """The same validation windows, and Joker masks, at every full validation: drawn once with VALIDATION_SEED.
+    The dataset draws from the global random streams, so they are seeded here and restored afterwards."""
+    python_state, torch_state = python_random.getstate(), torch.get_rng_state()
+    python_random.seed(VALIDATION_SEED)
+    torch.default_generator.manual_seed(VALIDATION_SEED)  # CPU only, where the dataset draws
+    loader = iter(DataLoader(dataset, batch_size=batch_size, shuffle=False))
+    batches = []
+    for _ in range(math.ceil(VALIDATION_WINDOWS / batch_size)):
+        batch = next(loader)
+        if dataset.joker_param_model:
+            # The training mix of guided and Joker targets, so validation measures the training objective.
+            batch['joker_mask'] = make_joker_training_mask(len(batch['pitch']), batch['pitch'].shape[1] - 1, 'cpu')
+        batches.append(batch)
+    python_random.setstate(python_state)
+    torch.set_rng_state(torch_state)
+    return batches
+
+
+@torch.no_grad()
+def full_validation(model, batches, device, device_type, dtype):
+    """Mean of every loss term (and the accuracy) over the fixed validation batches, and the standard error of the
+    mean total loss: spread of the batch means / sqrt(number of batches), the batches being independent windows."""
+    model.eval()
+    sums = {}
+    totals = []
+    for batch in batches:
+        x = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+        with torch.amp.autocast(device_type=device_type, dtype=dtype):
+            loss, acc = model(x)
+        values = {name: value for name, value in loss.items() if torch.is_tensor(value) and value.numel() == 1}
+        values['acc'] = acc
+        for name, value in values.items():
+            sums[name] = sums.get(name, 0.) + value.float()
+        totals.append(loss['loss_total'].float())
+    model.train()
+    means = {name: (value / len(batches)).item() for name, value in sums.items()}
+    standard_error = (torch.stack(totals).std() / len(batches) ** 0.5).item()
+    return means, standard_error
 
 
 #==========================================================================
@@ -810,6 +878,10 @@ def _train(logger):
     val_iter = iter(val_loader)
     logger.info('Validation dataset: samples=%d batches=%d validate_every=%d',
                 len(val_dataset), len(val_loader), cfg['validate_every'])
+    if not is_timing_model:
+        validation_batches = fixed_validation_batches(val_dataset, cfg['batch_size'])
+        logger.info('Fixed validation: batches=%d windows=%d seed=%d', len(validation_batches),
+                    sum(len(batch['pitch']) for batch in validation_batches), VALIDATION_SEED)
 
     #==========================================================================
 
@@ -851,8 +923,9 @@ def _train(logger):
     scaler = torch.amp.GradScaler(device_type, enabled=(dtype == torch.float16))
 
     ''' LOAD CHECKPOINT '''
-    nsteps = 0 
+    nsteps = 0
     resumed_from_checkpoint = False
+    best_val_loss, best_epoch = float('inf'), 0
 
     def warm_start_from_base():
         init_ckpt = cfg.get('init_from_ckpt', '')
@@ -893,12 +966,19 @@ def _train(logger):
                 if named_checkpoint is not None:
                     checkpoint_path = named_checkpoint
         else:
+            # The last file holds the full training state; runs before it saved only named weight files.
             checkpoint_path, start_epoch, start_steps = find_latest_checkpoint(
-                model_name=model_name
+                model_name=model_name + '_last'
             )
-    
+            if checkpoint_path is None:
+                checkpoint_path, start_epoch, start_steps = find_latest_checkpoint(
+                    model_name=model_name
+                )
+
         if checkpoint_path:
-            start_epoch, start_steps = load_checkpoint(model, optim, checkpoint_path, device, scaler)
+            start_epoch, start_steps, progress = load_checkpoint(model, optim, checkpoint_path, device, scaler)
+            best_val_loss = progress.get('best_val_loss', best_val_loss)
+            best_epoch = progress.get('best_epoch', start_epoch)
             print(f"Resuming training from epoch {start_epoch}, step {start_steps}")
             logger.info('Resuming from %s: epoch=%d step=%d', checkpoint_path, start_epoch, start_steps)
             nsteps = start_steps
@@ -947,6 +1027,13 @@ def _train(logger):
                             'Training continues until Ctrl+C. '
                             f"Checkpoints save every {cfg['save_every']} epochs. "
                             f"Validation runs every {cfg['validate_every']} batches.")
+        print(schedule_message, flush=True)
+        logger.info(schedule_message)
+    else:
+        schedule_message = (f"Checkpoints: one last and one best file in ./save_models, named with their epoch. "
+                            f"Full validation on {sum(len(batch['pitch']) for batch in validation_batches)} fixed "
+                            f"windows after every epoch. Training stops after {STOP_PATIENCE_EPOCHS} epochs without "
+                            f"a new best, or at epoch {cfg['epochs']}.")
         print(schedule_message, flush=True)
         logger.info(schedule_message)
     epochs = count(start_epoch) if is_timing_model else range(start_epoch, cfg['epochs'])
@@ -1152,9 +1239,9 @@ def _train(logger):
 
         trace.mark('epoch_end', ep, resources=True)
         logger.info('Epoch ended: epoch=%d step=%d', ep, nsteps)
-        if ep % cfg['save_every'] == 0:
+        if is_timing_model and ep % cfg['save_every'] == 0:
             trace.mark('checkpoint_save', ep)
-            checkpoint_dir = str(Path(cfg['ckpt_file_name']).parent) if is_timing_model else './save_models'
+            checkpoint_dir = str(Path(cfg['ckpt_file_name']).parent)
             fname = (
                 checkpoint_dir + '/' + cfg['model_name'] + '_' +
                 str(ep) + '_eps_' +
@@ -1162,12 +1249,44 @@ def _train(logger):
                 str(round(float(loss['loss_total'].item()), 4)) + '_loss_' + str(round(float(val_loss_temp), 4)) + '_val_loss_' +
                 str(round(float(acc.item()), 4)) + '_acc.pth'
             )
-            if is_timing_model:
-                cfg['ckpt_file_name'] = fname
-                save_timing_checkpoint(model, optim, ep, nsteps, scaler)
-            else:
-                torch.save(model.state_dict(), fname)
+            cfg['ckpt_file_name'] = fname
+            save_timing_checkpoint(model, optim, ep, nsteps, scaler)
             logger.info('Checkpoint saved: path=%s epoch=%d step=%d', fname, ep, nsteps)
+        elif not is_timing_model:
+            # Until 2026-11-16 a named weight file was saved every save_every epochs; see VALIDATION_WINDOWS.
+            trace.mark('full_validation', ep)
+            validation, standard_error = full_validation(model, validation_batches, device, device_type, dtype)
+            val_score = validation['loss_total']
+            logger.info('Full validation: epoch=%d step=%d standard_error=%.6f %s',
+                        ep, nsteps, standard_error, json.dumps(validation, sort_keys=True))
+            if cfg['use_logs']:
+                wandb.log({f'full_val_{name}': value for name, value in validation.items()}, step=nsteps)
+            if not math.isfinite(val_score):
+                # Stop before saving, so the last and best files keep the weights from before the failure.
+                print(f'Stopping: validation loss is {val_score} at epoch {ep}')
+                logger.error('Stopping: validation loss is %s at epoch %d', val_score, ep)
+                break
+            trace.mark('checkpoint_save', ep)
+            if val_score < best_val_loss - standard_error:
+                best_val_loss, best_epoch = val_score, ep
+                path = save_replacing(model.state_dict(), model_name, 'best', ep, nsteps, val_score)
+                logger.info('Best checkpoint saved: path=%s epoch=%d step=%d', path, ep, nsteps)
+            if joker_only_warmup and ep + 1 == int(cfg.get('joker_param_warmup_epochs', 0)):
+                # Kept for comparison: the model before its inherited parameters are unfrozen.
+                path = f'./save_models/{model_name}_{ep}_eps_{nsteps}_steps_{val_score:.4f}_val_loss.pth'
+                torch.save(model.state_dict(), path)
+                logger.info('Checkpoint saved: path=%s epoch=%d step=%d', path, ep, nsteps)
+            path = save_replacing({
+                'model_state_dict': model.state_dict(), 'optimizer_state_dict': optim.state_dict(),
+                'epoch': ep, 'steps': nsteps, 'best_val_loss': best_val_loss, 'best_epoch': best_epoch,
+            }, model_name, 'last', ep, nsteps, val_score)
+            logger.info('Last checkpoint saved: path=%s epoch=%d step=%d', path, ep, nsteps)
+            print(f'Epoch {ep}: validation loss {val_score:.4f} (standard error {standard_error:.4f}), '
+                  f'best {best_val_loss:.4f} at epoch {best_epoch}')
+            if ep - best_epoch >= STOP_PATIENCE_EPOCHS:
+                print(f'Stopping: no new best for {STOP_PATIENCE_EPOCHS} epochs (best at epoch {best_epoch})')
+                logger.info('Stopping: no new best since epoch %d', best_epoch)
+                break
 
     logger.info('Training finished: step=%d', nsteps)
     if wandb_run is not None:

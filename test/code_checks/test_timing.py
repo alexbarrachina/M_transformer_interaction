@@ -229,7 +229,7 @@ class TimingTest(unittest.TestCase):
             expected_random = (random.random(), torch.rand(2))
             resumed = load_model(cfg=cfg, set_only=True)
             resumed_optimizer = make_timing_optimizer(resumed)
-            self.assertEqual(load_checkpoint(resumed, resumed_optimizer, cfg['ckpt_file_name'], 'cpu'), (0, 2))
+            self.assertEqual(load_checkpoint(resumed, resumed_optimizer, cfg['ckpt_file_name'], 'cpu')[:2], (0, 2))
             self.assertEqual(random.random(), expected_random[0])
             self.assertTrue(torch.equal(torch.rand(2), expected_random[1]))
             before = {k: v.clone() for k, v in resumed.named_parameters()}

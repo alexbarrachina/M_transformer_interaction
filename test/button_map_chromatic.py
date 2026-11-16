@@ -34,6 +34,12 @@ Result (2026-11-12, AE_style_tester_v2_repeat_fix epoch 78 against AE_style_test
 change. Buttons outside the scale 21.1 % against 15.5 %, neighbouring buttons a semitone apart 32.4 % against 10.2 %, notes on
 button 0 or 18 22.4 % against 7.0 % (18.1 % on button 0 alone). The buttons do not depend more on the pitch alone (70 % against
 73 % of notes on their pitch's usual button; v3: 84 %).
+Result (2026-11-16, AE_style_tester_tonic_v2 epoch 342 against AE_style_tester_v2): claim 1 refuted, claim 2 supported. Buttons
+outside the scale 17.5 % against 15.5 % (95 % range of the difference -0.5 to +4.4), but neighbouring buttons a semitone apart
+20.4 % against 10.2 %; notes on button 0 or 18 9.3 % against 7.0 % (+2.4, range +1.5 to +3.3). Button 7 holds 21.7 % of the notes
+against 9.2 %, and 58 % of notes are on their pitch's usual button against 73 %. Epoch 337 (preset
+AE_style_tester_tonic_v2_epoch337): same verdicts, outside the scale 17.1 %, semitone neighbours 21.5 %, end buttons 8.8 %,
+button 7 20.2 %.
 """
 
 import sys

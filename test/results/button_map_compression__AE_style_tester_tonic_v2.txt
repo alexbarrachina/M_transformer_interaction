@@ -1,0 +1,39 @@
+################################################################
+Date: 2026-11-16 19:38  Commit: c58d44c  Uncommitted files: 2
+Present: AE_style_tester_v2 (AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth)
+New: AE_style_tester_tonic_v2 (AE_style_tester_tonic_v2_342_eps_2744_steps_0.7866_loss_1.1435_val_loss_0.9041_acc.pth)  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. The encoder reads the 207 notes of each passage (seed 1729); windows of 32 notes for claim 2; 19 buttons. Linear map: each passage's pitch range spread evenly over the buttons and rounded.
+Figures: 10 files of test/samples in test/results/button_map_compression__AE_style_tester_tonic_v2
+Running time: 18 s
+
+Measure, mean over passages                        Linear map  Present      New  New minus present
+Claim 1: note pairs moving the same way, %              94.19    94.43    90.30              -4.13
+  of pitch moves: button moves the same way, %          94.10    95.61    90.92              -4.69
+  of pitch moves: button stays, %                        5.90     4.02     8.87              +4.85
+  of pitch moves: button moves the other way, %          0.00     0.38     0.21              -0.17
+  of repeated pitches: button stays, %                 100.00    25.94    48.72             +22.78
+Claim 2: height distance, 32-note windows, %             2.21     9.31    11.90              +2.59
+  over the whole passage, %                              1.36    12.20    13.01              +0.81
+  distributions alone (sorted heights), %                2.21     9.19    11.60              +2.41
+Claim 3: notes on the first or last button, %            2.67     6.96     9.34              +2.38
+  encoder outputs outside -1 to 1, %                     0.00     6.19     7.67              +1.48
+  different pitches on the end buttons                   2.67     7.57    11.17              +3.60
+
+Exploratory: mean button height (0 = the window's lowest button, 1 = its highest) of the notes in each tenth of the pitch height, 32-note windows, mean over passages.
+Pitch height   Linear map  Present      New
+0.0 to 0.1           0.02     0.02     0.03
+0.1 to 0.2           0.15     0.11     0.12
+0.2 to 0.3           0.25     0.18     0.20
+0.3 to 0.4           0.34     0.27     0.28
+0.4 to 0.5           0.45     0.35     0.35
+0.5 to 0.6           0.54     0.43     0.42
+0.6 to 0.7           0.65     0.53     0.50
+0.7 to 0.8           0.75     0.64     0.59
+0.8 to 0.9           0.85     0.75     0.73
+0.9 to 1.0           0.96     0.92     0.91
+
+Claim 1, note pairs moving the same way in buttons as in pitch, new minus present: -4.1 points, 95 % range -5.5 to -2.9, p = 5.0e-05, better in 8 of 60 passages, worse in 49.
+Claim 2, distance between pitch height and button height, new minus present: +2.6 points, 95 % range +1.8 to +3.4, p = 5.0e-05, better in 12 of 60 passages, worse in 48.
+Claim 3, notes on the first or last button, new minus present: +2.4 points, 95 % range +1.5 to +3.2, p = 5.0e-05, better in 15 of 60 passages, worse in 42.
+Result: claim 1 refuted, claim 2 refuted, claim 3 refuted.
+
