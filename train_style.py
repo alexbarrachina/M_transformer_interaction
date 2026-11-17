@@ -72,11 +72,12 @@ JOKER_MAX_SPAN = 128
 # After every epoch the training objective is measured on the same validation windows. One "last" file (full training
 # state, to resume) and one "best" file (weights with the lowest validation loss) are kept, both named with their epoch.
 # A new best must beat the old one by the standard error of its own validation loss (not of the run's first validation,
-# whose untrained model varies far more between windows). Training stops after STOP_PATIENCE_EPOCHS epochs without a
-# new best, or at the preset's 'epochs'.
+# whose untrained model varies far more between windows). Training stops at the preset's 'epochs', or earlier only when
+# asked with STOP_PATIENCE=<epochs>: after that many epochs without a new best. By default it never stops early, because
+# the validation loss can rise for a while and fall again (the 20 epochs proposed on 2026-11-16 are now opt-in).
 VALIDATION_WINDOWS = 256
 VALIDATION_SEED = 1729
-STOP_PATIENCE_EPOCHS = 20
+STOP_PATIENCE_EPOCHS = int(os.environ.get('STOP_PATIENCE', '0'))  # 0: no automatic stop
 
 #==========================================================================
 
@@ -1030,10 +1031,11 @@ def _train(logger):
         print(schedule_message, flush=True)
         logger.info(schedule_message)
     else:
+        early_stop = (f"after {STOP_PATIENCE_EPOCHS} epochs without a new best (STOP_PATIENCE), or "
+                      if STOP_PATIENCE_EPOCHS else "")
         schedule_message = (f"Checkpoints: one last and one best file in ./save_models, named with their epoch. "
                             f"Full validation on {sum(len(batch['pitch']) for batch in validation_batches)} fixed "
-                            f"windows after every epoch. Training stops after {STOP_PATIENCE_EPOCHS} epochs without "
-                            f"a new best, or at epoch {cfg['epochs']}.")
+                            f"windows after every epoch. Training stops {early_stop}at epoch {cfg['epochs']}.")
         print(schedule_message, flush=True)
         logger.info(schedule_message)
     epochs = count(start_epoch) if is_timing_model else range(start_epoch, cfg['epochs'])
@@ -1283,7 +1285,7 @@ def _train(logger):
             logger.info('Last checkpoint saved: path=%s epoch=%d step=%d', path, ep, nsteps)
             print(f'Epoch {ep}: validation loss {val_score:.4f} (standard error {standard_error:.4f}), '
                   f'best {best_val_loss:.4f} at epoch {best_epoch}')
-            if ep - best_epoch >= STOP_PATIENCE_EPOCHS:
+            if STOP_PATIENCE_EPOCHS and ep - best_epoch >= STOP_PATIENCE_EPOCHS:
                 print(f'Stopping: no new best for {STOP_PATIENCE_EPOCHS} epochs (best at epoch {best_epoch})')
                 logger.info('Stopping: no new best since epoch %d', best_epoch)
                 break
