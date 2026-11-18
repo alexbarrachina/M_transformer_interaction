@@ -30,6 +30,12 @@ notes, but span 32 semitones instead of 47, and 2.6 % instead of 0.6 % of neighb
 Result (2026-11-12, AE_style_tester_v2_repeat_fix epoch 78 against AE_style_tester_v2): supported. The real note gets 72.5 %
 against 66.9 % (+5.7 points, 95 % range +2.3 to +8.9, higher in 40 of 60 passages); 16.1 different notes against 15.2; span 33
 semitones against 47.
+Result (2026-11-18, AE_style_tester_frame_v1 best epoch 205 against AE_style_tester_v2 epoch 150): supported. The real note gets
+77.1 % against 66.9 % (+10.3 points, 95 % range +6.7 to +13.7, higher in 50 of 60 passages); span 36 semitones against 47.
+Caution: this test encodes the whole passage together, so the buttons before each of the 8 notes were computed knowing those
+notes. test/button_future_leak.py found that frame_v1's decoder reads the coming notes from such buttons: when the primer is
+encoded alone and each later button knows only the notes up to it, as a player's press does, frame_v1 gives the real note
+53.6 % against v2's 64.5 % (59 of these passages).
 """
 
 import datetime

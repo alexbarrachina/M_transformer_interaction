@@ -39,6 +39,10 @@ the tonic 19.4 % against 11.5 % (+7.9 points, 95 % range +1.5 to +14.3, higher i
 (preset AE_style_tester_tonic_v2_epoch337): supported, 21.5 % (+10.0 points, range +3.1 to +16.9, higher in 43 of 60). Button 7
 still holds about 20 % of all notes, of which only about a fifth are the tonic (exploratory). See
 test/results/align_tonic_button_7__AE_style_tester_tonic_v2.txt and align_tonic_button_7__AE_style_tester_tonic_v2_epoch337.txt.
+Result (2026-11-18, AE_style_tester_frame_v1 best epoch 205 against AE_style_tester_v2 epoch 150): refuted, no measurable
+difference, as expected from a loss that knows no key. Pressing button 7 gives the tonic 11.9 % against 11.5 % (+0.4 points,
+95 % range -6.9 to +8.7, higher in 20 of 60 passages); the encoder puts 14 % of the tonic notes on button 7 against 17 %. See
+test/results/align_tonic_button_7__AE_style_tester_frame_v1.txt.
 """
 
 import sys

@@ -40,6 +40,12 @@ outside the scale 17.5 % against 15.5 % (95 % range of the difference -0.5 to +4
 against 9.2 %, and 58 % of notes are on their pitch's usual button against 73 %. Epoch 337 (preset
 AE_style_tester_tonic_v2_epoch337): same verdicts, outside the scale 17.1 %, semitone neighbours 21.5 %, end buttons 8.8 %,
 button 7 20.2 %.
+Result (2026-11-18, AE_style_tester_frame_v1 best epoch 205 against AE_style_tester_v2 epoch 150): claim 1 refuted, claim 2
+supported. Buttons outside the scale 16.8 % against 15.5 % (95 % range of the difference -1.1 to +3.6), but neighbouring buttons
+a semitone apart 17.7 % against 10.2 %; notes on button 0 or 18 10.1 % against 7.0 % (+3.1, range +2.2 to +4.2). 2.0 semitones
+per button against 2.6, and only 51 % of notes on their pitch's usual button against 73 %: the same pitch takes more buttons
+within a passage, as a map relative to the 33 notes around each note should. The odd buttons from 7 up hold more notes than
+their even neighbours (exploratory). See test/results/button_map_chromatic__AE_style_tester_frame_v1.txt.
 """
 
 import sys

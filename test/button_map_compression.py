@@ -62,6 +62,12 @@ worse than tonic_v1. Same direction in 90.3 % of note pairs against 94.4 % (-4.1
 epoch 337 checkpoint of the same run (preset AE_style_tester_tonic_v2_epoch337) gives the same verdicts with differences 0.2 to
 0.6 points smaller. See test/results/button_map_compression__AE_style_tester_tonic_v2.txt and
 test/results/button_map_compression__AE_style_tester_tonic_v2_epoch337.txt.
+Result (2026-11-18, AE_style_tester_frame_v1 best epoch 205 against AE_style_tester_v2 epoch 150): claims 1 and 2 supported,
+claim 3 refuted. Same direction in 96.1 % of note pairs against 94.4 % (+1.7 points, 95 % range +0.9 to +2.4, better in 47 of 60
+passages), better than the linear map (94.2 %) because it keeps the button on 84 % of repeated pitches against 26 %; heights off
+by 5.4 % against 9.3 % of the window range (better in 55 of 60); but 10.1 % against 7.0 % of the notes on an end button (+3.1,
+range +2.2 to +4.2, worse in 45 of 60). Pitch moves reversed in buttons 0.8 % against 0.4 %. See
+test/results/button_map_compression__AE_style_tester_frame_v1.txt.
 """
 
 import sys

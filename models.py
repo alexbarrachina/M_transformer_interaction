@@ -3293,7 +3293,7 @@ MODELS_PARAMETERS['AE_style_tester_frame_v1'] = {
     **MODELS_PARAMETERS['AE_style_tester_v2'],
     'description': 'AE_style_tester_v2 fine-tuned with the frame loss as its only button loss',
     'init_from_ckpt': MODELS_PARAMETERS['AE_style_tester_v2']['ckpt_file_name'],
-    'ckpt_file_name': './save_models/AE_style_tester_frame_v1_SET_AFTER_TRAINING.pth',
+    'ckpt_file_name': './save_models/AE_style_tester_frame_v1_best_205_eps_1442_steps_0.4670_val_loss.pth',
     'loss_contour': 0.,
     'loss_multi_step_perc': 0.,
     'loss_margin': 0.,

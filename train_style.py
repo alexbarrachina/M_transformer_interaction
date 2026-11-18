@@ -937,6 +937,11 @@ def _train(logger):
             print(f'Warm-started timing model from {init_ckpt}')
             logger.info('Warm-started timing model from %s', init_ckpt)
             return
+        if not os.path.isfile(init_ckpt):
+            # For example the AE_style_tester_v2 file on a machine it was never copied to: train from scratch instead.
+            print(f"WARNING: warm-start checkpoint {init_ckpt} not found; training from scratch")
+            logger.warning('Warm-start checkpoint %s not found; training from scratch', init_ckpt)
+            return
         state = torch.load(init_ckpt, map_location=device)
         if isinstance(state, dict) and 'model_state_dict' in state:
             state = state['model_state_dict']

@@ -58,6 +58,9 @@ The four older tests read the MIDI files of `samples/not_seen` by default, and s
 | `button_repeat_same_button.py` | Does pressing the previous note's button again give the previous note? | Presets, as above | Probability of the previous note with the previous note's button, new minus reference; control: one button higher | 66 s |
 | `button_repeat_neighbour_labels.py` | Do the encoder's training buttons put a repeated note on a neighbouring button, and does the decoder then repeat the note when the button moves one step? | `AE_style_jokerParam_chords` checkpoint path, used with no chord (its frozen style joker) | Share of one-step button moves that repeat the note, minus the share of all note pairs that repeat | 77 s |
 | `button_moves_generation.py` | While generating with a fixed button pattern, does the same button repeat the note, does a one-step move wrongly repeat it, and does the note move with the button? | Presets, as above | Share of same-button presses that repeat the previous note, new minus reference; risks: one-step repeats and wrong directions | 93 s |
+| `button_future_leak.py` | Do the buttons carry the notes that come after them, so that the decoder follows them worse in play, where a press knows only the notes already played? | Presets, as above | Probability given to the pianist's real next note with the whole passage encoded together minus with the primer encoded alone and buttons knowing only the past, new minus reference | 52 s |
+
+`button_control_strength.py` encodes the whole passage together, as in training, so buttons that know the coming notes raise its measure; `button_future_leak.py` measures by how much.
 
 ### Button map: how are the pitches spread over the 19 buttons?
 
@@ -88,8 +91,8 @@ The four older tests read the MIDI files of `samples/not_seen` by default, and s
 
 | Model type | Tests |
 |---|---|
-| Base style model (`AE_style_*` preset: buttons and style, no joker) | `button_control_strength`, `button_repeat_same_button`, `button_moves_generation`, `button_map_chromatic`, `button_map_compression`, `align_tonic_button_7` |
-| Style joker (`AE_style_jokerParam_*` preset) | The same six; `button_control_strength` adds the no-button reference |
+| Base style model (`AE_style_*` preset: buttons and style, no joker) | `button_control_strength`, `button_future_leak`, `button_repeat_same_button`, `button_moves_generation`, `button_map_chromatic`, `button_map_compression`, `align_tonic_button_7` |
+| Style joker (`AE_style_jokerParam_*` preset) | The same seven; `button_control_strength` adds the no-button reference |
 | Style chord adapter (`AE_style_jokerParam_chords` checkpoint) | `chord_button_repeats`, `chord_strength_style`, `button_repeat_neighbour_labels` (its frozen style joker) |
 | Style change adapter (`AE_style_jokerParam_change` checkpoint) | `chord_change_style` |
 | Chord adapter of the base joker (`D_Chord_Joker` checkpoint) | `chord_strength_many_chords`, `chord_strength_guidance`, `chord_change` (change checkpoints) |

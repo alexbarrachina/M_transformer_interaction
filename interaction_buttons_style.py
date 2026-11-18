@@ -6,6 +6,10 @@
 # Keys are read from the visualizer window (as in interaction_buttons_style_chords.py),
 # so it must have focus.
 #
+# Tonic display as in interaction_buttons_style_tonic_shift.py, without the shift: a faint row
+# in the pitch roll on the tonic that the model's map places nearest button 7, and the button
+# where it is now in the status line. H / K move the tonic down / up a semitone.
+#
 # Copyright 2025 Alex Barrachina
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,6 +49,8 @@ from models import get_model_hparams
 from midiUtils import midi_to_dict, to_device, dict_to_song, ms_SONG_to_MIDI_Converter
 from visualizer import Visualizer
 from timing import LiveTimingContext, TIME_UNIT
+from tonic_shift import TonicShift
+from pitch_reins import PC_NAMES, pitch_name
 
 TRACES = False
 USE_CACHE = False
@@ -84,7 +90,7 @@ else:
 
 #model_name = 'AE_style_jokerParam_v1' #AE_style_v1 #AE_style_tester_tonic_v1
 # AE_style_jokerParam_dtime_tester_v1
-model_name = os.environ.get('MODEL_NAME', 'AE_style_v2')
+model_name = os.environ.get('MODEL_NAME', 'AE_style_tester_frame_v1')
 cfg = get_model_hparams(model_name)
 if os.environ.get('CHECKPOINT_PATH'):
     cfg['ckpt_file_name'] = os.environ['CHECKPOINT_PATH']
@@ -101,8 +107,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1_no_melody.midi'
 
-sample_midi_path_init = sample_midi_path2
-STYLE_IDX_INIT = 2
+sample_midi_path_init = sample_midi_path3
+STYLE_IDX_INIT = 3
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [
@@ -113,6 +119,31 @@ style_prompt_midi_paths: List[str] = [
     sample_midi_path5,  # key 5
 ]
 output_midi_name = './out/interactive_buttons_style'
+
+# Tonic (pitch class) per primer, as in interaction_buttons_style_tonic_shift.py: Bach and Chopin
+# from the titles, the others from harmony/key_track.py. Other primers fall back to key_track.
+SAMPLE_TONICS = {
+    sample_midi_path1: 0,    # C major
+    sample_midi_path2: 1,    # Db major
+    sample_midi_path3: 10,   # Bb minor
+    sample_midi_path4: 3,    # Eb minor
+    sample_midi_path5: 2,    # D major
+}
+
+def primer_tonic(path: str) -> int:
+    if path in SAMPLE_TONICS:
+        return SAMPLE_TONICS[path]
+    from pathlib import Path
+    from harmony.key_track import track_key
+    track = track_key(Path(path))
+    if track is None or track.global_key is None:
+        print(f"No key found for {path}; the tonic display uses C")
+        return 0
+    return track.global_key.tonic_pc
+
+# Tonic keys, listed in the status text.
+TONIC_DOWN_KEY, TONIC_UP_KEY = 'h', 'k'
+TONIC_KEYS_TEXT = 'H/K tonic'
 
 # Audible primer preview: only the tail of the context (model + visualizer still use full CTX_LEN).
 PRIMER_PLAYBACK_LAST_N = 40
@@ -206,7 +237,7 @@ def make_controls_legend() -> List[Tuple[str, str]]:
         ('T', f'Joker {joker_state}'),
         ('M', 'Capture memory'),
         ('S', 'Save'),
-        ('R', 'Reset'),
+        ('R / BACKSPACE', 'Reset'),
         ('1-5', 'Styles'),
         ('6', 'Memory'),
     ]
@@ -219,7 +250,8 @@ def make_controls_legend() -> List[Tuple[str, str]]:
 visualizer = Visualizer(
     button_slots=cfg['num_buttons'],
     controls_legend=make_controls_legend(),
-    show_event_numbers=SHOW_EVENT_NUMBERS
+    show_event_numbers=SHOW_EVENT_NUMBERS,
+    status_text=TONIC_KEYS_TEXT
 )
 
 '''MIDI IN CALLBACK'''
@@ -373,6 +405,9 @@ def reset_context():
         #                       playback_speed=PRIMER_PLAYBACK_SPEED)
 
         joker_detector.reset()
+        # Back on the primer: choose the tonic's octave again.
+        tonic_shift.set_tonic(tonic_shift.tonic_pc)
+        update_tonic()
 
 ''' VARIABLES '''
 context = None
@@ -484,6 +519,28 @@ if cfg.get('timing_enabled', False):
     live_timing = LiveTimingContext(
         dict_input_tokens['pitch'], b, dict_input_tokens['dtime'], CTX_LEN
     )
+
+''' TONIC DISPLAY '''
+# TonicShift of interaction_buttons_style_tonic_shift.py only finds the tonic in the model's map here:
+# model_button() is never called, so the keys send the buttons they always did.
+tonic_shift = TonicShift(primer_tonic(sample_midi_path_init), NUM_BUTTONS)
+
+def update_tonic() -> None:
+    """Finds the tonic in the model's map again, from the last CTX_LEN notes and their buttons, as
+    update_tonic_shift() of interaction_buttons_style_tonic_shift.py."""
+    notes = [(pitch, button) for pitch, button in zip(dict_output_tokens['pitch'][i:i+CTX_LEN], b[i:i+CTX_LEN])
+             if button < NUM_BUTTONS]  # a Joker note has no place in the map
+    if tonic_shift.update([pitch for pitch, _ in notes], [button for _, button in notes]):
+        print(tonic_status())
+
+def tonic_status() -> str:
+    # tonic_shift.status() would say the map is moved; here the tonic's button is only shown.
+    if tonic_shift.tonic is None:
+        return f"Tonic {PC_NAMES[tonic_shift.tonic_pc]}"
+    return f"Tonic {pitch_name(tonic_shift.tonic)} on button {tonic_shift.tonic_button}"
+
+update_tonic()
+
 # Full CTX_LEN in the primer strip and in the model; audible tail runs after MIDI opens (main loop).
 visualizer.primer(dict_input_tokens['pitch'][:CTX_LEN], dict_input_tokens['dtime'][:CTX_LEN],
                   b[:CTX_LEN], dict_input_tokens['dur'][:CTX_LEN])
@@ -596,8 +653,10 @@ def manageNote(note, velocity, event_time=None):
         visualizer.get_button(but, velocity)
 
     noteOn_dict[note] = (new_pitch_token, timeNew, but, is_joker)
-    
+
     i += 1
+    # After the new note, so the tonic row and status include it (the tonic shift app updates before each press).
+    update_tonic()
 
   else: # noteOff
     # Use original MIDI note as key to find corresponding noteOn
@@ -669,14 +728,18 @@ def _on_key_press(c: str) -> None:
             print("Highlight motif active")
         else:
             print("No highlight motif saved yet. Press M first.")
-    # == rather than the previous `c in ('r')`, a substring test that is also true for
-    # the empty name pygame gives to unknown keys.
-    if c == 'r':
+    # A tuple rather than the previous `c in ('r')`, a substring test that is also true for
+    # the empty name pygame gives to unknown keys. Backspace resets as in interaction_buttons_style_chords.py.
+    if c in ('r', 'backspace'):
         print("resetting context")
         reset_context()
     if c == 's':
         save_performance()
         print("saved performance")
+    if c in (TONIC_DOWN_KEY, TONIC_UP_KEY):
+        with buffer_lock:
+            tonic_shift.set_tonic(tonic_shift.tonic_pc + (1 if c == TONIC_UP_KEY else -1))
+            update_tonic()
 
 def _on_key_release(c: str) -> None:
     if c == 'space':
@@ -740,6 +803,8 @@ try:
       #visualizer.get_note(60, 100)
       #visualizer.get_button(0, 100)
       handle_pygame_events()
+      visualizer.status_text = tonic_status() + '  |  ' + TONIC_KEYS_TEXT
+      visualizer.tonic_pitch = tonic_shift.tonic  # the tonic nearest button 7, as a faint row in the pitch roll
       visualizer.draw(handle_events=False)
 except (EOFError, KeyboardInterrupt, SystemExit):
     print("Bye.")

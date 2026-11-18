@@ -231,7 +231,7 @@ def normalized_position_loss(pitches, buttons, num_buttons, window_size=15, tole
             AE_style_tester_frame_v1) measures the distance in buttons instead, free within `tolerance` buttons of the
             target, squared up to one button beyond that and linear after, as tonic_loss. The encoder output is not
             clamped, so outputs outside [-1, 1] are pulled back, and a window whose pitches are all equal targets the
-            middle button. Exploratory, on unseen test passages: with 33 notes this target keeps the pitch shape
+            middle button. Outputs past the end buttons get an extra squared pull, in buttons (2026-11-17). Exploratory, on unseen test passages: with 33 notes this target keeps the pitch shape
             better than AE_style_tester_v2 and uses about 18.6 of the 19 buttons in 32-note windows; with 15 notes it
             puts 18 % of the notes on the end buttons.
     
@@ -269,7 +269,11 @@ def normalized_position_loss(pitches, buttons, num_buttons, window_size=15, tole
     offset = ((buttons + 1.0) * 0.5 - target) * (num_buttons - 1)
     beyond = torch.relu(torch.abs(offset) - tolerance)
     penalty = torch.where(beyond < 1, torch.square(beyond), 2 * beyond - 1)
-    return penalty.mean()
+    # 2026-11-17: the straight-through estimator passes reconstruction's push past the clamp at the end buttons, where it
+    # changes nothing and so never stops; the fixed linear pull above lost to it and the outputs ran away in training.
+    # Outputs past the end buttons are also pulled back by the squared distance in buttons, a pull that grows until it wins.
+    past_end = torch.relu(torch.abs(buttons) - 1) * (num_buttons - 1) / 2
+    return penalty.mean() + torch.square(past_end).mean()
 
 
 
