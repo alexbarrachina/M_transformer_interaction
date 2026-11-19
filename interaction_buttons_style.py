@@ -107,8 +107,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1_no_melody.midi'
 
-sample_midi_path_init = sample_midi_path3
-STYLE_IDX_INIT = 3
+sample_midi_path_init = sample_midi_path2
+STYLE_IDX_INIT = 2
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [

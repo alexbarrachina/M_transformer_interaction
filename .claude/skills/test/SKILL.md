@@ -18,6 +18,7 @@ This skill says how the collection is organised and used. How to design, size an
 5. Run each test as `python test/<test>.py <model> [reference]`. The test appends its report to `test/results/<test>__<model>.txt` by itself.
 6. Add a `Result (date, <model> against <reference>): ...` line to each test's docstring with the verdict and one sentence. Keep the earlier Result lines.
 7. Report the evaluation as one table: one row per behaviour, the main measure for the new and the reference model, the difference with its 95 % range, the verdict and the results file. Then say what the profile means for playing, following clear-explanations.
+8. A conclusion, in one or two plain sentences, that will start with "*** CONCLUSION ***" to be visually clear for the user.
 
 When a test does not accept the model (another loader, no joker, a different number of buttons), do not patch around it inside the run. Report it, and if the fix is a small generalisation of the test's loading code, make it, then run the test with the reference model in both roles: every difference must be exactly 0, which shows the change kept the test the same.
 

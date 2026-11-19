@@ -15,12 +15,11 @@ Clear does not mean long. Use plain words and full sentences, and leave out find
 ## Order of a result
 
 1. The answer to what was asked, in one or two plain sentences, including what it means for the model or for playing and how sure it is.
-Start with "*** SHORT ANSWER ***" to be visually clear for the user.
 Only if a test is needed:
 2. What was done to find out: which model, which data, how many examples, what changed and what stayed the same.
 3. The evidence: only the numbers that support the answer.
 4. What the test does not show, and the next decision if there is one.
-
+8. A conclusion, in one or two plain sentences, that will start with "*** CONCLUSION ***" to be visually clear for the user.
 
 ## Ideas and plans
 
