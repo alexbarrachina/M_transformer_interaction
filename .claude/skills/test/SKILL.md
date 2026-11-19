@@ -1,5 +1,5 @@
 ---
-name: behaviour-tests
+name: test
 description: How the monster_genie tests in ./test form a collection of behaviour evaluators that are reused across models. Use when a new model or checkpoint has to be evaluated (choose and run the existing tests for its model type, name and report the results), or when a behaviour that no existing test measures needs a new test (decide that it is new, name it, make it take any model of its type, add it to test/README.md). Not needed for a one-off code check or for reading old results.
 ---
 
@@ -21,6 +21,32 @@ This skill says how the collection is organised and used. How to design, size an
 
 When a test does not accept the model (another loader, no joker, a different number of buttons), do not patch around it inside the run. Report it, and if the fix is a small generalisation of the test's loading code, make it, then run the test with the reference model in both roles: every difference must be exactly 0, which shows the change kept the test the same.
 
+## Terms
+
+- Define every metric, abbreviation, statistic and name at its first use in each reply, in one clause: what it measures, on what, and which direction is better. This includes standard terms (NLL, entropy, log-odds, rank correlation, p-value) and terms defined in earlier replies. A one-clause definition is not a repeated explanation.
+- Prefer the description to the label, if the label is not a very standard concept: "the probability the model gives to the notes of the held chord", not "chord mass". Do not coin new labels. If a term has to recur, keep one name for it throughout the reply.
+- Names of test conditions ("free", "fresh") are labels too. Say what was done: "no chord pressed", "control applied only to the newest note".
+- Name scripts, presets and variables only when the user needs them to find or run something, and say what each one is.
+- The user's own terms need no definition, unless I use them differently.
+
+## Numbers
+
+A number is understood only if the reader can say what was measured, on what, and compared with what.
+
+- Give the unit, and say what a percentage is of ("of consecutive note pairs"). Write probabilities as percentages, and differences between them as percentage points.
+- Give a reference: no chord pressed, chance level, before and after, the previous model. A number alone does not show whether it is good or bad.
+- Translate abstract scores into something concrete. For NLL, give e^(-NLL), the probability typically given to the real note. For a difference, say how many notes out of 100 it amounts to.
+- Say how much data there is and whether the difference is larger than the noise, in words: "in 16 of 16 comparisons", "only 8 moments and 1 seed, so this is weak".
+- Avoid packed notation such as `.088/.061/.045`, `guided .28 -> .62`, `k >= 16` or `p90`. Write a sentence or a table.
+- If two figures come from different data or conditions, say so where they are compared.
+
+## Tables
+
+- Use a table only when several comparisons must be seen together. One or two comparisons fit in a sentence.
+- Before the table, say which test it comes from and what the rows and columns change.
+- Write headers as whole phrases with units, so that each cell can be read aloud as a sentence.
+- After the table, or in the sentence before it, say what to conclude from it.
+
 ## Deciding that a new test is needed
 
 Read `test/README.md` first.
@@ -30,21 +56,7 @@ Read `test/README.md` first.
 - A question about one recording, one primer or one incident: a case study in `test/case_studies/`, with its models fixed.
 - A behaviour no test measures: a new test, as below.
 
-## Writing a new behaviour test
+## Ask for new behaviour test
 
-Follow simple-evidence-tests for the design, the size and the docstring. In addition:
-
-- Name it `test/<behaviour>_<what_it_measures>.py`, where `<behaviour>` is the prefix of its family: `chord_`, `button_`, `align_`, `tension_`, `timing_` or `realism_`. Use a new prefix only for a new family of behaviours, and add a section for it to the README.
-- The evaluated model is the first positional argument and the reference model the second, each with a default: a preset name for presets, a checkpoint path for checkpoints. The same model in both roles must give differences of exactly 0; make that check run first.
-- Make it work for every model of its type: load with `model_loader.load_model`, `load_style_model` or `load_style_checkpoint`, and read sizes such as the number of buttons from the model's config instead of writing them as numbers.
-- Write the results to `RESULTS = ROOT / f'test/results/<test>__{NEW}.txt'` for a preset, or `{NEW.stem}` for a checkpoint path. Every other output (MIDI files, JSON, plots, audio, raw values) goes in `test/results` too, never in `out/`: one file `test/results/<test>__<model>.<extension>`, or a folder `test/results/<test>__<model>/` for several. The report gives the date, the commit and the number of uncommitted files (`git_line`), both models with their checkpoint files, the device, the settings, the running time, the result table and the verdict.
-- Use the shared 60 moments and the helpers listed in the README, so its numbers can be compared with the other tests'. Choose other data only when the question needs it, and say why in the docstring.
-- Add `Run:` with its arguments and `Results: test/results/<test>__<model>.txt, one file per evaluated model.` to the docstring.
-- Add the test to the README: a row in its behaviour's table, with the question, the models it takes, the main measure and the running time, and its name in the table of model types.
-
-## Keeping the collection tidy
-
-- Generation and listening scripts go in `test/generation/`, checks of code correctness in `test/code_checks/`, studies of one recording or primer in `test/case_studies/`. Only behaviour tests stay directly in `test/`.
-- Every script in `test/`, case studies and generation scripts included, writes its outputs in `test/results`, named after its test and model; `out/` holds only the app's recordings, which some case studies read as input.
-- The tests marked "older form" in the README take `--checkpoint` and write JSON records and a `summary.json` in `test/results/<test>__<model>/`, but no `.txt` report. When one of them is needed for an evaluation, ask whether to make it append to `test/results/<test>__<model>.txt` first, and update the README if it is converted.
-- When a test is renamed, update the rename table in the README, the references in the other tests' docstrings, and the docs and memory notes that name it.
+- Don't create a new beahviour test without asking the user first. 
+- Apply \new-test SKILL for the creation of the new test 
