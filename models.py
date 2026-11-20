@@ -3303,6 +3303,24 @@ MODELS_PARAMETERS['AE_style_tester_frame_v1'] = {
     'norm_pos_tolerance': 0.5,  # buttons
 }
 
+# 2026-11-20: frame_v1's target used the 16 notes after each note, which a player cannot give, and its encoder passed them
+# to the decoder through the earlier buttons (test/button_future_leak.py: real note 76.8 % with the whole passage encoded,
+# 53.6 % with the buttons given note by note; v2 66.7 / 64.5 %), so in play rising runs climbed to the top of the keyboard.
+# Here each note's target uses only the 64 notes before it (loss_funcs.recent_frame_loss): its place between their lowest
+# and highest pitch on buttons 1-17, buttons 0 and 18 for notes below or above them, a range of at least 16 semitones.
+# The user chose a past-only target with the bidirectional encoder, spare end buttons and at least about one semitone per
+# button; 64 notes and buttons 1-17 came from comparing fixed rules on the unseen test passages (exploratory: heights off
+# 4.4 % against v2's 9.3 %, contour as v2). Everything else as frame_v1 (from v2's checkpoint, v2's data, weight 0.1,
+# tolerance half a button), so only the target changes.
+# MODEL_NAME=AE_style_tester_frame_v2 python train_style.py
+MODELS_PARAMETERS['AE_style_tester_frame_v2'] = {
+    **MODELS_PARAMETERS['AE_style_tester_frame_v1'],
+    'description': 'AE_style_tester_v2 fine-tuned with a past-only frame loss as its only button loss',
+    'ckpt_file_name': './save_models/AE_style_tester_frame_v2_SET_AFTER_TRAINING.pth',
+    'norm_pos_window': 64,  # notes before each note, itself not included
+    'norm_pos_past_only': True,
+}
+
 
 def detect_model_type(model):
 

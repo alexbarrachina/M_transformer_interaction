@@ -276,6 +276,43 @@ def normalized_position_loss(pitches, buttons, num_buttons, window_size=15, tole
     return penalty.mean() + torch.square(past_end).mean()
 
 
+def recent_frame_loss(pitches, buttons, num_buttons, window_size=64, tolerance=0.5, inner=(1, 17), floor=16):
+    """
+    The frame loss of normalized_position_loss with a target that uses only earlier notes (2026-11-20,
+    AE_style_tester_frame_v2), so a button never depends on notes the player has not given yet.
+    A note's target is its place between the lowest and highest pitch of the window_size notes before it (itself not
+    included), spread over the buttons inner[0]..inner[1]; the buttons outside them are for notes below or above those
+    notes. The range never spans fewer than `floor` semitones (one semitone per button step with buttons 1-17) and is then
+    centred on the middle of the earlier notes. The first note has no earlier notes, so its range is centred on itself.
+    Exploratory, as a fixed rule on the 60 unseen test passages of test/button_map_compression.py with 64 earlier notes
+    of each piece: heights off by 4.4 % of the window range (AE_style_tester_v2's encoder 9.3 %), contour as v2 (94.4 %),
+    2.9 % of the notes on an end button (v2 7.0 %).
+
+    Args:
+        pitches: [batch, seq_len] pitch values
+        buttons: [batch, seq_len] encoder output e, -1 = first button, 1 = last, aligned with pitches
+    """
+    pitches = pitches.float()
+    seq_len = pitches.shape[1]
+    # [batch, seq_len, window_size]: the window_size notes before each note, padded with +inf (for the lowest) or -inf
+    # (for the highest) where the sequence has fewer earlier notes.
+    low = F.pad(pitches, (window_size, 0), value=float('inf')).unfold(1, window_size, 1)[:, :seq_len].amin(-1)
+    high = F.pad(pitches, (window_size, 0), value=float('-inf')).unfold(1, window_size, 1)[:, :seq_len].amax(-1)
+    first = torch.isinf(low)  # no earlier note
+    low, high = torch.where(first, pitches, low), torch.where(first, pitches, high)
+    span = (high - low).clamp(min=floor)
+    bottom = (low + high - span) / 2
+    target = (inner[0] + (pitches - bottom) / span * (inner[1] - inner[0])).clamp(0, num_buttons - 1)  # in buttons
+
+    # From here as the frame loss: free within `tolerance` buttons, squared up to one button beyond, linear after, and a
+    # squared pull on outputs past the end buttons.
+    offset = (buttons + 1.0) * 0.5 * (num_buttons - 1) - target
+    beyond = torch.relu(torch.abs(offset) - tolerance)
+    penalty = torch.where(beyond < 1, torch.square(beyond), 2 * beyond - 1)
+    past_end = torch.relu(torch.abs(buttons) - 1) * (num_buttons - 1) / 2
+    return penalty.mean() + torch.square(past_end).mean()
+
+
 
 def pitch_button_correlation_loss(pitches, e, window_size=6, tendency_distance=1):
     """

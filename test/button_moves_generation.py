@@ -92,15 +92,15 @@ def model_style(model, data: ChordPitchSamplerDataset, moments: np.ndarray, devi
 
 
 @torch.inference_mode()
-def generate(model, real: torch.Tensor, style: torch.Tensor, style_mask: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
-    """Pitches [P, CONTEXT + GENERATED]: the real primer, then GENERATED notes sampled on the pattern's buttons.
-    noise [P, GENERATED, 128] gives Gumbel-max sampling at temperature 1, the same for both models."""
-    pitch = real.clone()
-    pitch[:, CONTEXT:] = 0
+def generate(model, real: torch.Tensor, style: torch.Tensor, style_mask: torch.Tensor, noise: torch.Tensor,
+             pattern: tuple = PATTERN) -> torch.Tensor:
+    """Pitches [P, CONTEXT + len(pattern)]: the real primer (the first CONTEXT notes of real), then one note sampled on each
+    button of the pattern. noise [P, len(pattern), 128] gives Gumbel-max sampling at temperature 1, the same for both models."""
+    pitch = F.pad(real[:, :CONTEXT], (0, len(pattern)))
     button = torch.cat((player_buttons(model, real[:, :CONTEXT]),  # the primer encoded alone, as the app's seed
-                        torch.tensor(PATTERN, device=real.device).expand(len(real), -1)), 1)
+                        torch.tensor(pattern, device=real.device).expand(len(real), -1)), 1)
     passage = torch.arange(len(real), device=real.device)
-    for step in range(GENERATED):
+    for step in range(len(pattern)):
         window = slice(step, step + CONTEXT + 1)  # the app's sliding window: CONTEXT notes + the target
         logits = last_logits(model, pitch[:, window], button[:, window], style, style_mask, passage, 1)[:, 0]
         pitch[:, CONTEXT + step] = (logits - noise[:, step].log()).argmax(-1)
