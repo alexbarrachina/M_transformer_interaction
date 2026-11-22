@@ -1,0 +1,31 @@
+################################################################
+Date: 2026-11-22 00:56  Commit: 883df15  Uncommitted files: 8
+Present: AE_style_tester_v2 (AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth)
+New: AE_style_tester_frame_v2 (AE_style_tester_frame_v2_best_308_eps_2163_steps_0.4553_val_loss.pth)
+Judge without buttons: AE_style_jokerParam_tester_v2 (AE_style_jokerParam_tester_v2_10_eps_4697_steps_1.1264_loss_0.9737_val_loss_0.8672_acc.pth), joker held  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 342 usable pieces (371 in the file), one chord change each. Primer and window 128 notes, 33 generated notes on the pattern (9, 9, 10, 11, 11, 10, 9, 9, 11, 13, 13, 11, 9, 9, 13, 13, 9, 9, 8, 7, 7, 8, 9, 11, 11, 9, 5, 5, 9, 10, 9, 9, 8), temperature 1, seed 1729.
+Running time: 85 s
+
+Means over pieces of the per-piece values; moves counted from the second generated note on.
+Measure                                               Present      New  New minus present
+Same button: previous note repeated, %                    6.1     50.8              +44.7
+One-step move: previous note repeated, %                  4.7      4.4               -0.3
+Two-step move: previous note repeated, %                  5.8      0.0               -5.8
+Four-step move: previous note repeated, %                 3.8      0.0               -3.8
+One-step move: same pitch class, other octave, %          0.3      0.0               -0.3
+Move of 1-4 buttons: note in its direction, %            93.8     97.7               +3.9
+One-step move: note in its direction, %                  93.3     95.6               +2.3
+Two-step move: note in its direction, %                  93.3    100.0               +6.7
+Four-step move: note in its direction, %                 95.8    100.0               +4.2
+One-step move: mean interval, semitones                   2.2      2.0               -0.2
+Two-step move: mean interval, semitones                   3.8      3.6               -0.2
+Four-step move: mean interval, semitones                  9.9      7.1               -2.8
+
+Plausibility (exploratory): typical probability the judge gives a note, e^(mean log-probability), higher is more plausible:
+  pianist's real notes 9.9 %, present model 3.5 %, new model 3.9 %. New minus present: +0.125 nats per note, 95 % range +0.031 to +0.220.
+
+Claim 1, same button: repeats, new minus present: +44.7 points, 95 % range +37.6 to +51.5, p = 5.0e-05, higher in 52 of 60 pieces, lower in 2. Supported (limit +0, range must lie above).
+Claim 2, one-step move: repeats, new minus present: -0.3 points, 95 % range -3.3 to +2.4, p = 9.1e-01, higher in 18 of 60 pieces, lower in 12. Supported (limit +5, range must lie below).
+Claim 3, move of 1-4 buttons: note in the button's direction, new minus present: +3.9 points, 95 % range +2.0 to +6.0, p = 2.5e-04, higher in 30 of 60 pieces, lower in 12. Supported (limit -5, range must lie above).
+Result: claim 1 supported, claim 2 supported, claim 3 supported.
+

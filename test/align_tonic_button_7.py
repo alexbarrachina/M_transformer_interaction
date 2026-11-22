@@ -43,6 +43,10 @@ Result (2026-11-18, AE_style_tester_frame_v1 best epoch 205 against AE_style_tes
 difference, as expected from a loss that knows no key. Pressing button 7 gives the tonic 11.9 % against 11.5 % (+0.4 points,
 95 % range -6.9 to +8.7, higher in 20 of 60 passages); the encoder puts 14 % of the tonic notes on button 7 against 17 %. See
 test/results/align_tonic_button_7__AE_style_tester_frame_v1.txt.
+Result (2026-11-22, AE_style_tester_frame_v2 best epoch 308 against AE_style_tester_v2 epoch 150): refuted, as expected from a loss
+that knows no key; if anything lower. Pressing button 7 gives the tonic 6.5 % against 11.5 % (-5.0 points, 95 % range -11.5 to
++1.9, lower in 46 of 60 passages); with the note's own button 5.5 % against 5.7 %. The encoder puts 13 % of the tonic notes on
+button 7 against 17 %. See test/results/align_tonic_button_7__AE_style_tester_frame_v2.txt.
 """
 
 import sys

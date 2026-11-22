@@ -3316,9 +3316,26 @@ MODELS_PARAMETERS['AE_style_tester_frame_v1'] = {
 MODELS_PARAMETERS['AE_style_tester_frame_v2'] = {
     **MODELS_PARAMETERS['AE_style_tester_frame_v1'],
     'description': 'AE_style_tester_v2 fine-tuned with a past-only frame loss as its only button loss',
-    'ckpt_file_name': './save_models/AE_style_tester_frame_v2_SET_AFTER_TRAINING.pth',
+    'ckpt_file_name': './save_models/AE_style_tester_frame_v2_best_308_eps_2163_steps_0.4553_val_loss.pth',
     'norm_pos_window': 64,  # notes before each note, itself not included
     'norm_pos_past_only': True,
+}
+
+# 2026-11-22: frame_v2's encoder still sends the button the other way on 0.84 % of consecutive pitch moves (v2 0.38 %),
+# for example at the top of the scale runs of test10 (notes 81, 83, 84 on buttons 15, 13, 14; target 12, 14, 15). The user
+# asked for a term that keeps the height order of the last 6 notes in the buttons. loss_funcs.agreed_order_loss penalises
+# reversed output pairs up to 5 notes apart, but only where the pitch order and frame_v2's target agree, because the
+# target itself reverses the pitch order across zoom changes (exploratory: 0.35 % of consecutive pairs, 1.16 % of pairs
+# 2-5 apart; 43 % of a plain pitch-order penalty would have pulled against the frame loss). Fine-tuned from frame_v2's
+# best checkpoint, not from v2, on the same data and with frame_v2's frame loss; weight 0.1 as the frame loss, so a pair
+# reversed by one button costs as much as a note one button beyond its tolerance.
+# MODEL_NAME=AE_style_tester_frame_v2_order python train_style.py
+MODELS_PARAMETERS['AE_style_tester_frame_v2_order'] = {
+    **MODELS_PARAMETERS['AE_style_tester_frame_v2'],
+    'description': 'AE_style_tester_frame_v2 fine-tuned with an order term on the pairs where pitch and frame target agree',
+    'init_from_ckpt': MODELS_PARAMETERS['AE_style_tester_frame_v2']['ckpt_file_name'],
+    'ckpt_file_name': './save_models/AE_style_tester_frame_v2_order_SET_AFTER_TRAINING.pth',
+    'loss_order': 0.1,
 }
 
 

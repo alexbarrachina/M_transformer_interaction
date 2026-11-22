@@ -40,6 +40,12 @@ buttons knowing only the past. Its drop is 21.0 points larger (95 % range +14.9 
 -10.9 points (range -16.8 to -5.3, lower in 38 of 59). Its button moves 2 or more buttons when the 16 later notes are hidden for
 19 % of the notes against 2 %, and 39 % of its last 16 primer buttons change when the 8 notes are added against 17 %. See
 test/results/button_future_leak__AE_style_tester_frame_v1.txt.
+Result (2026-11-22, AE_style_tester_frame_v2 best epoch 308 against AE_style_tester_v2 epoch 150): claim 1 undecided, claim 2 refuted:
+the past-only target removed frame_v1's leak. frame_v2 gives the real note 75.3 % with the whole passage encoded together and
+74.8 % with buttons knowing only the past, a drop of 0.4 points against v2's 2.2 (-1.7 points, 95 % range -3.8 to +0.4); with
+buttons knowing only the past it gives 10.3 points more than v2 (range +6.8 to +13.9, higher in 46 of 59). Hiding the 16 later
+notes changes 5.5 % of its buttons, none by 2 or more (v2 27 % and 2 %, frame_v1 53 % and 19 %), and adding the 8 notes changes
+3 % of the last 16 primer buttons (v2 17 %, frame_v1 39 %). See test/results/button_future_leak__AE_style_tester_frame_v2.txt.
 """
 
 import sys

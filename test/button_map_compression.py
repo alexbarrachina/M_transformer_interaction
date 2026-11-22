@@ -68,6 +68,14 @@ passages), better than the linear map (94.2 %) because it keeps the button on 84
 by 5.4 % against 9.3 % of the window range (better in 55 of 60); but 10.1 % against 7.0 % of the notes on an end button (+3.1,
 range +2.2 to +4.2, worse in 45 of 60). Pitch moves reversed in buttons 0.8 % against 0.4 %. See
 test/results/button_map_compression__AE_style_tester_frame_v1.txt.
+Result (2026-11-22, AE_style_tester_frame_v2 best epoch 308 against AE_style_tester_v2 epoch 150): claims 1 and 2 supported,
+claim 3 refuted, as frame_v1. Contour 95.4 % against 94.4 % (+1.0 points, 95 % range +0.3 to +1.7, better in 39 of 60
+passages); height distance 6.3 % against 9.3 % (-3.0 points, range -3.9 to -2.2, better in 50 of 60); notes on the first or
+last button 8.7 % against 7.0 % (+1.7 points, range +1.1 to +2.5); frame_v1 had 96.1, 5.4 and 10.1 %. Repeated pitches keep
+their button 88 % of the time against 26 %. In the figures the button peaks one note before the pitch at the top of the runs
+of test1 and test10 (test10: notes 81, 83, 84 on buttons 15, 13, 14, where the past-only target gives 12, 14, 15), also when
+each note is encoded with only the notes before it (exploratory). See test/results/button_map_compression__AE_style_tester_frame_v2.txt
+and its folder of figures.
 """
 
 import sys

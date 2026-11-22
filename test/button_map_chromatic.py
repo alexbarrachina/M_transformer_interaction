@@ -46,6 +46,12 @@ a semitone apart 17.7 % against 10.2 %; notes on button 0 or 18 10.1 % against 7
 per button against 2.6, and only 51 % of notes on their pitch's usual button against 73 %: the same pitch takes more buttons
 within a passage, as a map relative to the 33 notes around each note should. The odd buttons from 7 up hold more notes than
 their even neighbours (exploratory). See test/results/button_map_chromatic__AE_style_tester_frame_v1.txt.
+Result (2026-11-22, AE_style_tester_frame_v2 best epoch 308 against AE_style_tester_v2 epoch 150): claim 1 refuted (no measurable
+difference), claim 2 supported, as frame_v1. Buttons giving a note outside the scale 16.7 % against 15.5 % (+1.1 points, 95 %
+range -1.2 to +3.4); notes on button 0 or 18 8.7 % against 7.0 % (+1.7 points, range +1.0 to +2.5; frame_v1 10.1 %).
+Neighbouring buttons a semitone apart 15.3 % against 10.2 % (frame_v1 17.7 %); 2.2 semitones per button against 2.6 (frame_v1
+2.0); 55 % of notes on their pitch's most frequent button against 73 % (frame_v1 51 %). See
+test/results/button_map_chromatic__AE_style_tester_frame_v2.txt.
 """
 
 import sys

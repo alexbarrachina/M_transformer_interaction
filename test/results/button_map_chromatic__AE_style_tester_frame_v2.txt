@@ -1,0 +1,44 @@
+################################################################
+Date: 2026-11-22 00:51  Commit: 883df15  Uncommitted files: 4
+Present: AE_style_tester_v2 (AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth)
+New: AE_style_tester_frame_v2 (AE_style_tester_frame_v2_best_308_eps_2163_steps_0.4553_val_loss.pth)  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. Passages of 200 + 8 notes, seed 1729. Scale: the 7 most frequent pitch classes of the 200 notes before the moment; an even spread over the 12 pitch classes would give 42 % outside.
+Running time: 79 s
+
+Measure, mean over passages                                 Present      New  New minus present
+Buttons whose most likely note is outside the scale, %        15.53    16.67              +1.14
+Neighbouring buttons a semitone apart, %                      10.19    15.28              +5.09
+Pianist's next 8 notes outside the scale, % (reference)       15.42    15.42              +0.00
+Encoder: notes on button 0 or 18, %                            6.96     8.70              +1.74
+Encoder: different buttons used in 207 notes                  18.62    18.92              +0.30
+Encoder: semitones per button                                  2.61     2.16              -0.45
+Encoder: one-button moves that are a semitone, %              15.80    19.71              +3.92
+Encoder: standard deviation of positions (range -1 to 1)       1.33     0.55              -0.77
+Encoder: notes on their pitch's most frequent button, %       73.47    54.94             -18.53
+
+Exploratory: share of the passages' real notes that the encoder puts on each button, mean over passages, %.
+Button  Present      New
+     0      4.9      4.5
+     1      3.7      3.3
+     2      4.7      2.9
+     3      5.6      4.1
+     4      6.0      3.7
+     5      7.4      6.2
+     6      8.0      4.4
+     7      9.2      6.7
+     8      8.4      4.0
+     9      8.2      8.6
+    10      7.9      6.2
+    11      7.0      7.0
+    12      5.6      4.4
+    13      3.8      9.3
+    14      3.0      5.4
+    15      1.9      6.2
+    16      1.4      2.6
+    17      1.3      6.3
+    18      2.0      4.2
+
+Claim 1, buttons giving a note outside the scale, new minus present: +1.1 points, 95 % range -1.2 to +3.4, p = 3.8e-01, higher in 21 of 60 passages, lower in 14.
+Claim 2, encoder notes on button 0 or 18, new minus present: +1.7 points, 95 % range +1.0 to +2.5, p = 5.0e-05, higher in 40 of 60 passages, lower in 17.
+Result: claim 1 refuted, claim 2 supported.
+

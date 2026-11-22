@@ -38,6 +38,13 @@ new notes slightly more plausible. See test/results/button_moves_generation__AE_
 Result (2026-11-12, AE_style_tester_v2_repeat_fix epoch 78 against AE_style_tester_v2): claims 1 and 3 supported, claim 2
 undecided. Same button repeats 74.1 % against 6.1 %; one-step moves 6.2 % against 4.7 % (+1.5 points, 95 % range -2.1 to +5.2);
 direction 96.7 % against 93.8 %; 1.5 instead of 2.2 semitones per one-step move, 6.2 instead of 9.9 per four-step move.
+Result (2026-11-22, AE_style_tester_frame_v2 best epoch 308 against AE_style_tester_v2 epoch 150, and AE_style_tester_frame_v1 best
+epoch 205 against v2): all three claims supported for both. The same button repeats the note 50.8 % (frame_v1 48.2 %) of the
+time against 6.1 %; one-step moves repeat it 4.4 % (frame_v1 5.2 %) against 4.7 %; the note follows the button's direction 97.7 %
+(frame_v1 96.9 %) against 93.8 %. Mean interval per one-step move 2.0 semitones for both frame models against 2.2, per two-step
+move 3.6 (frame_v1 3.2) against 3.8, per four-step move 7.1 (frame_v1 7.0) against 9.9. The judge finds the notes slightly more
+plausible than v2's (exploratory). v2's numbers equal those of 2026-11-12, so letting generate() take the pattern (2026-11-20)
+kept the test the same. See test/results/button_moves_generation__AE_style_tester_frame_v2.txt and __AE_style_tester_frame_v1.txt.
 """
 
 import sys

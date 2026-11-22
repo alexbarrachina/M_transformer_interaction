@@ -11883,6 +11883,16 @@ class AE_style(Module):
                     tolerance=self.cfg.get('norm_pos_tolerance', None),
                 )
 
+        loss_order = 0
+        if self.cfg.get('loss_order', 0) > 0:
+            # 2026-11-22 (AE_style_tester_frame_v2_order): the height order of notes up to 5 apart, on the pairs where
+            # the pitches and the past-only frame target of norm_pos_window notes agree on it.
+            loss_order = agreed_order_loss(
+                note_tokens['pitch'][:, 1:], e,
+                num_buttons=self.cfg.get('num_buttons', 12),
+                window_size=self.cfg['norm_pos_window'],
+            )
+
         loss_pitch_button = 0
         if self.cfg.get('loss_pitch_button', 0) > 0:
             loss_pitch_button = pitch_button_correlation_loss(
@@ -11958,6 +11968,8 @@ class AE_style(Module):
             loss_total += self.cfg['loss_button_held'] * loss_button_held
         if self.cfg.get('loss_norm_pos', 0) > 0:
             loss_total += self.cfg['loss_norm_pos'] * loss_norm_pos
+        if self.cfg.get('loss_order', 0) > 0:
+            loss_total += self.cfg['loss_order'] * loss_order
         if self.cfg.get('loss_pitch_button', 0) > 0:
             loss_total += self.cfg['loss_pitch_button'] * loss_pitch_button
         if self.cfg.get('loss_button_concentration', 0) > 0:
@@ -11998,6 +12010,7 @@ class AE_style(Module):
             'loss_direction_perc': loss_direction_perc,
             'loss_range': loss_range,
             'loss_tonic': loss_tonic,
+            'loss_order': loss_order,
             **tonic_metrics,
             'loss_interval_perc': loss_interval_perc,
             'loss_shape_perc': loss_shape_perc,

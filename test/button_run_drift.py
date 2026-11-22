@@ -35,6 +35,12 @@ Result (2026-11-20, check run, AE_style_tester_v2 in both roles): every differen
 stopping at 11 the median highest note per run stays at 72-74 (climb +0.2 semitones), stretched at 86-89 (+0.9); its own
 climb stopping at 11 minus stretched is -0.7 semitones (95 % range -2.2 to +1.0). Not run yet with AE_style_tester_frame_v1.
 See test/results/button_run_drift__AE_style_tester_v2.txt.
+Result (2026-11-22, AE_style_tester_frame_v1 best epoch 205 against AE_style_tester_v2 epoch 150): both claims
+supported. With runs stopping at 11 its highest note climbs 12.8 semitones from the first 2 runs to the last 2, against 0.2 (+12.6,
+95 % range +10.6 to +15.1, higher in 20 of 20 passages); stretched it climbs 0.9 (claim 2: +11.9, range +9.7 to +14.7, 20 of 20).
+Result (2026-11-22, AE_style_tester_frame_v2 best epoch 308 against AE_style_tester_v2 epoch 150): both claims refuted: no climb. Stopping at 11 its highest note
+sinks 2.1 semitones against v2's +0.2 (-2.3, range -3.5 to -1.2, lower in 15 of 20 passages), and less than when stretched (+1.3;
+claim 2: -3.4, range -5.1 to -1.8). See test/results/button_run_drift__AE_style_tester_frame_v1.txt and __AE_style_tester_frame_v2.txt.
 """
 
 import sys

@@ -1,0 +1,21 @@
+################################################################
+Date: 2026-11-22 00:53  Commit: 883df15  Uncommitted files: 6
+Present: AE_style_tester_v2 (AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth)
+New: AE_style_tester_frame_v2 (AE_style_tester_frame_v2_best_308_eps_2163_steps_0.4553_val_loss.pth)  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 59 of the 60 shared moments (343 usable pieces, 371 in the file), one chord change each, seed 1729; the others lack the 206 notes before or the 23 after that the windows need. Passages of 200 + 8 notes; encoder windows of 207 notes, 16 notes ahead in the middle condition.
+Running time: 47 s
+
+Means over passages; probabilities of the real note averaged over the 8 notes of each passage.
+Measure                                                             Present      New  New minus present
+Real note, whole passage encoded together, %                          66.67    75.25              +8.59
+Real note, primer alone, later notes knowing 16 ahead, %              59.57    74.88             +15.32
+Real note, primer alone, later notes knowing only the past, %         64.51    74.81             +10.30
+Drop from the whole passage to knowing only the past, points           2.16     0.44              -1.71
+8 notes whose button changes when 16 later notes are hidden, %        27.12     5.51             -21.61
+  by 2 buttons or more, %                                              2.12     0.00              -2.12
+Last 16 primer buttons that change with the 8 notes added, %          16.95     2.65             -14.30
+
+Claim 1, drop from the whole passage to buttons knowing only the past, new minus present: -1.7 points, 95 % range -3.8 to +0.4, p = 1.2e-01, higher in 27 of 59 passages, lower in 32.
+Claim 2, buttons knowing only the past, new minus present: +10.3 points, 95 % range +6.8 to +13.9, p = 5.0e-05, higher in 46 of 59 passages, lower in 13.
+Result: claim 1 undecided, claim 2 refuted.
+

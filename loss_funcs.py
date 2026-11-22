@@ -292,6 +292,19 @@ def recent_frame_loss(pitches, buttons, num_buttons, window_size=64, tolerance=0
         pitches: [batch, seq_len] pitch values
         buttons: [batch, seq_len] encoder output e, -1 = first button, 1 = last, aligned with pitches
     """
+    target = recent_frame_target(pitches, num_buttons, window_size, inner, floor)
+
+    # From here as the frame loss: free within `tolerance` buttons, squared up to one button beyond, linear after, and a
+    # squared pull on outputs past the end buttons.
+    offset = (buttons + 1.0) * 0.5 * (num_buttons - 1) - target
+    beyond = torch.relu(torch.abs(offset) - tolerance)
+    penalty = torch.where(beyond < 1, torch.square(beyond), 2 * beyond - 1)
+    past_end = torch.relu(torch.abs(buttons) - 1) * (num_buttons - 1) / 2
+    return penalty.mean() + torch.square(past_end).mean()
+
+
+def recent_frame_target(pitches, num_buttons, window_size=64, inner=(1, 17), floor=16):
+    """[batch, seq_len] target in buttons of recent_frame_loss (see there) for pitches [batch, seq_len]."""
     pitches = pitches.float()
     seq_len = pitches.shape[1]
     # [batch, seq_len, window_size]: the window_size notes before each note, padded with +inf (for the lowest) or -inf
@@ -302,16 +315,39 @@ def recent_frame_loss(pitches, buttons, num_buttons, window_size=64, tolerance=0
     low, high = torch.where(first, pitches, low), torch.where(first, pitches, high)
     span = (high - low).clamp(min=floor)
     bottom = (low + high - span) / 2
-    target = (inner[0] + (pitches - bottom) / span * (inner[1] - inner[0])).clamp(0, num_buttons - 1)  # in buttons
+    return (inner[0] + (pitches - bottom) / span * (inner[1] - inner[0])).clamp(0, num_buttons - 1)
 
-    # From here as the frame loss: free within `tolerance` buttons, squared up to one button beyond, linear after, and a
-    # squared pull on outputs past the end buttons.
-    offset = (buttons + 1.0) * 0.5 * (num_buttons - 1) - target
-    beyond = torch.relu(torch.abs(offset) - tolerance)
-    penalty = torch.where(beyond < 1, torch.square(beyond), 2 * beyond - 1)
-    past_end = torch.relu(torch.abs(buttons) - 1) * (num_buttons - 1) / 2
-    return penalty.mean() + torch.square(past_end).mean()
 
+def agreed_order_loss(pitches, buttons, num_buttons, window_size=64, max_distance=5):
+    """
+    Keeps the height order of notes up to max_distance apart (every pair inside a window of max_distance + 1 notes) where
+    the pitches and the past-only frame target of recent_frame_loss agree on it (2026-11-22,
+    AE_style_tester_frame_v2_order). A pair whose target order goes against its pitch order, or whose target is tied
+    (both notes beyond the same end of the recent range), is left to the frame loss, so the two terms never pull
+    against each other. Those are mostly pairs across a zoom change, where a new lowest or highest note widens the range.
+    No margin: an output pair in the right order costs 0, and the rounding never reverses an order, so the buttons of an
+    agreed pair cannot reverse once its outputs are in order (they can still share a button). A reversal of r buttons
+    costs as the frame loss does beyond its tolerance: r squared up to one button, linear after. Each pair counts as
+    much as one note of the frame loss.
+    Exploratory, AE_style_tester_frame_v2 on the 60 passages of test/button_map_compression.py: the target reverses the
+    pitch order of 0.35 % of consecutive pairs and 1.16 % of pairs 2-5 notes apart; the encoder's output reverses
+    1.46 % and 1.67 %, and 43 % of a plain pitch-order penalty over 6-note windows would fall on pairs the target
+    reverses too.
+
+    Args:
+        pitches: [batch, seq_len] pitch values
+        buttons: [batch, seq_len] encoder output e, -1 = first button, 1 = last, aligned with pitches
+    """
+    pitches = pitches.float()
+    target = recent_frame_target(pitches, num_buttons, window_size)
+    position = (buttons + 1.0) * 0.5 * (num_buttons - 1)  # in buttons
+    loss = 0
+    for distance in range(1, max_distance + 1):  # pairs (i, i + distance), [batch, seq_len - distance]
+        pitch_order = torch.sign(pitches[:, distance:] - pitches[:, :-distance])
+        agreed = (pitch_order != 0) & (torch.sign(target[:, distance:] - target[:, :-distance]) == pitch_order)
+        reversal = torch.relu(-pitch_order * (position[:, distance:] - position[:, :-distance])) * agreed
+        loss = loss + torch.where(reversal < 1, torch.square(reversal), 2 * reversal - 1).mean()
+    return loss
 
 
 def pitch_button_correlation_loss(pitches, e, window_size=6, tendency_distance=1):

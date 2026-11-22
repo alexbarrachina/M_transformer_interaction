@@ -90,7 +90,7 @@ else:
 
 #model_name = 'AE_style_jokerParam_v1' #AE_style_v1 #AE_style_tester_tonic_v1
 # AE_style_jokerParam_dtime_tester_v1
-model_name = os.environ.get('MODEL_NAME', 'AE_style_tester_frame_v1')
+model_name = os.environ.get('MODEL_NAME', 'AE_style_tester_frame_v2')
 cfg = get_model_hparams(model_name)
 if os.environ.get('CHECKPOINT_PATH'):
     cfg['ckpt_file_name'] = os.environ['CHECKPOINT_PATH']
@@ -107,8 +107,8 @@ sample_midi_path3 = './samples/Chopin_Nocturnes_Op9No1_In_B_Flat_Minor.mid'
 sample_midi_path4 = './samples/Scott_Cyril_Lotus_Land.mid'
 sample_midi_path5 = './samples/Satie_Gymnopedie_No1_no_melody.midi'
 
-sample_midi_path_init = sample_midi_path2
-STYLE_IDX_INIT = 2
+sample_midi_path_init = sample_midi_path1
+STYLE_IDX_INIT = 1
 
 # Style prompts for keys 1, 2, 3 — set each path to a different MIDI to transfer style on-the-fly.
 style_prompt_midi_paths: List[str] = [

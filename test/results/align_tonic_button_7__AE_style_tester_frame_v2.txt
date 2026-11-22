@@ -1,0 +1,18 @@
+################################################################
+Date: 2026-11-22 00:52  Commit: 883df15  Uncommitted files: 5
+Present: AE_style_tester_v2 (AE_style_tester_v2_150_eps_1057_steps_0.6277_loss_0.8724_acc.pth)
+New: AE_style_tester_frame_v2 (AE_style_tester_frame_v2_best_308_eps_2163_steps_0.4553_val_loss.pth)  Device: mps
+Data: giantmidi_full_w_chords_unseen_test.pickle, 60 of the 343 usable pieces (371 in the file), one chord change each. Passages of 200 + 8 notes, seed 1729. Reference pitch on button 7.
+Running time: 62 s
+
+At the 8 notes after the change, means over passages.
+Measure                                                           Present      New  New minus present
+Button 7: probability of the reference pitch, %                     11.50     6.49              -5.02
+Note's own button: probability of the reference pitch, %             5.68     5.52              -0.16
+Button 7: most likely note is the reference pitch, % of notes       13.54     6.67              -6.88
+
+Main, button 7, new minus present: -5.02 points, 95 % range -11.52 to +1.87, p = 1.5e-01, higher in 14 of 60 passages, lower in 46.
+Reference, the note's own button, new minus present: -0.16 points, 95 % range -1.08 to +0.80.
+Exploratory, reference-pitch notes of the passages that the encoder puts on button 7: present 136 of 789 (17 %), new 106 of 789 (13 %).
+Result: refuted (supported if the range lies above zero).
+

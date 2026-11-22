@@ -1140,6 +1140,8 @@ def _train(logger):
                             wandb.log({"loss_button_held": cfg['loss_button_held'] * loss['loss_button_held'].item()}, step=nsteps)
                         if cfg.get('loss_norm_pos', 0) > 0 and 'loss_norm_pos' in loss:
                             wandb.log({"loss_norm_pos": cfg['loss_norm_pos'] * loss['loss_norm_pos'].item()}, step=nsteps)
+                        if cfg.get('loss_order', 0) > 0 and 'loss_order' in loss:
+                            wandb.log({"loss_order": cfg['loss_order'] * loss['loss_order'].item()}, step=nsteps)
                         for metric_name in (
                             'loss_recons_guided', 'loss_recons_joker',
                             'acc_guided', 'acc_joker', 'joker_fraction', 'timing_contribution_ratio'

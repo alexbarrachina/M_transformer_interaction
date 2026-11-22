@@ -36,6 +36,11 @@ Caution: this test encodes the whole passage together, so the buttons before eac
 notes. test/button_future_leak.py found that frame_v1's decoder reads the coming notes from such buttons: when the primer is
 encoded alone and each later button knows only the notes up to it, as a player's press does, frame_v1 gives the real note
 53.6 % against v2's 64.5 % (59 of these passages).
+Result (2026-11-22, AE_style_tester_frame_v2 best epoch 308 against AE_style_tester_v2 epoch 150): supported. The real note gets
+75.7 % against 66.9 % (+8.8 points, 95 % range +5.5 to +12.2, higher in 46 of 60 passages); unlike frame_v1's, this gain stays
+when the buttons know only the past (test/button_future_leak.py: 74.8 % against 64.5 %). The 19 buttons give 17.0 different notes
+against 15.2, but 3.9 % of neighbouring buttons give a lower note than the button below them against 0.6 % (frame_v1 1.7 %).
+See test/results/button_control_strength__AE_style_tester_frame_v2.txt.
 """
 
 import datetime
