@@ -31,6 +31,7 @@ from tkinter.constants import FALSE
 import fluidsynth
 import os
 import atexit
+import signal
 # pip install pyfluidsynth
 from typing import Optional, List, Tuple
 from rtmidi.midiconstants import NOTE_ON, NOTE_OFF
@@ -90,7 +91,8 @@ else:
 
 #model_name = 'AE_style_jokerParam_v1' #AE_style_v1 #AE_style_tester_tonic_v1
 # AE_style_jokerParam_dtime_tester_v1
-model_name = os.environ.get('MODEL_NAME', 'AE_style_tester_frame_v2')
+# AE_style_tester_frame_v2
+model_name = os.environ.get('MODEL_NAME', 'AE_style_tester_v2')
 cfg = get_model_hparams(model_name)
 if os.environ.get('CHECKPOINT_PATH'):
     cfg['ckpt_file_name'] = os.environ['CHECKPOINT_PATH']
@@ -316,8 +318,10 @@ fs.program_select(0, sfid, 0, 0)
 def cleanup():
     """Properly release audio and MIDI resources before exit"""
     print("Cleaning up...")
+    # Only FluidSynth's CoreAudio output is closed. fs.delete() also freed the synth, and a MIDI
+    # note still arriving while quitting then played on freed memory: a crash, with the output open.
     try:
-        fs.delete()
+        fluidsynth.delete_fluid_audio_driver(fs.audio_driver)
     except:
         pass
     try:
@@ -326,6 +330,10 @@ def cleanup():
         pass
 
 atexit.register(cleanup)
+# Closing the terminal (SIGHUP) or a stop button (SIGTERM) ended Python at once, without cleanup,
+# while FluidSynth's CoreAudio output was running. As SystemExit they quit like closing the window.
+signal.signal(signal.SIGHUP, lambda signum, frame: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
 def playNote(note, velocity=100):
     if TRACES:

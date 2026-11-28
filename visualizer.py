@@ -96,7 +96,10 @@ class Visualizer:
         controls_legend: Optional[List[Tuple[str, str]]] = None,
         status_text: str = '',
     ) -> None:
-        pygame.init()
+        # Only the window and its text. pygame.init() also opened pygame.mixer: a second CoreAudio
+        # output, playing silence beside FluidSynth's, that was still open when the scripts quit.
+        pygame.display.init()
+        pygame.font.init()
         self.width = width
         self.roll_height = roll_height
         self.ref_height = roll_height

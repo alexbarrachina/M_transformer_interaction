@@ -25,6 +25,7 @@ import sys
 import fluidsynth
 import os
 import atexit
+import signal
 from typing import Optional, List
 from rtmidi.midiconstants import NOTE_ON, NOTE_OFF
 from rtmidi.midiutil import open_midiinput
@@ -135,8 +136,10 @@ fs.program_select(0, sfid, 0, 0)
 def cleanup():
     """Properly release audio and MIDI resources before exit"""
     print("Cleaning up...")
+    # Only FluidSynth's CoreAudio output is closed. fs.delete() also freed the synth, and a MIDI
+    # note still arriving while quitting then played on freed memory: a crash, with the output open.
     try:
-        fs.delete()
+        fluidsynth.delete_fluid_audio_driver(fs.audio_driver)
     except:
         pass
     try:
@@ -145,6 +148,10 @@ def cleanup():
         pass
 
 atexit.register(cleanup)
+# Closing the terminal (SIGHUP) or a stop button (SIGTERM) ended Python at once, without cleanup,
+# while FluidSynth's CoreAudio output was running. As SystemExit they quit like closing the window.
+signal.signal(signal.SIGHUP, lambda signum, frame: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
 def playNote(note, velocity=100):
     if TRACES:

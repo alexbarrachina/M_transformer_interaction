@@ -8,6 +8,9 @@
 # Where the tonic is in the map is read from the last notes and the buttons the model received
 # for them, so the model evaluates nothing more. Keys that fall beyond the model's first or
 # last button send that end button.
+# The shift also hides buttons at the opposite end. Pressing the end key there again (key 18 twice
+# in a row) pushes the window one button further, until the map's own end. Reaching key 7 undoes the push,
+# so key 7 is always the tonic.
 # Pure Python (no torch), like pitch_reins.py.
 #
 # Copyright 2025 Alex Barrachina
@@ -58,22 +61,25 @@ class TonicShift:
     """The tonic on key 7, the model button taken as its place, and the shift, for one performer.
 
     Call update() before each press with the notes so far and the buttons the model received for
-    them; model_button() then gives the button to send for the pressed key."""
+    them; press() then gives the button to send for the pressed key."""
 
     def __init__(self, tonic_pc: int, num_buttons: int):
         self.tonic_pc: int = tonic_pc % 12
         self.num_buttons: int = num_buttons
         self.tonic: Optional[int] = None       # MIDI pitch on key TONIC_BUTTON; None until the first update()
         self.tonic_button: int = TONIC_BUTTON  # the model button where the tonic is taken to be
+        self.push: int = 0                     # buttons the window is pushed from the shift, towards a shift of 0
+        self.last_key: Optional[int] = None    # the last pressed key, Joker notes not included
 
     @property
     def shift(self) -> int:
-        """Buttons the map is moved by: a key sends the model button key - shift."""
+        """Buttons the map is moved by: a key sends the model button key - shift + push."""
         return TONIC_BUTTON - self.tonic_button
 
     def set_tonic(self, tonic_pc: int) -> None:
         """A new key, or the same one after a reset: the next update() chooses the octave again."""
         self.tonic_pc, self.tonic = tonic_pc % 12, None
+        self.push, self.last_key = 0, None
 
     def _button(self, position: float) -> int:
         return min(max(round(position), 0), self.num_buttons - 1)
@@ -102,14 +108,23 @@ class TonicShift:
             self.tonic_button = self._button(position(self.tonic))
         return (self.tonic, self.tonic_button) != before
 
-    def model_button(self, key: int) -> int:
-        """The button the model receives for a pressed key. Keys beyond the model's ends send its end button."""
-        return min(max(key - self.shift, 0), self.num_buttons - 1)
+    def press(self, key: int) -> int:
+        """The button the model receives for a pressed key, pushing the window first if it is an end key pressed again.
+        Keys beyond the model's ends send its end button."""
+        if (self.push > 0 and key <= TONIC_BUTTON) or (self.push < 0 and key >= TONIC_BUTTON):
+            self.push = 0
+        elif key == self.last_key and key in (0, self.num_buttons - 1):
+            self.push += 1 if key else -1
+        # A push can only reveal buttons the shift hides: it goes towards a shift of 0, and follows the shift if it shrinks.
+        self.push = min(max(self.push, min(self.shift, 0)), max(self.shift, 0))
+        self.last_key = key
+        return min(max(key - self.shift + self.push, 0), self.num_buttons - 1)
 
     def key(self, button: int) -> int:
-        """The key that sends a model button: the reverse of model_button, to show the primer's buttons as keys."""
+        """The key that sends a model button: the reverse of press without a push, to show the primer's buttons as keys."""
         return min(max(button + self.shift, 0), self.num_buttons - 1)
 
     def status(self) -> str:
         tonic = pitch_name(self.tonic) if self.tonic is not None else PC_NAMES[self.tonic_pc]
-        return f"Tonic shift: key {TONIC_BUTTON} = {tonic}, map moved {self.shift:+d} buttons"
+        pushed = f", window pushed {self.push:+d}" if self.push else ""
+        return f"Tonic shift: key {TONIC_BUTTON} = {tonic}, map moved {self.shift:+d} buttons{pushed}"

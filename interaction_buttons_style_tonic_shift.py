@@ -5,9 +5,10 @@
 #
 # Tonic shift (tonic_shift.py): key 7 sends the model the button where its map has the tonic
 # of the key now, and every other key moves by the same number of buttons. The model and its
-# map are unchanged, so key 7 gives the tonic or a note next to it. H / K move the tonic down /
-# up a semitone. The pressed keys, the shift and the tonic of every note are saved next to the
-# performance (save_shift_log).
+# map are unchanged, so key 7 gives the tonic or a note next to it. Pressing an end key (0 or 18)
+# again reaches the buttons the shift hides; reaching key 7 undoes it. H / K move the tonic down /
+# up a semitone. The pressed keys, the shift, the push and the tonic of every note are saved next to
+# the performance (save_shift_log).
 #
 # Keys are read from the visualizer window (as in interaction_buttons_style_chords.py),
 # so it must have focus.
@@ -33,6 +34,7 @@ from tkinter.constants import FALSE
 import fluidsynth
 import os
 import atexit
+import signal
 # pip install pyfluidsynth
 from typing import Optional, List, Tuple
 from rtmidi.midiconstants import NOTE_ON, NOTE_OFF
@@ -91,7 +93,8 @@ else:
 
 #model_name = 'AE_style_jokerParam_v1' #AE_style_v1 #AE_style_tester_tonic_v1
 # AE_style_jokerParam_dtime_tester_v1
-model_name = os.environ.get('MODEL_NAME', 'AE_style_v2')
+# AE_style_v2
+model_name = os.environ.get('MODEL_NAME', 'AE_style_tester_frame_v2')
 cfg = get_model_hparams(model_name)
 if os.environ.get('CHECKPOINT_PATH'):
     cfg['ckpt_file_name'] = os.environ['CHECKPOINT_PATH']
@@ -317,8 +320,10 @@ fs.program_select(0, sfid, 0, 0)
 def cleanup():
     """Properly release audio and MIDI resources before exit"""
     print("Cleaning up...")
+    # Only FluidSynth's CoreAudio output is closed. fs.delete() also freed the synth, and a MIDI
+    # note still arriving while quitting then played on freed memory: a crash, with the output open.
     try:
-        fs.delete()
+        fluidsynth.delete_fluid_audio_driver(fs.audio_driver)
     except:
         pass
     try:
@@ -327,6 +332,10 @@ def cleanup():
         pass
 
 atexit.register(cleanup)
+# Closing the terminal (SIGHUP) or a stop button (SIGTERM) ended Python at once, without cleanup,
+# while FluidSynth's CoreAudio output was running. As SystemExit they quit like closing the window.
+signal.signal(signal.SIGHUP, lambda signum, frame: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
 def playNote(note, velocity=100):
     if TRACES:
@@ -375,10 +384,10 @@ def save_chord_log():
 
 def save_shift_log():
   # One row per generated note, aligned with the saved MIDI's notes: the pressed key (model.joker_button_idx =
-  # Joker note), the shift, and the tonic on key 7 (MIDI pitch). A file of its own, because the readers of
+  # Joker note), the shift, the push, and the tonic on key 7 (MIDI pitch). A file of its own, because the readers of
   # _chords.txt take its last line as the buttons.
   with open(output_midi_name + '_tonic_shift.txt', 'w') as f:
-    f.write("key\tshift\ttonic\n")
+    f.write("key\tshift\tpush\ttonic\n")
     for note in range(i):
       f.write('\t'.join(map(str, shift_log[note])) + "\n")
 
@@ -534,7 +543,7 @@ if cfg.get('timing_enabled', False):
 
 ''' TONIC SHIFT '''
 tonic_shift = TonicShift(primer_tonic(sample_midi_path_init), NUM_BUTTONS)
-shift_log = {}  # generated note -> (pressed key, shift, tonic on key 7), written by save_shift_log
+shift_log = {}  # generated note -> (pressed key, shift, push, tonic on key 7), written by save_shift_log
 
 def update_tonic_shift() -> None:
     """Finds the tonic in the model's map again, from the last CTX_LEN notes and the buttons the model
@@ -610,12 +619,12 @@ def manageNote(note, velocity, event_time=None):
             print("ERROR key_to_button", note)
         # Tonic shift: the pressed key is shown, and the model receives the button its map has in that key's place now.
         update_tonic_shift()
-        but = tonic_shift.model_button(shown_but)
+        but = tonic_shift.press(shown_but)
         if TRACES:
             print("key", shown_but, "model button", but)
 
     b[i+CTX_LEN] = but
-    shift_log[i] = (shown_but, tonic_shift.shift, tonic_shift.tonic)
+    shift_log[i] = (shown_but, tonic_shift.shift, tonic_shift.push, tonic_shift.tonic)
     if live_timing is not None:
         # Features are computed once on arrival, aligned with this button and
         # target pitch. Older notes keep their original timing reference scale.
